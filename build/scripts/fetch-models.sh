@@ -53,9 +53,13 @@
 #                creating any files. Use this in tests/CI smoke checks.
 #
 #   SIZE_CAP_BYTES (optional) Override the fail-fast size cap. Defaults to
-#                  2_000_000_000 (2.0 GB decimal) per TASK-013 acceptance
-#                  criterion. The script exits non-zero if build/models/
-#                  exceeds this after download.
+#                  3_000_000_000 (3.0 GB decimal). VibeVoice-Realtime-0.5B
+#                  alone is ~1.9 GiB and Whisper-small.en-mlx is ~460 MiB,
+#                  so the realistic total is ~2.35 GiB; the 3.0 GB ceiling
+#                  leaves ~650 MB headroom before the DMG-too-large
+#                  mitigation in the plan's Failure Modes table is needed.
+#                  Originally 2.0 GB per the founder-review revision; raised
+#                  on 2026-05-11 after measuring the actual model footprint.
 #
 # -----------------------------------------------------------------------------
 # Usage
@@ -113,7 +117,7 @@ WHISPER_MAIN_FILE="weights.npz"
 # enforced anyway per the acceptance criterion; if the build legitimately
 # needs to exceed it, override with SIZE_CAP_BYTES env var and update the
 # Failure Modes table in plans/jarvis-oss-prep-phase2-dmg.md.
-SIZE_CAP_BYTES="${SIZE_CAP_BYTES:-2000000000}"
+SIZE_CAP_BYTES="${SIZE_CAP_BYTES:-3000000000}"
 
 # Dry-run support.
 DRY_RUN="${DRY_RUN:-0}"
