@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+
+	"github.com/namanchopra/jarvis/internal/paths"
 )
 
 func main() {
@@ -18,21 +21,25 @@ func main() {
 	}
 
 	// Check well-known paths
-	paths := []string{
+	wellKnownPaths := []string{
 		"/opt/homebrew/bin/whisper-cli",
 		"/opt/homebrew/bin/whisper-cpp",
 		"/usr/local/bin/whisper-cli",
 		"/usr/local/bin/whisper-cpp",
 	}
-	for _, p := range paths {
+	for _, p := range wellKnownPaths {
 		if _, err := os.Stat(p); err == nil {
 			fmt.Printf("Found at: %s\n", p)
 		}
 	}
 
-	// Check model
-	home, _ := os.UserHomeDir()
-	modelPath := home + "/.awm/models/ggml-base.en.bin"
+	// Check model — prefer bundled .app models, fall back to ~/.jarvis/models.
+	// (Phase 2 TASK-015 migrated this away from the legacy ~/.awm path.)
+	modelsDir := paths.BundledModelsDir()
+	if modelsDir == "" {
+		modelsDir = paths.ModelsDir()
+	}
+	modelPath := filepath.Join(modelsDir, "ggml-base.en.bin")
 	if info, err := os.Stat(modelPath); err == nil {
 		fmt.Printf("Model found: %s (%d MB)\n", modelPath, info.Size()/1024/1024)
 	} else {

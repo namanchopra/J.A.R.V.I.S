@@ -46,6 +46,50 @@ TRANSCRIBE_INTERVAL_S: Final[float] = 0.5
 MAX_BUFFER_S: Final[float] = 15.0
 SILENCE_FINALIZE_S: Final[float] = 1.0
 
+
+def _resolve_model_dir() -> str | None:
+    """Return the directory where Jarvis bundled models live.
+
+    Priority:
+      1. ``JARVIS_BUNDLED_MODELS_DIR`` env var (set by the Go side in a
+         production .app bundle to ``<Resources>/models``).
+      2. ``~/.jarvis/models`` (dev-mode default after Phase 1 migration).
+      3. ``None`` — caller falls back to the HuggingFace cache / network.
+    """
+    bundled = os.environ.get("JARVIS_BUNDLED_MODELS_DIR")
+    if bundled and os.path.isdir(bundled):
+        return bundled
+    home_jarvis = os.path.expanduser("~/.jarvis/models")
+    if os.path.isdir(home_jarvis):
+        return home_jarvis
+    return None
+
+
+def _resolve_whisper_repo(model_name: str) -> str:
+    """Resolve the mlx-whisper ``path_or_hf_repo`` argument.
+
+    If a local snapshot is bundled (production .app) or cached
+    (``~/.jarvis/models/whisper-*``), return its absolute path so
+    mlx-whisper loads from disk and never hits the network. Otherwise
+    return the canonical HuggingFace repo id and let mlx-whisper download
+    into its own cache.
+
+    Two on-disk layouts are supported under the resolved models dir:
+      - ``whisper-small``       (matches build/scripts/fetch-models.sh)
+      - ``whisper-small.en-mlx`` (matches the upstream HF repo name)
+    """
+    resolved_dir = _resolve_model_dir()
+    if resolved_dir:
+        candidates = [
+            os.path.join(resolved_dir, f"whisper-{model_name}"),
+            os.path.join(resolved_dir, f"whisper-{model_name}-mlx"),
+            os.path.join(resolved_dir, f"whisper-{model_name}.en-mlx"),
+        ]
+        for path in candidates:
+            if os.path.isdir(path):
+                return path
+    return f"mlx-community/whisper-{model_name}-mlx"
+
 # Parakeet model identifiers, tried in order.
 _PARAKEET_MODELS: Final[tuple[str, ...]] = (
     "nvidia/parakeet-tdt-0.6b-v2",
@@ -190,11 +234,11 @@ class LocalWhisperSTT(FrameProcessor):
         try:
             import mlx_whisper  # noqa: F401
 
-            repo = f"mlx-community/whisper-{self._model_name}-mlx"
+            repo = _resolve_whisper_repo(self._model_name)
             # Warm-up transcription to validate the model is usable.
             _dummy = np.zeros(SAMPLE_RATE, dtype=np.float32)
             mlx_whisper.transcribe(_dummy, path_or_hf_repo=repo, language="en")
-            logger.info("Using mlx-whisper backend")
+            logger.info("Using mlx-whisper backend (model=%s)", repo)
             return ("mlx", None)
         except Exception as exc:
             logger.info("mlx-whisper not available (%s), trying faster-whisper", exc)
@@ -417,7 +461,7 @@ class LocalWhisperSTT(FrameProcessor):
         """Transcribe using mlx-whisper (Apple Silicon)."""
         import mlx_whisper
 
-        repo = f"mlx-community/whisper-{self._model_name}-mlx"
+        repo = _resolve_whisper_repo(self._model_name)
         result = mlx_whisper.transcribe(
             audio, path_or_hf_repo=repo, language="en"
         )

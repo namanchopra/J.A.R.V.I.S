@@ -21,10 +21,19 @@ const (
 	whisperModelURL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
 )
 
-// ModelsDir returns the directory where Jarvis stores downloaded model files
-// (~/.jarvis/models/). When the user's home directory cannot be resolved,
-// paths.ModelsDir falls back to "./.jarvis/models" so the app keeps running.
+// ModelsDir returns the directory where Jarvis looks up model files.
+//
+// Resolution order:
+//  1. Bundled models inside a production .app
+//     ("<.app>/Contents/Resources/models") via paths.BundledModelsDir().
+//  2. User-writable dev/runtime location (~/.jarvis/models/) via
+//     paths.ModelsDir(). When the user's home directory cannot be resolved,
+//     paths.ModelsDir falls back to "./.jarvis/models" so the app keeps
+//     running.
 func ModelsDir() string {
+	if bundled := paths.BundledModelsDir(); bundled != "" {
+		return bundled
+	}
 	return paths.ModelsDir()
 }
 

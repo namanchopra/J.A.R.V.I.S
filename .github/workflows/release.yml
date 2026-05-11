@@ -1,12 +1,19 @@
 # Release workflow for Jarvis — builds and publishes a signed DMG on tag push.
 #
-# Status: SKELETON (TASK-007). Most build steps are commented-out placeholders;
-# TASK-027 fills them in once build/scripts/fetch-python.sh,
-# build/scripts/build-daemon-venv.sh, build/scripts/fetch-models.sh,
-# build/darwin/entitlements.plist, and CHANGELOG.md exist.
+# Triggered by pushing a semver tag (e.g. `v0.1.0`). Produces:
+#   - build/bin/Jarvis.app             (Wails-built, codesigned ad-hoc)
+#   - Jarvis-<version>.dmg             (drag-to-Applications installer)
+#   - GitHub Release with the DMG attached and CHANGELOG.md as release notes
 #
-# The current state runs to completion as a no-op on any v*.*.* tag, which lets
-# us validate the workflow trigger + concurrency wiring without producing a DMG.
+# Heavy steps (python-build-standalone fetch, daemon venv build, HF model
+# download, Wails build, codesign, DMG creation) all run on a single macos-14
+# (Apple Silicon, arm64) runner so the produced binaries are native.
+#
+# Secrets required (configure under Settings → Secrets and variables → Actions):
+#   HF_TOKEN  - Hugging Face read-scope token used by build/scripts/fetch-models.sh
+#               to pull microsoft/VibeVoice-Realtime-0.5B and
+#               mlx-community/whisper-small.en-mlx. Public repos still benefit
+#               from the higher rate limit an authenticated token provides.
 
 name: Release
 
@@ -20,17 +27,19 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-# Minimum permissions: read source. release.yml will need `contents: write` for
-# `gh release create` (commented for now — uncomment when TASK-027 enables it).
+# `contents: write` is required for `gh release create` to publish the DMG
+# and release notes against the just-pushed tag.
 permissions:
-  contents: read
-  # contents: write  # TASK-027: required for `gh release create` step below
+  contents: write
 
 jobs:
   build-dmg:
     name: Build and publish Jarvis DMG
     runs-on: macos-14  # Apple Silicon runner (arm64)
-    timeout-minutes: 60
+    # 75 min covers a cold-cache run: ~10 min python-build-standalone +
+    # daemon venv, ~15 min HF model pulls (~2.5 GiB), ~10 min Wails build,
+    # ~5 min codesign + DMG, plus headroom for runner cold starts.
+    timeout-minutes: 75
 
     steps:
       - name: Checkout source
@@ -54,55 +63,93 @@ jobs:
           go install github.com/wailsapp/wails/v2/cmd/wails@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      # ----------------------------------------------------------------------
-      # The steps below are stubbed out until TASK-008/009/013/004/027 land the
-      # supporting build scripts and entitlements. Once those exist, uncomment.
-      # ----------------------------------------------------------------------
+      # ------------------------------------------------------------------
+      # Caches
+      # ------------------------------------------------------------------
+      # python-build-standalone tarball is ~30 MiB but pinned by tag inside
+      # fetch-python.sh, so the script's content is a perfect cache key.
+      - name: Cache python-build-standalone tarball
+        uses: actions/cache@v4
+        with:
+          path: build/python/.fetch-cache
+          key: pbs-${{ runner.os }}-${{ hashFiles('build/scripts/fetch-python.sh') }}
 
-      # - name: Fetch python-build-standalone (TASK-008)
-      #   run: bash build/scripts/fetch-python.sh
+      # uv/pip caches keyed on the daemon requirements file so a dependency
+      # bump invalidates the cache automatically.
+      - name: Cache Python tool caches (uv + pip)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            ~/.cache/pip
+          key: pytools-${{ runner.os }}-${{ hashFiles('scripts/jarvis-daemon/requirements.txt') }}
+          restore-keys: |
+            pytools-${{ runner.os }}-
 
-      # - name: Build relocatable daemon venv (TASK-009)
-      #   run: bash build/scripts/build-daemon-venv.sh
+      # Hugging Face models are ~2.5 GiB total. Keyed on the fetch script
+      # content so model/version bumps in that script bust the cache.
+      - name: Cache bundled AI models
+        uses: actions/cache@v4
+        with:
+          path: build/models
+          key: models-${{ runner.os }}-${{ hashFiles('build/scripts/fetch-models.sh') }}
 
-      # - name: Fetch VibeVoice + Whisper models (TASK-013)
-      #   env:
-      #     HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      #   run: bash build/scripts/fetch-models.sh
+      # ------------------------------------------------------------------
+      # Build pipeline
+      # ------------------------------------------------------------------
+      - name: Fetch python-build-standalone (TASK-008)
+        timeout-minutes: 10
+        run: bash build/scripts/fetch-python.sh
 
-      # - name: Build Jarvis.app (TASK-027)
-      #   run: wails build -platform darwin/arm64 -clean
+      - name: Build relocatable daemon venv (TASK-009)
+        timeout-minutes: 20
+        run: bash build/scripts/build-daemon-venv.sh
 
-      # - name: Codesign Jarvis.app (ad-hoc, hardened runtime) (TASK-004 + TASK-027)
-      #   run: |
-      #     codesign --force --deep \
-      #       --options runtime \
-      #       --entitlements build/darwin/entitlements.plist \
-      #       --sign - \
-      #       build/bin/Jarvis.app
+      # HF_TOKEN must be configured in repo Actions secrets
+      # (Settings → Secrets and variables → Actions → New repository secret).
+      # A read-scope token is sufficient.
+      - name: Fetch VibeVoice + Whisper models (TASK-013)
+        timeout-minutes: 30
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash build/scripts/fetch-models.sh
 
-      # - name: Create DMG (TASK-027)
-      #   run: |
-      #     brew install create-dmg
-      #     VERSION="${GITHUB_REF_NAME#v}"
-      #     create-dmg \
-      #       --volname "Jarvis" \
-      #       --window-size 600 400 \
-      #       --icon-size 100 \
-      #       "Jarvis-${VERSION}.dmg" \
-      #       build/bin/Jarvis.app
+      # The darwin postBuildHook in wails.json automatically invokes
+      # build/scripts/post-build.sh after this step, which rsyncs the
+      # daemon venv and bundled models into Jarvis.app/Contents/Resources/.
+      - name: Build Jarvis.app (TASK-027)
+        timeout-minutes: 20
+        run: wails build -platform darwin/arm64 -clean
 
-      # - name: Publish GitHub Release (TASK-027 + TASK-029)
-      #   env:
-      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      #   run: |
-      #     VERSION="${GITHUB_REF_NAME#v}"
-      #     gh release create "${GITHUB_REF_NAME}" \
-      #       "Jarvis-${VERSION}.dmg" \
-      #       --title "Jarvis ${GITHUB_REF_NAME}" \
-      #       --notes-file CHANGELOG.md
-
-      - name: Skeleton no-op marker
+      - name: Codesign Jarvis.app (ad-hoc, hardened runtime)
+        timeout-minutes: 10
         run: |
-          echo "release.yml skeleton ran for tag ${GITHUB_REF_NAME}."
-          echo "Build steps are stubbed pending TASK-008/009/013/004/027."
+          codesign --force --deep \
+            --options runtime \
+            --entitlements build/darwin/entitlements.plist \
+            --sign - \
+            build/bin/Jarvis.app
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Create DMG
+        timeout-minutes: 10
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          create-dmg \
+            --volname "Jarvis" \
+            --window-size 600 400 \
+            --icon-size 100 \
+            "Jarvis-${VERSION}.dmg" \
+            build/bin/Jarvis.app
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "${GITHUB_REF_NAME}" \
+            "Jarvis-${VERSION}.dmg" \
+            --title "Jarvis ${GITHUB_REF_NAME}" \
+            --notes-file CHANGELOG.md
