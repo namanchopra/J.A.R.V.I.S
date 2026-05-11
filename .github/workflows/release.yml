@@ -126,10 +126,9 @@ jobs:
       # the model weights to ~/.cache/huggingface on first launch via the
       # same HuggingFace mechanism Kokoro already uses.
       - name: Fetch VibeVoice voice preset (light bundle)
-        env:
-          LIGHT_BUNDLE: '1'
         timeout-minutes: 5
         env:
+          LIGHT_BUNDLE: '1'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash build/scripts/fetch-models.sh
 
