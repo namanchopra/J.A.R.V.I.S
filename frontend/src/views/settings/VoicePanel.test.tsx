@@ -127,6 +127,67 @@ describe('VoicePanel TASK-020 (mic device + wake word)', () => {
   })
 })
 
+describe('VoicePanel v0.1.2 (cfg-persisted voice settings)', () => {
+  // v0.1.2 migrates the five voice fields from local useState() into cfg.
+  // The fields are: ttsProvider, sttModel, voicePreset, micInputDevice,
+  // wakeWordEnabled. Each must be read from cfg with a default and written
+  // through setCfg. We pin on the read sites + write sites independently
+  // so a regression that drops either surfaces here.
+
+  it('reads ttsProvider from cfg with a default fallback', () => {
+    // The pattern is: `vcfg.ttsProvider ?? 'vibevoice'`. Allow whitespace
+    // and aliasing through a const named vcfg or cfg as a superset cast.
+    expect(SOURCE).toMatch(/\.ttsProvider\s*\?\?\s*['"]vibevoice['"]/)
+  })
+
+  it('reads sttModel from cfg with a default fallback', () => {
+    expect(SOURCE).toMatch(/\.sttModel\s*\?\?\s*['"]whisper-small\.en['"]/)
+  })
+
+  it('reads voicePreset from cfg', () => {
+    expect(SOURCE).toMatch(/\.voicePreset\s*\?\?/)
+  })
+
+  it('reads micInputDevice from cfg', () => {
+    expect(SOURCE).toMatch(/\.micInputDevice\s*\?\?/)
+  })
+
+  it('reads wakeWordEnabled from cfg with default-true', () => {
+    // Default true: pattern `vcfg.wakeWordEnabled ?? true`.
+    expect(SOURCE).toMatch(/\.wakeWordEnabled\s*\?\?\s*true/)
+  })
+
+  it('writes each v0.1.2 field through setCfg (not local useState)', () => {
+    // setCfg invocations spread `cfg` and merge the new field. We grep for
+    // each field name being spread into a setCfg call so a useState-style
+    // setter can't satisfy the test by accident.
+    expect(SOURCE).toMatch(/ttsProvider:\s*next/)
+    expect(SOURCE).toMatch(/sttModel:\s*next/)
+    expect(SOURCE).toMatch(/voicePreset:\s*next/)
+    expect(SOURCE).toMatch(/micInputDevice:\s*next/)
+    expect(SOURCE).toMatch(/wakeWordEnabled:\s*next/)
+  })
+
+  it('no longer uses useState<TTSOption["value"]> for ttsProvider (cfg-only)', () => {
+    // The pre-v0.1.2 panel had:
+    //   const [ttsProvider, setTtsProvider] = useState<TTSOption['value']>(...)
+    // After migration the setter is a useCallback bound to setCfg, not a
+    // useState destructure. We assert the legacy pattern is absent.
+    expect(SOURCE).not.toMatch(/useState<TTSOption\['value'\]>/)
+    expect(SOURCE).not.toMatch(/useState<STTOption\['value'\]>/)
+  })
+
+  it('declares a VoiceConfig superset cast for the new fields', () => {
+    // Bindings haven't been regenerated; the file declares a superset type
+    // that adds the v0.1.2 properties onto Config. Pin on the type name
+    // and at least three of the five new properties.
+    expect(SOURCE).toMatch(/type\s+VoiceConfig\s*=/)
+    expect(SOURCE).toMatch(/ttsProvider\?:/)
+    expect(SOURCE).toMatch(/sttModel\?:/)
+    expect(SOURCE).toMatch(/voicePreset\?:/)
+  })
+})
+
 describe('VoicePanel structural integrity', () => {
   it('keeps the <JarvisSettings/> shim mounted (TASK-016 regression)', () => {
     expect(SOURCE).toMatch(/<JarvisSettings\s/)

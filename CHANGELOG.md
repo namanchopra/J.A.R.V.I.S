@@ -15,6 +15,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.1.2] - 2026-05-12
+
+### Added
+- **Runtime reconfiguration without quitting.** Eight settings were stored in component-local React state in v0.1.1 and never persisted to disk: `ttsProvider`, `sttModel`, `voicePreset`, `micInputDevice`, `wakeWordEnabled`, `googleAPIKey`, `anthropicAPIKey`, `cartesiaAPIKey`. They now live in `~/.jarvis/config.json` and survive app restarts.
+- **TTS provider switcher actually switches.** The Python daemon now reads `cfg.ttsProvider` and instantiates the chosen TTS service (VibeVoice / Kokoro / Cartesia) rather than always running the hardcoded fallback chain. Same for `cfg.sttModel` (whisper-small.en / whisper-tiny.en / faster-whisper), `cfg.voicePreset`, `cfg.micInputDevice`, and `cfg.wakeWordEnabled`. Missing or invalid values fall back gracefully with a warning log.
+- **"Apply now / Apply later" banner.** When the user changes a daemon-relevant setting and clicks Save, the settings overlay surfaces an amber **▸ DAEMON RESTART REQUIRED** banner with two buttons: **Apply now** triggers a new `RestartJarvis()` Wails binding that gracefully stops and relaunches the Python daemon (~3s blip); **Apply later** dismisses the banner so the changes take effect on the next manual quit/relaunch.
+- New Wails bindings: `RestartJarvis() error` and `DaemonRestartNeeded(old, next Config) bool`.
+- New `config.SaveResult` struct returned by `SaveConfig` — exposes `daemonRestartNeeded` so the frontend knows when to surface the banner.
+- Daemon-side input device resolution: `cfg.micInputDevice` (a human-readable device name from `GetAudioInputDevices`) maps to a PyAudio index via exact-then-substring match. Unmatched names fall back to the system default.
+- `cfg.wakeWordEnabled === false` enables true always-listening mode: the `WakeWordGate` processor is omitted from the pipeline entirely, the mic feeds STT directly.
+- 23 new Python tests for the daemon's v0.1.2 config accessors and 20 new vitest source-level tests for the frontend cfg-migration + restart banner.
+
+### Changed
+- `SaveConfig(cfg)` now returns `config.SaveResult` (`{ daemonRestartNeeded: bool }`) instead of just an error. The internal mobile API caller discards the result.
+- `internal/api/handlers_settings.go`'s `SettingsProvider.SaveConfig` interface signature updated to match.
+
+### Fixed
+- Frontend settings panels were storing user choices in `useState` instead of `cfg`. Every "save" was silently dropping eight fields on the floor. Promoted to cfg-backed reads/writes; user picks now survive app restarts.
+
 ## [0.1.1] - 2026-05-12
 
 ### Added

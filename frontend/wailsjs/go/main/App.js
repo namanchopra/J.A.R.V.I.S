@@ -406,6 +406,10 @@ export function OpenApp(arg1) {
   return window['go']['main']['App']['OpenApp'](arg1);
 }
 
+export function OpenDaemonLog() {
+  return window['go']['main']['App']['OpenDaemonLog']();
+}
+
 export function OpenFileForImport() {
   return window['go']['main']['App']['OpenFileForImport']();
 }

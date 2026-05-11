@@ -28,13 +28,13 @@ func (m *mockSettingsProvider) GetConfig() (config.Config, error) {
 	return m.cfg, nil
 }
 
-func (m *mockSettingsProvider) SaveConfig(cfg config.Config) error {
+func (m *mockSettingsProvider) SaveConfig(cfg config.Config) (config.SaveResult, error) {
 	if m.saveErr != nil {
-		return m.saveErr
+		return config.SaveResult{}, m.saveErr
 	}
 	m.cfg = cfg
 	m.saved = &cfg
-	return nil
+	return config.SaveResult{}, nil
 }
 
 // --- Helpers ---

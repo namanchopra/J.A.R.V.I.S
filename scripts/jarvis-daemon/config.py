@@ -11,9 +11,36 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
-logger = logging.getLogger("jarvis-daemon")
+logger = logging.getLogger("jarvis-daemon.config")
+
+# ---------------------------------------------------------------------------
+# v0.1.2 voice-config defaults
+# ---------------------------------------------------------------------------
+# These keep the daemon behaving exactly like v0.1.1 when no new keys are set.
+# Per-provider defaults are looked up in ``_VOICE_PRESET_DEFAULTS`` below.
+
+_DEFAULT_TTS_PROVIDER: Final[str] = "vibevoice"
+_DEFAULT_STT_MODEL: Final[str] = "whisper-small.en"
+_DEFAULT_WAKE_WORD_ENABLED: Final[bool] = True
+
+# Valid choices — anything outside these silently falls back to the default
+# (per task spec: "bad values silently fall back to defaults with a warning log").
+_VALID_TTS_PROVIDERS: Final[frozenset[str]] = frozenset(
+    {"vibevoice", "kokoro", "cartesia"}
+)
+_VALID_STT_MODELS: Final[frozenset[str]] = frozenset(
+    {"whisper-small.en", "whisper-tiny.en", "faster-whisper"}
+)
+
+# Per-provider default voice preset. Returned only when the user has NOT set
+# ``voicePreset`` in config (so the daemon keeps its legacy hardcoded voices).
+_VOICE_PRESET_DEFAULTS: Final[dict[str, str]] = {
+    "vibevoice": "en-Carter_man",
+    "kokoro": "af_sarah",
+    "cartesia": "1463a4e1-56a1-4b41-b257-728d56e93605",
+}
 
 # Default config values for jarvis-relevant fields.
 _DEFAULTS: dict[str, Any] = {
@@ -136,3 +163,159 @@ def get_auth_token(config: dict[str, Any] | None = None) -> str:
     if config is None:
         config = load_config()
     return str(config.get("mobileAPIToken", ""))
+
+
+# ---------------------------------------------------------------------------
+# v0.1.2 accessors — TTS / STT / voice / mic / wake word
+# ---------------------------------------------------------------------------
+# Each accessor is a pure function that takes the already-loaded config dict.
+# Unknown / blank values silently fall back to the default and emit a
+# debug-level note (the task spec forbids hard validation here).
+
+
+def get_tts_provider(config: dict[str, Any] | None = None) -> str:
+    """Return the configured TTS provider.
+
+    One of ``"vibevoice"``, ``"kokoro"``, ``"cartesia"``. Falls back to
+    ``"vibevoice"`` when the key is missing, blank, or unrecognised.
+    """
+    if config is None:
+        config = load_config()
+    raw = config.get("ttsProvider")
+    if not isinstance(raw, str) or not raw.strip():
+        return _DEFAULT_TTS_PROVIDER
+    value = raw.strip().lower()
+    if value not in _VALID_TTS_PROVIDERS:
+        logger.warning(
+            "Unknown ttsProvider=%r, falling back to %s",
+            raw,
+            _DEFAULT_TTS_PROVIDER,
+        )
+        return _DEFAULT_TTS_PROVIDER
+    return value
+
+
+def get_stt_model(config: dict[str, Any] | None = None) -> str:
+    """Return the configured STT model identifier.
+
+    One of ``"whisper-small.en"``, ``"whisper-tiny.en"``, ``"faster-whisper"``.
+    Falls back to ``"whisper-small.en"`` when missing or unrecognised.
+    """
+    if config is None:
+        config = load_config()
+    raw = config.get("sttModel")
+    if not isinstance(raw, str) or not raw.strip():
+        return _DEFAULT_STT_MODEL
+    value = raw.strip()
+    if value not in _VALID_STT_MODELS:
+        logger.warning(
+            "Unknown sttModel=%r, falling back to %s",
+            raw,
+            _DEFAULT_STT_MODEL,
+        )
+        return _DEFAULT_STT_MODEL
+    return value
+
+
+def get_voice_preset(
+    config: dict[str, Any] | None = None,
+    provider: str | None = None,
+) -> str | None:
+    """Return the configured voice preset, or ``None`` if unset.
+
+    When ``provider`` is given and ``voicePreset`` is unset, returns the
+    provider's bundled default (so callers can plug it directly into the TTS
+    constructor without an extra ``or`` chain). When ``provider`` is ``None``
+    and the user hasn't set ``voicePreset``, returns ``None`` — callers
+    should then keep their existing per-provider defaults.
+    """
+    if config is None:
+        config = load_config()
+    raw = config.get("voicePreset")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    if provider is None:
+        return None
+    return _VOICE_PRESET_DEFAULTS.get(provider)
+
+
+def get_mic_device(config: dict[str, Any] | None = None) -> str | None:
+    """Return the user-selected microphone device name, or ``None`` if unset.
+
+    The returned value is a free-form string (e.g. ``"MacBook Pro Microphone"``)
+    that the daemon maps to a PyAudio device index at startup. ``None`` /
+    empty string means "use the OS default device".
+    """
+    if config is None:
+        config = load_config()
+    raw = config.get("micInputDevice")
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    return raw or None
+
+
+def get_wake_word_enabled(config: dict[str, Any] | None = None) -> bool:
+    """Return whether wake-word gating is enabled.
+
+    Defaults to ``True`` to preserve legacy behaviour (mic feeds through the
+    WakeWordGate). When set to ``False``, ``main.py`` will skip inserting the
+    gate entirely so the mic feeds STT directly (always-listening mode).
+    """
+    if config is None:
+        config = load_config()
+    raw = config.get("wakeWordEnabled")
+    if raw is None:
+        return _DEFAULT_WAKE_WORD_ENABLED
+    if isinstance(raw, bool):
+        return raw
+    # Permissive coercion — JSON booleans round-trip cleanly but tolerate the
+    # occasional ``"true"`` / ``"false"`` string a hand-edited config might ship.
+    if isinstance(raw, str):
+        return raw.strip().lower() not in {"false", "0", "no", "off", ""}
+    return bool(raw)
+
+
+# ---------------------------------------------------------------------------
+# v0.1.2 accessors — additive API keys
+# ---------------------------------------------------------------------------
+# These are intentionally additive: existing ``jarvis*`` / ``dex*`` keys keep
+# working unchanged. ``main.py`` exports the values to env vars so SDK clients
+# that read from the environment (Anthropic, Google AI Studio) pick them up.
+
+
+def get_google_api_key(config: dict[str, Any] | None = None) -> str:
+    """Return the Google AI Studio API key from config (``""`` if unset)."""
+    if config is None:
+        config = load_config()
+    return str(config.get("googleAPIKey") or "").strip()
+
+
+def get_anthropic_api_key(config: dict[str, Any] | None = None) -> str:
+    """Return the direct Anthropic API key from config (``""`` if unset).
+
+    Distinct from ``jarvisAPIKey`` / ``dexAPIKey`` which may hold an
+    OpenRouter ``sk-or-`` key or other provider token. This helper only
+    looks at the dedicated ``anthropicAPIKey`` slot.
+    """
+    if config is None:
+        config = load_config()
+    return str(config.get("anthropicAPIKey") or "").strip()
+
+
+def get_cartesia_api_key(config: dict[str, Any] | None = None) -> str:
+    """Return the Cartesia TTS API key.
+
+    Checks ``cartesiaAPIKey`` in config first, then falls back to the
+    ``CARTESIA_API_KEY`` env var so power users running the daemon from a
+    shell can override without editing config. Returns ``""`` if neither
+    source has a value.
+    """
+    import os
+
+    if config is None:
+        config = load_config()
+    from_config = str(config.get("cartesiaAPIKey") or "").strip()
+    if from_config:
+        return from_config
+    return os.environ.get("CARTESIA_API_KEY", "").strip()

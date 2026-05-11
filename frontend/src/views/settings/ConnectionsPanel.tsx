@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SettingsPanelProps } from './types'
+import type { config as cfgModels } from '../../../wailsjs/go/models'
 import { ValidateAPIKey, IsOllamaRunning } from '../../../wailsjs/go/main/App'
 
 // ---------------------------------------------------------------------------
@@ -16,15 +17,26 @@ import { ValidateAPIKey, IsOllamaRunning } from '../../../wailsjs/go/main/App'
 //               ⚠ Ollama not running) driven by IsOllamaRunning() + the
 //               same key presence the API-key rows display.
 //
-// Persistence notes:
+// Persistence notes (v0.1.2):
 //   - OpenRouter / ElevenLabs / Picovoice keys live in cfg today
 //     (jarvisAPIKey, jarvisElevenLabsKey, jarvisPicovoiceKey).
-//   - Google / Anthropic / Cartesia don't have config slots yet — the
-//     plan adds them in a later wave (the Connections panel can't touch
-//     internal/config/config.go in this task). We keep them as local
-//     component state for now so the UI is wired end-to-end; a follow-up
-//     will promote them into cfg + Save.
+//   - Google / Anthropic / Cartesia were previously local-only state; in
+//     v0.1.2 they migrate to cfg.googleAPIKey / cfg.anthropicAPIKey /
+//     cfg.cartesiaAPIKey. The Go agent's parallel track adds those slots
+//     onto internal/config/config.go.Config. Until `wails generate module`
+//     re-emits models.ts, the new fields are accessed via a typed
+//     ConnectionsConfig superset cast (see below).
 // ---------------------------------------------------------------------------
+
+// ConnectionsConfig — superset of the generated config.Config that knows
+// about the v0.1.2 fields. Once `wails generate module` runs against the
+// Go agent's PR, these become declared properties on config.Config itself
+// and this superset is redundant.
+type ConnectionsConfig = cfgModels.Config & {
+  googleAPIKey?: string
+  anthropicAPIKey?: string
+  cartesiaAPIKey?: string
+}
 
 export interface ConnectionsPanelProps extends SettingsPanelProps {
   /** True while a .claude sync is in flight (drives button disabled state). */
@@ -215,13 +227,12 @@ export function ConnectionsPanel({
   onSync,
 }: ConnectionsPanelProps): React.ReactElement {
   // -------------------------------------------------------------------------
-  // Local state for keys that don't have a cfg slot yet (google / anthropic /
-  // cartesia). These reset to empty on remount; the panel's stable lifetime
-  // (parent uses `hidden` not unmount) keeps them around during a session.
+  // v0.1.2: google / anthropic / cartesia keys now persist via cfg
+  // (cfg.googleAPIKey / cfg.anthropicAPIKey / cfg.cartesiaAPIKey). We read
+  // and write them through the ConnectionsConfig superset cast — once
+  // `wails generate module` regenerates the bindings, the cast vanishes.
   // -------------------------------------------------------------------------
-  const [googleKey, setGoogleKey] = useState<string>('')
-  const [anthropicKey, setAnthropicKey] = useState<string>('')
-  const [cartesiaKey, setCartesiaKey] = useState<string>('')
+  const ccfg = cfg as ConnectionsConfig
 
   // Per-provider validation state. Keyed by ProviderId so adding a row is
   // a one-liner above + the lookup here.
@@ -257,14 +268,14 @@ export function ConnectionsPanel({
     }
   }, [])
 
-  // Reads the current value of any provider's key from either cfg or local
-  // state. Used by ApiKeyRow + the LLM dropdown availability check.
+  // Reads the current value of any provider's key from cfg. All six keys
+  // are now persisted via cfg (v0.1.2 migration).
   function readKey(provider: ProviderId): string {
     switch (provider) {
       case 'openrouter': return cfg.jarvisAPIKey ?? ''
-      case 'google':     return googleKey
-      case 'anthropic':  return anthropicKey
-      case 'cartesia':   return cartesiaKey
+      case 'google':     return ccfg.googleAPIKey ?? ''
+      case 'anthropic':  return ccfg.anthropicAPIKey ?? ''
+      case 'cartesia':   return ccfg.cartesiaAPIKey ?? ''
       case 'elevenlabs': return cfg.jarvisElevenLabsKey ?? ''
       case 'picovoice':  return cfg.jarvisPicovoiceKey ?? ''
     }
@@ -272,12 +283,24 @@ export function ConnectionsPanel({
 
   function writeKey(provider: ProviderId, next: string): void {
     switch (provider) {
-      case 'openrouter': setCfg({ ...cfg, jarvisAPIKey: next });          break
-      case 'google':     setGoogleKey(next);                              break
-      case 'anthropic':  setAnthropicKey(next);                           break
-      case 'cartesia':   setCartesiaKey(next);                            break
-      case 'elevenlabs': setCfg({ ...cfg, jarvisElevenLabsKey: next });   break
-      case 'picovoice':  setCfg({ ...cfg, jarvisPicovoiceKey: next });    break
+      case 'openrouter':
+        setCfg({ ...cfg, jarvisAPIKey: next })
+        break
+      case 'google':
+        setCfg({ ...(cfg as ConnectionsConfig), googleAPIKey: next } as cfgModels.Config)
+        break
+      case 'anthropic':
+        setCfg({ ...(cfg as ConnectionsConfig), anthropicAPIKey: next } as cfgModels.Config)
+        break
+      case 'cartesia':
+        setCfg({ ...(cfg as ConnectionsConfig), cartesiaAPIKey: next } as cfgModels.Config)
+        break
+      case 'elevenlabs':
+        setCfg({ ...cfg, jarvisElevenLabsKey: next })
+        break
+      case 'picovoice':
+        setCfg({ ...cfg, jarvisPicovoiceKey: next })
+        break
     }
     // Mutating the key invalidates any prior result. Reset the pill to
     // idle so the user re-validates the new value before trusting it.
@@ -343,7 +366,13 @@ export function ConnectionsPanel({
       return { option: opt, available: true, reason: 'available' }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ollamaRunning, cfg.jarvisAPIKey, googleKey, anthropicKey, cartesiaKey])
+  }, [
+    ollamaRunning,
+    cfg.jarvisAPIKey,
+    ccfg.googleAPIKey,
+    ccfg.anthropicAPIKey,
+    ccfg.cartesiaAPIKey,
+  ])
 
   const [selectedLLM, setSelectedLLM] = useState<string>(LLM_OPTIONS[0]!.value)
   const selectedAvailability = llmAvailability.find((a) => a.option.value === selectedLLM)

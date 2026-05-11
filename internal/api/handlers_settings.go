@@ -11,9 +11,14 @@ import (
 
 // SettingsProvider abstracts the application layer so this package never imports
 // the main package directly. Implementors typically wrap config.Load / config.Save.
+//
+// SaveConfig returns a result carrying a "daemon restart needed?" hint plus
+// an error. The mobile API doesn't act on the hint — there's no way to
+// trigger a daemon restart from a phone — but the signature has to match
+// the Wails binding on App so a single App struct can satisfy both layers.
 type SettingsProvider interface {
 	GetConfig() (config.Config, error)
-	SaveConfig(cfg config.Config) error
+	SaveConfig(cfg config.Config) (config.SaveResult, error)
 }
 
 // SettingsResponse is the public view of configuration. It deliberately excludes
@@ -143,8 +148,10 @@ func (h *settingsHandler) putSettings(c echo.Context) error {
 		cfg.DefaultCommand = *req.DefaultCommand
 	}
 
-	// Persist the updated config.
-	if err := h.app.SaveConfig(cfg); err != nil {
+	// Persist the updated config. The mobile API ignores the
+	// DaemonRestartNeeded hint because there's no UX surface on the phone
+	// to trigger a restart — only the desktop frontend acts on it.
+	if _, err := h.app.SaveConfig(cfg); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "failed to save settings",
 		})

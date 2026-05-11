@@ -2896,13 +2896,7 @@ func (a *App) GetConfig() (config.Config, error) {
 	return *cfg, nil
 }
 
-// SaveConfig persists the Jarvis configuration to ~/.jarvis/config.json.
-func (a *App) SaveConfig(cfg config.Config) error {
-	if err := config.Save(&cfg); err != nil {
-		return fmt.Errorf("SaveConfig: %w", err)
-	}
-	return nil
-}
+// SaveConfig and DaemonRestartNeeded live in app_settings_apply.go.
 
 // MobileConnectionInfo holds the data the Settings UI needs to display the
 // "Mobile App" section: LAN IPs, the API port, and the Bearer token.

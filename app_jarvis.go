@@ -136,6 +136,33 @@ func (a *App) StopJarvis() {
 	}
 }
 
+// RestartJarvis stops the running Python daemon (if any) and immediately
+// starts a fresh one. Used by the frontend after the user changes a
+// daemon-relevant setting (TTS provider, STT model, API key, etc.) so the
+// new config takes effect without a full app restart.
+//
+// Crucially, StopJarvis sets jarvisRestarts = maxJarvisRestarts as a fuse
+// to keep the monitor goroutine from auto-restarting on a graceful stop;
+// RestartJarvis must clear that fuse (reset to 0) before calling
+// StartJarvis or the new daemon would never come up. Errors from
+// StopJarvis are not returned (StopJarvis itself returns nothing — it
+// best-effort signals + waits/kills); errors from StartJarvis are wrapped
+// with the method-name prefix per repo convention.
+func (a *App) RestartJarvis() error {
+	a.StopJarvis()
+
+	// Clear the no-restart fuse that StopJarvis set.
+	a.jarvisMu.Lock()
+	a.jarvisRestarts = 0
+	a.jarvisMu.Unlock()
+
+	if err := a.StartJarvis(); err != nil {
+		return fmt.Errorf("RestartJarvis: %w", err)
+	}
+	slog.Info("jarvis daemon restarted via RestartJarvis binding")
+	return nil
+}
+
 // monitorJarvisDaemon waits for the daemon process to exit. If it exits
 // unexpectedly (i.e. a.jarvisProcess is still set), it attempts to restart
 // with exponential-ish back-off up to maxJarvisRestarts times.

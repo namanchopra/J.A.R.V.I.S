@@ -198,6 +198,184 @@ func TestDefaultConfigNoLiveKit(t *testing.T) {
 	}
 }
 
+// TestConfigRoundTripV012Fields asserts that the 8 voice/API-key fields
+// promoted in v0.1.2 (ttsProvider, sttModel, voicePreset, micInputDevice,
+// wakeWordEnabled, googleAPIKey, anthropicAPIKey, cartesiaAPIKey) marshal to
+// JSON and unmarshal back into an equivalent Config with all values intact.
+// This is the v0.1.2 acceptance: "SaveConfig actually persists them".
+func TestConfigRoundTripV012Fields(t *testing.T) {
+	wakeOn := true
+
+	orig := Config{
+		TtsProvider:     "vibevoice",
+		SttModel:        "whisper-small.en",
+		VoicePreset:     "en-Carter_man",
+		MicInputDevice:  "AppleHDA:1",
+		WakeWordEnabled: &wakeOn,
+		GoogleAPIKey:    "google-key-123",
+		AnthropicAPIKey: "sk-ant-anthropic-456",
+		CartesiaAPIKey:  "cartesia-key-789",
+	}
+
+	data, err := json.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.TtsProvider != orig.TtsProvider {
+		t.Errorf("TtsProvider: got %q, want %q", got.TtsProvider, orig.TtsProvider)
+	}
+	if got.SttModel != orig.SttModel {
+		t.Errorf("SttModel: got %q, want %q", got.SttModel, orig.SttModel)
+	}
+	if got.VoicePreset != orig.VoicePreset {
+		t.Errorf("VoicePreset: got %q, want %q", got.VoicePreset, orig.VoicePreset)
+	}
+	if got.MicInputDevice != orig.MicInputDevice {
+		t.Errorf("MicInputDevice: got %q, want %q", got.MicInputDevice, orig.MicInputDevice)
+	}
+	if got.WakeWordEnabled == nil {
+		t.Errorf("WakeWordEnabled: got nil, want pointer to true")
+	} else if *got.WakeWordEnabled != true {
+		t.Errorf("WakeWordEnabled: got %v, want true", *got.WakeWordEnabled)
+	}
+	if got.GoogleAPIKey != orig.GoogleAPIKey {
+		t.Errorf("GoogleAPIKey: got %q, want %q", got.GoogleAPIKey, orig.GoogleAPIKey)
+	}
+	if got.AnthropicAPIKey != orig.AnthropicAPIKey {
+		t.Errorf("AnthropicAPIKey: got %q, want %q", got.AnthropicAPIKey, orig.AnthropicAPIKey)
+	}
+	if got.CartesiaAPIKey != orig.CartesiaAPIKey {
+		t.Errorf("CartesiaAPIKey: got %q, want %q", got.CartesiaAPIKey, orig.CartesiaAPIKey)
+	}
+
+	// Sanity-check that the JSON contains the expected lowercase camelCase keys.
+	outStr := string(data)
+	for _, want := range []string{
+		`"ttsProvider":"vibevoice"`,
+		`"sttModel":"whisper-small.en"`,
+		`"voicePreset":"en-Carter_man"`,
+		`"micInputDevice":"AppleHDA:1"`,
+		`"wakeWordEnabled":true`,
+		`"googleAPIKey":"google-key-123"`,
+		`"anthropicAPIKey":"sk-ant-anthropic-456"`,
+		`"cartesiaAPIKey":"cartesia-key-789"`,
+	} {
+		if !strings.Contains(outStr, want) {
+			t.Errorf("marshaled JSON missing %q:\n%s", want, outStr)
+		}
+	}
+}
+
+// TestConfigRoundTripWakeWordExplicitlyFalse verifies the tri-state pointer
+// pattern for WakeWordEnabled: explicitly setting it to false must
+// round-trip as a non-nil pointer to false (distinguishable from "unset").
+func TestConfigRoundTripWakeWordExplicitlyFalse(t *testing.T) {
+	wakeOff := false
+	orig := Config{WakeWordEnabled: &wakeOff}
+
+	data, err := json.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"wakeWordEnabled":false`) {
+		t.Errorf("marshaled JSON missing wakeWordEnabled:false:\n%s", string(data))
+	}
+
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.WakeWordEnabled == nil {
+		t.Fatalf("WakeWordEnabled: got nil, want pointer to false")
+	}
+	if *got.WakeWordEnabled != false {
+		t.Errorf("WakeWordEnabled: got %v, want false", *got.WakeWordEnabled)
+	}
+}
+
+// TestConfigBackwardCompatUnmarshalsOldShape verifies that an old config
+// file from v0.1.1 or earlier (which has none of the 8 new v0.1.2 fields)
+// unmarshals cleanly with all new fields at their zero values. This is
+// the backward-compat acceptance: "old configs without these fields must
+// continue to load".
+func TestConfigBackwardCompatUnmarshalsOldShape(t *testing.T) {
+	oldJSON := `{
+		"defaultAgent": "claude-code",
+		"scanIntervalSeconds": 5,
+		"defaultCommand": "claude",
+		"mobileAPIPort": 4422,
+		"jarvisEnabled": true,
+		"jarvisAPIKey": "sk-ant-old-key",
+		"jarvisVoice": "Daniel"
+	}`
+
+	var cfg Config
+	if err := json.Unmarshal([]byte(oldJSON), &cfg); err != nil {
+		t.Fatalf("unmarshal old-shape config: %v", err)
+	}
+
+	// Existing fields preserved.
+	if cfg.DefaultAgent != "claude-code" {
+		t.Errorf("DefaultAgent: got %q, want %q", cfg.DefaultAgent, "claude-code")
+	}
+	if cfg.JarvisAPIKey != "sk-ant-old-key" {
+		t.Errorf("JarvisAPIKey: got %q, want %q", cfg.JarvisAPIKey, "sk-ant-old-key")
+	}
+
+	// New v0.1.2 fields default to zero values.
+	if cfg.TtsProvider != "" {
+		t.Errorf("TtsProvider: got %q, want empty (unset in old config)", cfg.TtsProvider)
+	}
+	if cfg.SttModel != "" {
+		t.Errorf("SttModel: got %q, want empty (unset in old config)", cfg.SttModel)
+	}
+	if cfg.VoicePreset != "" {
+		t.Errorf("VoicePreset: got %q, want empty (unset in old config)", cfg.VoicePreset)
+	}
+	if cfg.MicInputDevice != "" {
+		t.Errorf("MicInputDevice: got %q, want empty (unset in old config)", cfg.MicInputDevice)
+	}
+	if cfg.WakeWordEnabled != nil {
+		t.Errorf("WakeWordEnabled: got pointer to %v, want nil (unset in old config)", *cfg.WakeWordEnabled)
+	}
+	if cfg.GoogleAPIKey != "" {
+		t.Errorf("GoogleAPIKey: got %q, want empty (unset in old config)", cfg.GoogleAPIKey)
+	}
+	if cfg.AnthropicAPIKey != "" {
+		t.Errorf("AnthropicAPIKey: got %q, want empty (unset in old config)", cfg.AnthropicAPIKey)
+	}
+	if cfg.CartesiaAPIKey != "" {
+		t.Errorf("CartesiaAPIKey: got %q, want empty (unset in old config)", cfg.CartesiaAPIKey)
+	}
+
+	// Re-marshal must omit the unset v0.1.2 keys (omitempty contract).
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	outStr := string(out)
+	for _, key := range []string{
+		"ttsProvider",
+		"sttModel",
+		"voicePreset",
+		"micInputDevice",
+		"wakeWordEnabled",
+		"googleAPIKey",
+		"anthropicAPIKey",
+		"cartesiaAPIKey",
+	} {
+		if strings.Contains(outStr, `"`+key+`"`) {
+			t.Errorf("marshaled JSON should omit unset v0.1.2 key %q:\n%s", key, outStr)
+		}
+	}
+}
+
 // TestExistingLiveKitConfigPreserved verifies TASK-001 acceptance: an existing
 // user who has useLiveKitTransport=true with credentials is NOT downgraded by
 // the load path. Their settings round-trip through unmarshal+marshal intact.

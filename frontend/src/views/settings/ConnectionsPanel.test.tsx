@@ -66,6 +66,43 @@ describe('ConnectionsPanel API key cluster (TASK-017)', () => {
     expect(SOURCE).toMatch(/cfg\.jarvisPicovoiceKey/)
   })
 
+  it('binds the Google / Anthropic / Cartesia keys to cfg (v0.1.2 migration)', () => {
+    // v0.1.2 moves these three out of component-local useState and into
+    // cfg.googleAPIKey / cfg.anthropicAPIKey / cfg.cartesiaAPIKey. The
+    // ConnectionsConfig superset cast bridges the gap until `wails
+    // generate module` re-emits models.ts. We pin on the read sites + the
+    // write sites independently.
+    expect(SOURCE).toMatch(/googleAPIKey/)
+    expect(SOURCE).toMatch(/anthropicAPIKey/)
+    expect(SOURCE).toMatch(/cartesiaAPIKey/)
+    // The setCfg writes must include each new field name as a property
+    // assignment (not as a key on local state).
+    expect(SOURCE).toMatch(/googleAPIKey:\s*next/)
+    expect(SOURCE).toMatch(/anthropicAPIKey:\s*next/)
+    expect(SOURCE).toMatch(/cartesiaAPIKey:\s*next/)
+  })
+
+  it('no longer keeps Google/Anthropic/Cartesia keys in local useState (v0.1.2)', () => {
+    // Pre-v0.1.2 lines we want gone:
+    //   const [googleKey, setGoogleKey]       = useState<string>('')
+    //   const [anthropicKey, setAnthropicKey] = useState<string>('')
+    //   const [cartesiaKey, setCartesiaKey]   = useState<string>('')
+    expect(SOURCE).not.toMatch(/useState<string>\(\s*['"]['"]\s*\)\s*\/\/[^\n]*google/i)
+    expect(SOURCE).not.toMatch(/\[\s*googleKey\s*,/)
+    expect(SOURCE).not.toMatch(/\[\s*anthropicKey\s*,/)
+    expect(SOURCE).not.toMatch(/\[\s*cartesiaKey\s*,/)
+    expect(SOURCE).not.toMatch(/setGoogleKey\(/)
+    expect(SOURCE).not.toMatch(/setAnthropicKey\(/)
+    expect(SOURCE).not.toMatch(/setCartesiaKey\(/)
+  })
+
+  it('declares a ConnectionsConfig superset cast for the new fields', () => {
+    expect(SOURCE).toMatch(/type\s+ConnectionsConfig\s*=/)
+    expect(SOURCE).toMatch(/googleAPIKey\?:/)
+    expect(SOURCE).toMatch(/anthropicAPIKey\?:/)
+    expect(SOURCE).toMatch(/cartesiaAPIKey\?:/)
+  })
+
   it('does not write the key value to any console / log surface', () => {
     // Defence-in-depth: TASK-017 mandates no key logging. The frontend has
     // no log surface that ships to disk, but we still pin the panel

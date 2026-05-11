@@ -205,3 +205,74 @@ describe('SettingsView 5-tab IA (TASK-016)', () => {
     expect(COMBINED).toMatch(/TASK-023/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// v0.1.2: daemon-restart-required banner.
+//
+// SaveConfig now returns `{ daemonRestartNeeded: boolean }`. When true, the
+// shell renders an amber banner above the sticky save bar with two buttons:
+//   - "Apply now" calls RestartJarvis() (guarded for stale bindings)
+//   - "Apply later" dismisses the banner and waits for the next manual
+//     restart
+//
+// During an in-flight RestartJarvis the buttons disable and the label flips
+// to `▸ RESTARTING…`. After success a cyan toast `Daemon reconnected`
+// surfaces via the existing 3s showMsg path.
+// ---------------------------------------------------------------------------
+
+describe('SettingsView v0.1.2 (daemon-restart-required banner)', () => {
+  it('declares restartNeeded + restarting state slots', () => {
+    expect(SOURCE).toMatch(/setRestartNeeded/)
+    expect(SOURCE).toMatch(/setRestarting/)
+  })
+
+  it('reads daemonRestartNeeded from SaveConfig response', () => {
+    // The handler narrows the binding response through unknown to be
+    // resilient to a stale `Promise<void>` binding. Pin on the field
+    // access so any drop-back to the old `await SaveConfig(cfg)` line
+    // (no return capture) surfaces here.
+    expect(SOURCE).toMatch(/daemonRestartNeeded/)
+    expect(SOURCE).toMatch(/SaveConfig\(cfg\)/)
+  })
+
+  it('renders the amber DAEMON RESTART REQUIRED banner conditionally', () => {
+    // The banner ONLY renders when restartNeeded === true. We pin on the
+    // canonical headline string AND the conditional render guard.
+    expect(SOURCE).toMatch(/DAEMON RESTART REQUIRED/)
+    expect(SOURCE).toMatch(/\{restartNeeded\s*&&/)
+  })
+
+  it('uses the amber accent (--accent-amber) for the banner palette', () => {
+    expect(SOURCE).toMatch(/--accent-amber/)
+  })
+
+  it('renders both Apply now and Apply later buttons', () => {
+    expect(SOURCE).toMatch(/Apply now/)
+    expect(SOURCE).toMatch(/Apply later/)
+  })
+
+  it('references RestartJarvis and guards on its presence at call time', () => {
+    // The bindings may be stale in this sandbox. The handler resolves
+    // RestartJarvis via window.go.main.App and falls back to a toast if
+    // missing. Pin on both the resolution pattern AND the typeof guard.
+    expect(SOURCE).toMatch(/RestartJarvis/)
+    expect(SOURCE).toMatch(/typeof\s+app\?\.RestartJarvis\s*===\s*['"]function['"]/)
+  })
+
+  it('disables banner buttons + shows ▸ RESTARTING… during in-flight restart', () => {
+    expect(SOURCE).toMatch(/▸ RESTARTING…/)
+    expect(SOURCE).toMatch(/disabled=\{restarting\}/)
+  })
+
+  it('emits a "Daemon reconnected" toast on successful restart', () => {
+    expect(SOURCE).toMatch(/Daemon reconnected/)
+  })
+
+  it('Apply later dismisses the banner without invoking RestartJarvis', () => {
+    // The "Apply later" handler sets restartNeeded to false without calling
+    // the binding. We pin on the handler name + its setRestartNeeded(false)
+    // call site.
+    expect(SOURCE).toMatch(/handleApplyLater/)
+    expect(SOURCE).toMatch(/setRestartNeeded\(false\)/)
+  })
+})

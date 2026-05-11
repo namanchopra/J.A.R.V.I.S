@@ -84,6 +84,54 @@ type Config struct {
 	LiveKitAPIKey       string `json:"livekitApiKey,omitempty"`   // LiveKit API key (used to mint tokens server-side)
 	LiveKitAPISecret    string `json:"livekitApiSecret,omitempty"` // LiveKit API secret (server-only, never sent to clients)
 	LiveKitRoomName     string `json:"livekitRoomName,omitempty"` // Default room (e.g. "jarvis")
+
+	// ---------------------------------------------------------------------
+	// v0.1.2 — Voice settings promoted from frontend-local state.
+	//
+	// Before v0.1.2 these lived in component-local useState on the React
+	// side and were lost on every reload / never reached the Python daemon.
+	// They are now first-class config fields so SaveConfig persists them
+	// and the daemon can read them on startup.
+	//
+	// All omitempty so old config files (which lack these keys entirely)
+	// continue to load with zero values; the Python daemon falls back to
+	// its built-in defaults when a field is empty.
+	// ---------------------------------------------------------------------
+
+	// TtsProvider selects the TTS engine. One of: "vibevoice", "kokoro",
+	// "cartesia". Empty means daemon default.
+	TtsProvider string `json:"ttsProvider,omitempty"`
+
+	// SttModel selects the speech-to-text model. One of:
+	// "whisper-small.en", "whisper-tiny.en", "faster-whisper". Empty means
+	// daemon default.
+	SttModel string `json:"sttModel,omitempty"`
+
+	// VoicePreset is the provider-specific voice identifier
+	// (e.g. "en-Carter_man" for VibeVoice). Empty means provider default.
+	VoicePreset string `json:"voicePreset,omitempty"`
+
+	// MicInputDevice is the audio input device id reported by
+	// GetAudioInputDevices. Empty means OS default.
+	MicInputDevice string `json:"micInputDevice,omitempty"`
+
+	// WakeWordEnabled is tri-state: nil = "not yet configured" (UI shows
+	// default), false = "explicitly disabled", true = "explicitly enabled".
+	// The frontend needs the unset state to decide whether to show the
+	// onboarding affordance.
+	WakeWordEnabled *bool `json:"wakeWordEnabled,omitempty"`
+
+	// GoogleAPIKey for Gemini / Google AI services (used by the daemon's
+	// LLM fallback path).
+	GoogleAPIKey string `json:"googleAPIKey,omitempty"`
+
+	// AnthropicAPIKey is the user's Anthropic API key. Distinct from
+	// JarvisAPIKey for historical reasons (JarvisAPIKey was the legacy
+	// single-purpose field; new code should write AnthropicAPIKey too).
+	AnthropicAPIKey string `json:"anthropicAPIKey,omitempty"`
+
+	// CartesiaAPIKey for the Cartesia TTS service.
+	CartesiaAPIKey string `json:"cartesiaAPIKey,omitempty"`
 }
 
 // UnmarshalJSON reads jarvis* keys preferentially. If a jarvis* key is absent
@@ -153,6 +201,23 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	}
 
 	return nil
+}
+
+// SaveResult is the return shape of the App's SaveConfig Wails binding
+// (and the mobile API's SettingsProvider.SaveConfig). It lives here, in
+// the config package, so it can be referenced by both the main package
+// (which owns the App struct) and the internal/api package (which
+// declares the SettingsProvider interface) without an import cycle.
+//
+// Returning a struct rather than a bare bool lets us grow the shape in
+// future versions — e.g. adding a WarningMessages []string field — without
+// having to change every binding signature again.
+type SaveResult struct {
+	// DaemonRestartNeeded is true when at least one persisted field that
+	// the Python daemon reads at startup changed between the previously
+	// saved config and the new one. The frontend uses this to decide
+	// whether to surface a "Restart Jarvis" prompt to the user.
+	DaemonRestartNeeded bool `json:"daemonRestartNeeded"`
 }
 
 var (

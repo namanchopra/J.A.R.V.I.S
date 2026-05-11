@@ -1009,20 +1009,98 @@ def _mint_livekit_bot_token(api_key: str, api_secret: str, room_name: str) -> st
     )
 
 
+def _resolve_input_device_index(device_name: str | None) -> int | None:
+    """Map a PyAudio device name (from the frontend dropdown) to its index.
+
+    The frontend stores the human-readable device name (e.g. ``"MacBook Pro
+    Microphone"``) in ``micInputDevice``. PyAudio addresses devices by integer
+    index, which is unstable across reboots, so we re-resolve the name on
+    every daemon start.
+
+    Returns ``None`` (= system default) when:
+        - ``device_name`` is blank / ``None``
+        - PyAudio isn't importable
+        - the name doesn't match any input-capable device
+
+    A successful match is logged at INFO so the user can confirm the daemon
+    picked the right device.
+    """
+    if not device_name:
+        return None
+    try:
+        import pyaudio
+    except ImportError:
+        logger.warning(
+            "micInputDevice=%r requested but pyaudio not installed; "
+            "falling back to system default",
+            device_name,
+        )
+        return None
+
+    pa = pyaudio.PyAudio()
+    try:
+        target = device_name.strip().lower()
+        # Exact match first, then case-insensitive substring fallback.
+        exact: int | None = None
+        partial: int | None = None
+        for idx in range(pa.get_device_count()):
+            try:
+                info = pa.get_device_info_by_index(idx)
+            except Exception:  # noqa: BLE001
+                continue
+            if int(info.get("maxInputChannels", 0)) <= 0:
+                continue
+            name = str(info.get("name", "")).strip().lower()
+            if name == target:
+                exact = idx
+                break
+            if partial is None and target and target in name:
+                partial = idx
+        chosen = exact if exact is not None else partial
+        if chosen is None:
+            logger.warning(
+                "micInputDevice=%r did not match any input device; "
+                "falling back to system default",
+                device_name,
+            )
+            return None
+        info = pa.get_device_info_by_index(chosen)
+        logger.info(
+            "Mic input device: %s (index=%d, requested=%r)",
+            info.get("name"),
+            chosen,
+            device_name,
+        )
+        return chosen
+    finally:
+        pa.terminate()
+
+
 def _create_audio_transport(config: dict[str, Any]) -> Any:
     """Build the audio transport: LiveKit room if enabled, else local mic+speaker.
 
     LiveKit mode requires `livekitUrl`, `livekitApiKey`, `livekitApiSecret`, and
     `livekitRoomName` in config. When `useLiveKitTransport` is unset/false, the
     daemon falls back to LocalAudioTransport (current default behaviour).
+
+    Honors ``micInputDevice`` (v0.1.2): if set, the named PyAudio device is
+    resolved to an index and passed to ``LocalAudioTransportParams``. Unmatched
+    names silently fall back to the system default.
     """
+    from config import get_mic_device
+
     use_livekit = bool(config.get("useLiveKitTransport"))
     if not use_livekit:
-        logger.info("Audio transport: LocalAudioTransport (Mac mic + speaker)")
+        mic_device_index = _resolve_input_device_index(get_mic_device(config))
+        logger.info(
+            "Audio transport: LocalAudioTransport (Mac mic + speaker, input_device_index=%s)",
+            mic_device_index,
+        )
         return LocalAudioTransport(
             LocalAudioTransportParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
+                input_device_index=mic_device_index,
             )
         )
 
@@ -1035,8 +1113,13 @@ def _create_audio_transport(config: dict[str, Any]) -> Any:
             "useLiveKitTransport=true but livekitUrl/livekitApiKey/livekitApiSecret missing — "
             "falling back to LocalAudioTransport"
         )
+        mic_device_index = _resolve_input_device_index(get_mic_device(config))
         return LocalAudioTransport(
-            LocalAudioTransportParams(audio_in_enabled=True, audio_out_enabled=True)
+            LocalAudioTransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                input_device_index=mic_device_index,
+            )
         )
 
     from pipecat.transports.livekit.transport import LiveKitTransport, LiveKitParams
@@ -1054,88 +1137,235 @@ def _create_audio_transport(config: dict[str, Any]) -> Any:
     return transport
 
 
+# ---------------------------------------------------------------------------
+# v0.1.2 — STT / TTS service factories driven by config
+# ---------------------------------------------------------------------------
+# These helpers translate the high-level user choice (``ttsProvider``,
+# ``sttModel``, ``voicePreset``) into concrete service instances. They each
+# return a ``(service, choice_label)`` tuple so ``create_pipeline_components``
+# can log the resolved choice in its single-line startup summary.
+
+# Map the user-facing sttModel value to the ``LocalWhisperSTT(model_name=...)``
+# argument. Keys are exactly the strings the frontend dropdown writes to
+# config; values are the short names ``_resolve_whisper_repo`` already
+# understands (``small.en`` -> ``mlx-community/whisper-small.en-mlx`` etc.).
+_STT_MODEL_TO_WHISPER_NAME: dict[str, str] = {
+    "whisper-small.en": "small.en",
+    "whisper-tiny.en": "tiny.en",
+    # The ``faster-whisper`` value selects the cpu fallback path inside
+    # LocalWhisperSTT. The class loads faster-whisper with this same
+    # short-name string, so default to small.en sizing.
+    "faster-whisper": "small.en",
+}
+
+
+def _build_stt_service(
+    config: dict[str, Any],
+) -> tuple[FrameProcessor, str]:
+    """Build the STT service based on ``sttModel`` in config.
+
+    Returns ``(stt_service, resolved_choice)`` where ``resolved_choice`` is
+    the value to log in the v0.1.2 startup summary line.
+    """
+    from config import get_stt_model
+
+    choice = get_stt_model(config)
+    model_name = _STT_MODEL_TO_WHISPER_NAME.get(choice, "small.en")
+    stt = LocalWhisperSTT(model_name=model_name)
+    logger.info(
+        "STT: LocalWhisperSTT (choice=%s, model_name=%s)", choice, model_name
+    )
+    return stt, choice
+
+
+def _build_tts_service(
+    config: dict[str, Any],
+) -> tuple[FrameProcessor | None, str, str | None]:
+    """Build the TTS service based on ``ttsProvider`` / ``voicePreset``.
+
+    Returns ``(tts_service, resolved_provider, resolved_voice)``. The
+    resolution rules implement the v0.1.2 contract:
+
+    * If ``ttsProvider`` is unset (empty / missing) we keep the legacy
+      auto-fallback chain (VibeVoice -> Kokoro -> Cartesia).
+    * If the user picked a specific provider but its precondition isn't
+      met (missing dependency, missing API key), we log a clear warning
+      and fall back to the first bundled option that works — never crash.
+    * Cartesia without ``cartesiaAPIKey`` -> warn + fall back to vibevoice
+      / kokoro (NOT silently to a different cloud provider).
+    """
+    from config import get_cartesia_api_key, get_tts_provider, get_voice_preset
+
+    # Was the provider explicitly set by the user? (Used to distinguish
+    # "user picked vibevoice" from "user didn't pick anything, run the
+    # legacy auto chain".)
+    raw = config.get("ttsProvider")
+    explicit = isinstance(raw, str) and raw.strip() != ""
+    provider = get_tts_provider(config) if explicit else ""
+
+    cartesia_key = get_cartesia_api_key(config)
+    # Legacy free-form keys used by older configs still work alongside the
+    # new ``voicePreset`` slot. ``voicePreset`` (v0.1.2) wins when both set.
+    legacy_cartesia_voice = (config.get("cartesiaVoiceId") or "").strip()
+    legacy_kokoro_voice = (config.get("kokoroVoice") or "").strip() or "af_sarah"
+    legacy_kokoro_speed = float(config.get("kokoroSpeed", 1.0))
+    legacy_kokoro_lang = (config.get("kokoroLang") or "").strip() or "en-us"
+    legacy_vibe_voice = (config.get("vibevoiceVoice") or "").strip() or "en-Carter_man"
+
+    explicit_voice = get_voice_preset(config)  # None when user hasn't set it
+
+    def _try_vibevoice() -> FrameProcessor | None:
+        try:
+            import vibevoice  # noqa: F401
+        except ImportError:
+            return None
+        voice = explicit_voice or legacy_vibe_voice
+        svc = VibeVoiceTTSService(voice=voice)
+        logger.info(
+            "TTS: VibeVoiceTTSService (local, free, ~300ms TTFB, voice=%s)", voice
+        )
+        return svc
+
+    def _try_kokoro() -> FrameProcessor | None:
+        try:
+            import kokoro_onnx  # noqa: F401
+        except ImportError:
+            return None
+        voice = explicit_voice or legacy_kokoro_voice
+        svc = KokoroTTSService(
+            voice=voice, speed=legacy_kokoro_speed, lang=legacy_kokoro_lang
+        )
+        logger.info("TTS: KokoroTTSService (local, free, voice=%s)", voice)
+        return svc
+
+    def _try_cartesia() -> FrameProcessor | None:
+        if not cartesia_key:
+            return None
+        voice = explicit_voice or legacy_cartesia_voice or (
+            "1463a4e1-56a1-4b41-b257-728d56e93605"
+        )
+        svc = CartesiaTTSService(api_key=cartesia_key, voice_id=voice)
+        logger.info("TTS: CartesiaTTSService (Sonic 3, voice=%s)", voice)
+        return svc
+
+    # --- Explicit provider path: user picked one in settings ----------
+    if explicit:
+        if provider == "cartesia":
+            svc = _try_cartesia()
+            if svc is not None:
+                return svc, "cartesia", explicit_voice
+            logger.error(
+                "ttsProvider=cartesia but cartesiaAPIKey is missing — "
+                "falling back to local TTS"
+            )
+        elif provider == "kokoro":
+            svc = _try_kokoro()
+            if svc is not None:
+                return svc, "kokoro", explicit_voice
+            logger.error(
+                "ttsProvider=kokoro but kokoro_onnx not installed — "
+                "falling back to alternative local TTS"
+            )
+        elif provider == "vibevoice":
+            svc = _try_vibevoice()
+            if svc is not None:
+                return svc, "vibevoice", explicit_voice
+            logger.error(
+                "ttsProvider=vibevoice but vibevoice not installed — "
+                "falling back to alternative local TTS"
+            )
+
+        # Explicit choice failed — try the remaining locals in priority order.
+        for name, fn in (
+            ("vibevoice", _try_vibevoice),
+            ("kokoro", _try_kokoro),
+            ("cartesia", _try_cartesia),
+        ):
+            if name == provider:
+                continue
+            svc = fn()
+            if svc is not None:
+                logger.warning(
+                    "TTS: requested provider=%s unavailable, using %s instead",
+                    provider, name,
+                )
+                return svc, name, explicit_voice
+
+        raise RuntimeError(
+            f"No TTS provider available: requested={provider!r}, "
+            "no bundled fallback works. Install vibevoice or kokoro_onnx, "
+            "or set cartesiaAPIKey."
+        )
+
+    # --- Auto path (no explicit ttsProvider) — preserve v0.1.1 chain --
+    for name, fn in (
+        ("vibevoice", _try_vibevoice),
+        ("kokoro", _try_kokoro),
+        ("cartesia", _try_cartesia),
+    ):
+        svc = fn()
+        if svc is not None:
+            return svc, name, explicit_voice
+
+    raise RuntimeError(
+        "No TTS provider available: install vibevoice or kokoro_onnx, "
+        "or set cartesiaAPIKey in config."
+    )
+
+
+def _export_api_keys_to_env(config: dict[str, Any]) -> None:
+    """Mirror v0.1.2 API keys from config to the conventional env vars.
+
+    Pipecat's Anthropic / OpenAI / Google clients pick up keys from env
+    variables by default. We only set the variable when the corresponding
+    config key is populated AND the variable isn't already set in the
+    process environment — this lets ``ANTHROPIC_API_KEY=... python main.py``
+    overrides keep working for power users.
+    """
+    from config import get_anthropic_api_key, get_google_api_key
+
+    import os
+
+    google_key = get_google_api_key(config)
+    if google_key and not os.environ.get("GOOGLE_API_KEY"):
+        os.environ["GOOGLE_API_KEY"] = google_key
+        logger.debug("Exported googleAPIKey -> GOOGLE_API_KEY env var")
+
+    anthropic_key = get_anthropic_api_key(config)
+    if anthropic_key and not os.environ.get("ANTHROPIC_API_KEY"):
+        os.environ["ANTHROPIC_API_KEY"] = anthropic_key
+        logger.debug("Exported anthropicAPIKey -> ANTHROPIC_API_KEY env var")
+
+
 def create_pipeline_components(
     config: dict[str, Any],
     ws: ClientConnection,
     memory: ConversationMemory,
     vmem: VectorMemory | None = None,
-) -> tuple[Pipeline, PipelineTask, LocalAudioTransport, WSBridgeProcessor, LLMContext, AnthropicLLMService, FrameProcessor | None, WakeWordGate, FrameProcessor | None]:
+) -> tuple[Pipeline, PipelineTask, LocalAudioTransport, WSBridgeProcessor, LLMContext, AnthropicLLMService, FrameProcessor | None, "WakeWordGate | None", FrameProcessor | None]:
     """Build the Pipecat voice pipeline and return its components.
 
     Returns:
         (pipeline, task, transport, ws_bridge, llm_context, llm_service,
          stt, wake_gate, tts)
+
+    ``wake_gate`` is ``None`` when ``wakeWordEnabled=false`` in config — the
+    gate is not inserted into the pipeline at all in that case.
     """
+    # --- v0.1.2 API key wiring (must happen BEFORE LLM/TTS construction so ---
+    # ---             SDK clients reading from env see the right values)   ---
+    _export_api_keys_to_env(config)
+
     # --- Audio transport: LiveKit room (mobile-equal) or local mic+speaker ---
     transport = _create_audio_transport(config)
 
-    # --- STT service (local mlx-whisper / faster-whisper) ---
-    stt = LocalWhisperSTT(model_name="small.en")
-    logger.info("STT: LocalWhisperSTT (mlx-whisper / faster-whisper)")
+    # --- STT service (v0.1.2: honor sttModel from config) ---
+    # ``LocalWhisperSTT`` accepts a Whisper variant short name (small.en /
+    # tiny.en) and routes faster-whisper internally.
+    stt, stt_choice = _build_stt_service(config)
 
-    # --- TTS service (VibeVoice > Kokoro > Cartesia > Edge TTS) ---
-    # Priority: VibeVoice (free, ~300ms TTFB) > Kokoro (free, ~2s) > Cartesia (paid) > Edge TTS (free, slow)
-    tts_provider = config.get("ttsProvider", "").lower()  # "vibevoice", "kokoro", "cartesia", "edge", or "" (auto)
-    cartesia_key = config.get("cartesiaAPIKey", "")
-    cartesia_voice = config.get("cartesiaVoiceId", "")
-    kokoro_voice = config.get("kokoroVoice", "") or "af_sarah"
-    kokoro_speed = float(config.get("kokoroSpeed", 1.0))
-    kokoro_lang = config.get("kokoroLang", "") or "en-us"
-    vibevoice_voice = config.get("vibevoiceVoice", "") or "en-Carter_man"
-
-    # TTS provider selection. Local-first chain:
-    #   vibevoice (best, requires the vibevoice pip module)
-    #   kokoro    (also local, requires kokoro_onnx)
-    #   cartesia  (cloud, requires cartesiaAPIKey)
-    # No silent cloud fallback. If the configured provider is missing
-    # its dependency, we raise so the user sees the problem instead of
-    # getting a different voice without warning.
-    if tts_provider == "cartesia":
-        if not cartesia_key:
-            raise RuntimeError("tts_provider=cartesia but cartesiaAPIKey is unset")
-        tts = CartesiaTTSService(
-            api_key=cartesia_key,
-            voice_id=cartesia_voice or "1463a4e1-56a1-4b41-b257-728d56e93605",
-        )
-        logger.info("TTS: CartesiaTTSService (Sonic 3, explicit config)")
-    elif tts_provider == "kokoro":
-        import kokoro_onnx  # noqa: F401  (raises ImportError if missing — loud)
-        tts = KokoroTTSService(voice=kokoro_voice, speed=kokoro_speed, lang=kokoro_lang)
-        logger.info("TTS: KokoroTTSService (explicit config, voice=%s)", kokoro_voice)
-    else:
-        # Auto or explicit "vibevoice" — try VibeVoice first, then Kokoro, then Cartesia.
-        tts = None
-        if tts_provider in ("", "vibevoice"):
-            try:
-                import vibevoice  # noqa: F401
-                tts = VibeVoiceTTSService(voice=vibevoice_voice)
-                logger.info("TTS: VibeVoiceTTSService (local, free, ~300ms TTFB, voice=%s)", vibevoice_voice)
-            except ImportError:
-                if tts_provider == "vibevoice":
-                    logger.warning("vibevoice not installed — see VibeVoice repo for setup")
-                else:
-                    logger.debug("vibevoice not installed, trying Kokoro")
-
-        if tts is None:
-            try:
-                import kokoro_onnx  # noqa: F401
-                tts = KokoroTTSService(voice=kokoro_voice, speed=kokoro_speed, lang=kokoro_lang)
-                logger.info("TTS: KokoroTTSService (local, free, voice=%s)", kokoro_voice)
-            except ImportError:
-                logger.debug("kokoro-onnx not installed, trying Cartesia")
-
-        if tts is None and cartesia_key:
-            tts = CartesiaTTSService(
-                api_key=cartesia_key,
-                voice_id=cartesia_voice or "1463a4e1-56a1-4b41-b257-728d56e93605",
-            )
-            logger.info("TTS: CartesiaTTSService (cloud fallback)")
-
-        if tts is None:
-            raise RuntimeError(
-                "No TTS provider available: install vibevoice or kokoro_onnx, "
-                "or set cartesiaAPIKey in config."
-            )
+    # --- TTS service (v0.1.2: honor ttsProvider from config) ---
+    tts, tts_choice, voice_choice = _build_tts_service(config)
 
     # --- LLM provider chain: OpenRouter → Google AI Studio → Ollama (with runtime failover) ---
     # Anthropic-direct (sk-ant-) takes a separate path because its SDK isn't OpenAI-compatible.
@@ -1227,12 +1457,24 @@ def create_pipeline_components(
     ws_bridge = WSBridgeProcessor(ws=ws, memory=memory, vmem=vmem)
     response_flush = ResponseFlushProcessor(bridge=ws_bridge)
 
-    # --- Wake word gate (optional, disarmed by default) ---
-    wake_gate = WakeWordGate()  # Starts disarmed (always-listening)
+    # --- Wake word gate (v0.1.2: optional, gated by wakeWordEnabled) ---
+    # When wakeWordEnabled=False, we skip the gate entirely so the mic feeds
+    # STT directly (always-listening mode). When True (default), we still
+    # insert it disarmed — same legacy behaviour as v0.1.1 where downstream
+    # callers (e.g. an explicit "hey jarvis" trigger) can arm it later.
+    from config import get_wake_word_enabled
+    wake_enabled = get_wake_word_enabled(config)
+    wake_gate: WakeWordGate | None
+    if wake_enabled:
+        wake_gate = WakeWordGate()  # Starts disarmed (always-listening)
+    else:
+        wake_gate = None
+        logger.info("Wake word gating disabled (wakeWordEnabled=false) — mic feeds STT directly")
 
     # InterruptionHandler also re-arms the wake gate when the bot finishes a
     # reply, so the post-detection open window can't keep capturing ambient
-    # noise after the conversation turn ends.
+    # noise after the conversation turn ends. Pass ``None`` when the gate is
+    # disabled and the handler will simply skip re-arming.
     interruption_handler = InterruptionHandler(ws_bridge=ws_bridge, wake_gate=wake_gate)
 
     # --- Assemble pipeline ---
@@ -1243,9 +1485,9 @@ def create_pipeline_components(
     #
     # Context sanitization happens inside SanitizedLLMContext.get_messages()
     # which splits mixed tool_result/text user messages before the LLM reads them.
-    # wake_gate is always in the pipeline but only blocks audio when armed.
     stages: list[Any] = [transport.input()]
-    stages.append(wake_gate)
+    if wake_gate is not None:
+        stages.append(wake_gate)
 
     if stt is not None:
         stages.append(stt)
@@ -1271,6 +1513,15 @@ def create_pipeline_components(
             enable_usage_metrics=True,
             allow_interruptions=False,  # Disable interruptions -- no AEC on local audio
         ),
+    )
+
+    # --- v0.1.2 startup summary: one-liner with the resolved voice config ---
+    logger.info(
+        "voice config: tts=%s stt=%s voice=%s wake_word=%s",
+        tts_choice,
+        stt_choice,
+        voice_choice or "<provider default>",
+        wake_enabled,
     )
 
     return pipeline, task, transport, ws_bridge, context, llm, stt, wake_gate, tts
@@ -1823,7 +2074,8 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
             # (3) ws_bridge.muted drops any transcripts that slip through
             if text == "__mute__":
                 ws_bridge.muted = True
-                wake_gate.armed = True  # Require "hey jarvis" to re-activate
+                if wake_gate is not None:
+                    wake_gate.armed = True  # Require "hey jarvis" to re-activate
                 stt.force_muted = True  # Hard mute — survives BotStoppedSpeaking
                 stt._buffer.clear()
                 stt._buffer_samples = 0
@@ -1833,7 +2085,8 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
                 continue
             if text == "__unmute__":
                 ws_bridge.muted = False
-                wake_gate.armed = False  # Disable wake word, always listen
+                if wake_gate is not None:
+                    wake_gate.armed = False  # Disable wake word, always listen
                 stt.force_muted = False
                 stt._bot_speaking = False
                 stt._buffer.clear()

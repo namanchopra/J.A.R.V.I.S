@@ -1,28 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { JarvisSettings } from '../../components/JarvisSettings'
 import type { SettingsPanelProps } from './types'
+import type { config as cfgModels } from '../../../wailsjs/go/models'
 
 // ---------------------------------------------------------------------------
 // VoicePanel — speech / voice configuration surface.
 //
-// Owns (post Wave 3):
-//   - TTS provider dropdown                          (TASK-018)
-//   - STT model dropdown                             (TASK-018)
-//   - Voice preset dropdown + Preview button         (TASK-019)
-//   - Mic input device dropdown                      (TASK-020)
-//   - Wake-word toggle + sensitivity slider          (TASK-020)
+// Owns (post v0.1.2):
+//   - TTS provider dropdown                          (TASK-018)  → cfg.ttsProvider
+//   - STT model dropdown                             (TASK-018)  → cfg.sttModel
+//   - Voice preset dropdown + Preview button         (TASK-019)  → cfg.voicePreset
+//   - Mic input device dropdown                      (TASK-020)  → cfg.micInputDevice
+//   - Wake-word toggle + sensitivity slider          (TASK-020)  → cfg.wakeWordEnabled
+//     (sensitivity continues to live on cfg.jarvisWakeSensitivity)
 //   - <JarvisSettings/> shim (jarvisEnabled, jarvisAPIKey, jarvisVoice,
 //     jarvisVerbosity, jarvisAmbientEnabled)
 //
-// Notes on persistence:
-//   Several of the new fields (ttsProvider, sttModel, voicePreset,
-//   micInputDevice, wakeWordEnabled) do not yet exist on
-//   internal/config/config.go.Config — they are scheduled to land in a
-//   follow-up config-struct update. Until they do, this panel stores those
-//   selections in component-local state and surfaces a hint that the
-//   selection is not yet persisted across restarts. wakeWordSensitivity
-//   reuses the existing cfg.jarvisWakeSensitivity field which already
-//   covers the same semantic range.
+// Persistence (v0.1.2):
+//   All five v0.1.2 fields now persist via cfg + SaveConfig. The Go agent's
+//   parallel track adds these slots onto internal/config/config.go.Config and
+//   the python daemon honours them on next load. The companion change in
+//   SettingsView surfaces a daemon-restart-required banner when fields with
+//   `daemonRestartNeeded === true` are saved, and exposes an Apply now
+//   button that triggers RestartJarvis().
+//
+// Bindings note:
+//   The generated wailsjs/go/models.ts has not been regenerated in this
+//   sandbox (no `wails generate module`), so `Config` does not yet declare
+//   the new fields. We read/write them through a small `VoiceConfig`
+//   superset type — once `wails dev` runs against the Go agent's PR, the
+//   superset becomes a no-op and the casts vanish at the next regen.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -161,43 +168,103 @@ function availabilityLabel(a: Availability): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// VoiceConfig — superset of the generated `config.Config` that knows about
+// the v0.1.2 fields. Once `wails generate module` runs against the Go
+// agent's PR, these become declared properties on `config.Config` itself and
+// this superset is redundant. We keep it here so the rest of the file uses
+// proper field accesses (`vcfg.ttsProvider`) instead of dynamic string
+// indexing — which keeps `noUncheckedIndexedAccess` happy.
+// ---------------------------------------------------------------------------
+type VoiceConfig = cfgModels.Config & {
+  ttsProvider?: TTSOption['value']
+  sttModel?: STTOption['value']
+  voicePreset?: string
+  micInputDevice?: string
+  wakeWordEnabled?: boolean
+}
+
 export type VoicePanelProps = SettingsPanelProps
 
 export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.ReactElement {
   // -------------------------------------------------------------------
-  // Local UI state — these fields do not yet exist on Config (see
-  // module header). When the config-struct update lands, swap these
-  // useState() lines for cfg.ttsProvider / setCfg({...cfg, ...}) calls.
+  // Cast cfg into the VoiceConfig superset so the new fields type-check
+  // before `wails generate module` runs. The cast is type-only; at
+  // runtime cfg is the same object.
   // -------------------------------------------------------------------
-  const [ttsProvider, setTtsProvider] = useState<TTSOption['value']>('vibevoice')
-  const [sttModel, setSttModel] = useState<STTOption['value']>('whisper-small.en')
-  const [voicePreset, setVoicePreset] = useState<string>(TTS_OPTIONS[0]!.presets[0]!.value)
-  const [micInputDevice, setMicInputDevice] = useState<string>('')
-  const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(true)
+  const vcfg = cfg as VoiceConfig
+
+  // Provider / model / preset / mic device / wake-word-enabled are now
+  // sourced from cfg with sensible defaults when undefined.
+  const ttsProvider: TTSOption['value'] = vcfg.ttsProvider ?? 'vibevoice'
+  const sttModel: STTOption['value'] = vcfg.sttModel ?? 'whisper-small.en'
+  const firstPreset = TTS_OPTIONS[0]?.presets[0]?.value ?? ''
+  const voicePreset: string = vcfg.voicePreset ?? firstPreset
+  const micInputDevice: string = vcfg.micInputDevice ?? ''
+  // wakeWordEnabled defaults to true when undefined (the keyword behaviour
+  // ships on by default — see CLAUDE.md / Config defaults).
+  const wakeWordEnabled: boolean = vcfg.wakeWordEnabled ?? true
+
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([])
   const [previewing, setPreviewing] = useState<boolean>(false)
   const [previewError, setPreviewError] = useState<string>('')
+
+  // Single-call setters that merge one field into cfg via the parent's
+  // setCfg. Keeping these named makes the test assertions readable and
+  // makes the wiring resilient to property-order churn.
+  const setTtsProvider = useCallback(
+    (next: TTSOption['value']) => {
+      setCfg({ ...(cfg as VoiceConfig), ttsProvider: next } as cfgModels.Config)
+    },
+    [cfg, setCfg],
+  )
+  const setSttModel = useCallback(
+    (next: STTOption['value']) => {
+      setCfg({ ...(cfg as VoiceConfig), sttModel: next } as cfgModels.Config)
+    },
+    [cfg, setCfg],
+  )
+  const setVoicePreset = useCallback(
+    (next: string) => {
+      setCfg({ ...(cfg as VoiceConfig), voicePreset: next } as cfgModels.Config)
+    },
+    [cfg, setCfg],
+  )
+  const setMicInputDevice = useCallback(
+    (next: string) => {
+      setCfg({ ...(cfg as VoiceConfig), micInputDevice: next } as cfgModels.Config)
+    },
+    [cfg, setCfg],
+  )
+  const setWakeWordEnabled = useCallback(
+    (next: boolean) => {
+      setCfg({ ...(cfg as VoiceConfig), wakeWordEnabled: next } as cfgModels.Config)
+    },
+    [cfg, setCfg],
+  )
 
   // -------------------------------------------------------------------
   // Currently-selected TTS option (drives the dependent preset dropdown).
   // -------------------------------------------------------------------
   const selectedTTS = useMemo<TTSOption>(
-    () => TTS_OPTIONS.find((o) => o.value === ttsProvider) ?? TTS_OPTIONS[0]!,
+    () => TTS_OPTIONS.find((o) => o.value === ttsProvider) ?? (TTS_OPTIONS[0] as TTSOption),
     [ttsProvider],
   )
 
   // -------------------------------------------------------------------
   // When the user changes TTS provider, snap voicePreset to the first
   // preset of the new provider so we never show a stale option.
+  // Writes through cfg now (not local state).
   // -------------------------------------------------------------------
   useEffect(() => {
     if (!selectedTTS.presets.find((p) => p.value === voicePreset)) {
       setVoicePreset(selectedTTS.presets[0]?.value ?? '')
     }
-  }, [selectedTTS, voicePreset])
+  }, [selectedTTS, voicePreset, setVoicePreset])
 
   // -------------------------------------------------------------------
-  // Mic device enumeration on mount.
+  // Mic device enumeration on mount. If cfg already has a stored
+  // micInputDevice we keep it; otherwise we pick the system default.
   // -------------------------------------------------------------------
   useEffect(() => {
     const app = wailsApp()
@@ -206,7 +273,10 @@ export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.R
       // so the dropdown is still functional.
       const fallback: AudioDevice[] = [{ id: 'default', name: 'Default', isDefault: true }]
       setAudioDevices(fallback)
-      setMicInputDevice(fallback[0]!.id)
+      if (!vcfg.micInputDevice) {
+        const first = fallback[0]
+        if (first) setMicInputDevice(first.id)
+      }
       return
     }
     let cancelled = false
@@ -214,22 +284,30 @@ export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.R
       .GetAudioInputDevices()
       .then((devs) => {
         if (cancelled) return
-        const list = Array.isArray(devs) && devs.length > 0
+        const list: AudioDevice[] = Array.isArray(devs) && devs.length > 0
           ? devs
           : [{ id: 'default', name: 'Default', isDefault: true }]
         setAudioDevices(list)
-        const def = list.find((d) => d.isDefault) ?? list[0]!
-        setMicInputDevice(def.id)
+        if (!vcfg.micInputDevice) {
+          const def = list.find((d) => d.isDefault) ?? list[0]
+          if (def) setMicInputDevice(def.id)
+        }
       })
       .catch(() => {
         if (cancelled) return
         const fallback: AudioDevice[] = [{ id: 'default', name: 'Default', isDefault: true }]
         setAudioDevices(fallback)
-        setMicInputDevice(fallback[0]!.id)
+        if (!vcfg.micInputDevice) {
+          const first = fallback[0]
+          if (first) setMicInputDevice(first.id)
+        }
       })
     return () => {
       cancelled = true
     }
+    // We intentionally run this effect once at mount; subsequent cfg
+    // changes shouldn't re-enumerate devices.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // -------------------------------------------------------------------

@@ -218,6 +218,8 @@ export function MarkFirstRunComplete():Promise<void>;
 
 export function OpenApp(arg1:string):Promise<void>;
 
+export function OpenDaemonLog():Promise<void>;
+
 export function OpenFileForImport():Promise<string>;
 
 export function OpenPRInBrowser(arg1:string):Promise<void>;
