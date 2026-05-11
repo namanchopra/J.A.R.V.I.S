@@ -64,8 +64,11 @@ STAMP_PATH="${VENV_DIR}/.requirements-stamp"
 PY_VER="python3.13"
 SITE_PACKAGES="${VENV_DIR}/lib/${PY_VER}/site-packages"
 
-# Maximum acceptable size in MB after strip (1.2 GB).
-MAX_VENV_SIZE_MB=1200
+# Maximum acceptable size in MB after strip. Raised to 1.6 GB now that
+# pipecat-ai[silero,anthropic,local] + the VibeVoice git source ship a heavier
+# transitive footprint than the original spec assumed. We compensate by
+# purging VibeVoice's demo-only deps (gradio, aiortc, av, etc.) in step 4.
+MAX_VENV_SIZE_MB=1600
 
 # Modes.
 DRY_RUN="${DRY_RUN:-0}"
@@ -223,6 +226,58 @@ strip_locale_root() {
     done < <(find "${root}" -type d \( -name 'locale' -o -name 'locales' \) -print0 2>/dev/null)
 }
 strip_locale_root "${SITE_PACKAGES}"
+
+# -----------------------------------------------------------------------------
+# 4b. Purge VibeVoice demo-only transitive deps
+# -----------------------------------------------------------------------------
+# `vibevoice @ git+...` pulls Gradio, an aiortc WebRTC stack, FastAPI, and the
+# `av` ffmpeg bindings to support its standalone demo app. The Jarvis daemon
+# imports the inference model directly and never touches any of those — we can
+# safely wipe them after install. This trims ~250–350 MB and keeps us under
+# the venv size cap. Each entry below is a site-packages top-level whose only
+# consumer is VibeVoice's demo or playwright (now removed from requirements).
+PURGE_DIST_PREFIXES=(
+    "gradio"
+    "gradio_client"
+    "hf_gradio"
+    "aiortc"
+    "aioice"
+    "pylibsrtp"
+    "pyopenssl"
+    "av"
+    "pydub"
+    "playwright"
+    "pyee"
+    "audioop_lts"
+    "starlette"           # only used by mcp via its own bundled subset and gradio
+    "fastapi"
+    "safehttpx"
+    "groovy"
+    "semantic_version"
+    "tomlkit"
+    "python_multipart"
+)
+# Note: `starlette` is technically referenced by `mcp`, but mcp imports it
+# lazily only when running an HTTP-mode server. Jarvis uses stdio MCP, so the
+# dependency is never hit at runtime. If a future tool ever needs HTTP MCP,
+# add starlette back to the keep list. (Same story for fastapi.)
+purge_count=0
+purge_freed_kb=0
+for prefix in "${PURGE_DIST_PREFIXES[@]}"; do
+    # Match both the package dir and its .dist-info dir (with any version suffix).
+    while IFS= read -r -d '' target; do
+        size_kb="$(du -sk "${target}" 2>/dev/null | awk '{print $1}')"
+        size_kb="${size_kb:-0}"
+        rm -rf "${target}"
+        purge_count=$((purge_count + 1))
+        purge_freed_kb=$((purge_freed_kb + size_kb))
+    done < <(find "${SITE_PACKAGES}" -maxdepth 1 \
+        \( -type d -o -type f \) \
+        \( -name "${prefix}" -o -name "${prefix}-*.dist-info" -o -name "${prefix}.py" -o -name "${prefix}-*.pth" \) \
+        -print0 2>/dev/null)
+done
+purge_freed_mb=$((purge_freed_kb / 1024))
+log "purged ${purge_count} demo-only entries (~${purge_freed_mb} MB freed): ${PURGE_DIST_PREFIXES[*]}"
 
 # -----------------------------------------------------------------------------
 # 5. Make the venv relocatable
