@@ -15,6 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.1.1] - 2026-05-12
+
+### Added
+- **First-run download UI.** On first launch the daemon downloads ~2.4 GB of HuggingFace model weights (VibeVoice + Whisper). v0.1.0 did this silently — a first-time user would say "Hey Jarvis" and get 5–10 min of dead air, then quit thinking the app was broken. v0.1.1 mounts a full-viewport overlay (corner-bracketed panel, SF Mono labels, scanline-textured progress bars) showing per-model progress, speed, ETA, and total bytes. Auto-dismisses when ready.
+- `OpenDaemonLog()` Wails binding — opens `~/.jarvis/logs/daemon.log` in the user's default text editor. The first-run overlay exposes it via a `▸ VIEW DAEMON LOG →` link so users can self-diagnose if a download hangs.
+- Per-model retry button on download error. Sends a `retry_model_download` message back to the daemon, which restarts the download for that one model.
+- New Python module `scripts/jarvis-daemon/model_status.py` owning HuggingFace cache detection (`try_to_load_from_cache`), a throttled tqdm subclass that emits `model_download` events, and a serial prefetch orchestrator that runs at daemon startup. The VibeVoice / Kokoro / Whisper services all await `model_status.ensure_model(...)` before their lazy-load paths, so the overlay can render progress while a model warms up.
+- 9 pytest cases for `model_status` (cache hits, progress event shape, error events, full-schema validation per variant) and 24 source-level vitest cases for `FirstRunDownloadOverlay` (aria attrs, corner brackets, state icons, retry payload shape, the daemon-log link guard).
+
+### Changed
+- `internal/api/handlers_jarvis_ws.go` — the daemon-WS → Wails passthrough was type-routed with a drop-on-unknown default. Added a case forwarding `model_download` + `model_setup` events as full JSON payloads so future schema additions reach the frontend without struct changes.
+
+### Fixed
+- Long-tail UX regression introduced by the light-bundle DMG: the silent download window is no longer silent.
+
 ## [0.1.0] - 2026-05-12
 
 ### Added
