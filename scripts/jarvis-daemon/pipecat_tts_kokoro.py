@@ -53,7 +53,13 @@ _VOICES_URL: Final[str] = (
 
 
 def _ensure_models() -> tuple[str, str]:
-    """Download Kokoro model files if not present. Returns (model_path, voices_path)."""
+    """Download Kokoro model files if not present. Returns (model_path, voices_path).
+
+    Plain synchronous fallback used when the model_status async path is
+    unreachable (tests, repl, scripts). Production daemon callers go
+    through ``model_status.ensure_model('kokoro')`` instead so the HUD
+    sees download-progress events.
+    """
     os.makedirs(_MODELS_DIR, exist_ok=True)
 
     for filepath, url, name in [
@@ -117,6 +123,17 @@ class KokoroTTSService(FrameProcessor):
                 return self._kokoro
 
             from kokoro_onnx import Kokoro
+
+            # Route the download through model_status so the HUD's first-run
+            # overlay sees progress events. ensure_model is a no-op if the
+            # ONNX + voices files are already on disk.
+            try:
+                import model_status
+                await model_status.ensure_model("kokoro")
+            except Exception:
+                logger.debug("model_status.ensure_model('kokoro') failed; "
+                             "falling through to inline downloader",
+                             exc_info=True)
 
             model_path, voices_path = await asyncio.get_event_loop().run_in_executor(
                 None, _ensure_models

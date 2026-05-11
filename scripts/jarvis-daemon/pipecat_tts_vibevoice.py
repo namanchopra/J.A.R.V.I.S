@@ -133,6 +133,17 @@ class VibeVoiceTTSService(FrameProcessor):
             if self._service is not None:
                 return self._service
 
+            # Route the (potentially huge) first-run download through the
+            # model_status reporter so the HUD's first-run overlay can show
+            # progress. ensure_model is a no-op when the cache is already
+            # warm — subsequent restarts pay zero overhead here.
+            try:
+                import model_status
+                await model_status.ensure_model("vibevoice")
+            except Exception:
+                logger.debug("model_status.ensure_model('vibevoice') failed; "
+                             "falling through to from_pretrained", exc_info=True)
+
             from vibevoice.modular.modeling_vibevoice_streaming_inference import (
                 VibeVoiceStreamingForConditionalGenerationInference,
             )

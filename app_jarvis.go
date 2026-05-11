@@ -256,6 +256,29 @@ func (w *jarvisLogWriter) Write(p []byte) (int, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Daemon log access
+// ---------------------------------------------------------------------------
+
+// OpenDaemonLog opens the Jarvis Python daemon log file
+// (~/.jarvis/logs/daemon.log) in the user's default text-editor via macOS'
+// Launch Services (`open` command). Used by the first-run download progress
+// overlay's "VIEW DAEMON LOG" link.
+//
+// Returns a wrapped error if the log file does not exist (e.g. the daemon
+// has never been launched) or if the `open` command fails.
+func (a *App) OpenDaemonLog() error {
+	path := paths.DataPath("logs", "daemon.log")
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("OpenDaemonLog: log file not found at %s: %w", path, err)
+	}
+	if err := exec.Command("open", path).Run(); err != nil {
+		return fmt.Errorf("OpenDaemonLog: %w", err)
+	}
+	slog.Info("opened daemon log", "path", path)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Tool dispatcher — routes daemon tool_call messages to App methods
 // ---------------------------------------------------------------------------
 

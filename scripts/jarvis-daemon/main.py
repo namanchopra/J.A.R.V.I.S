@@ -124,6 +124,7 @@ from pipecat_stt import LocalWhisperSTT
 from pipecat_tts_cartesia import CartesiaTTSService
 from pipecat_tts_kokoro import KokoroTTSService
 from pipecat_tts_vibevoice import VibeVoiceTTSService
+import model_status
 
 # Pipecat ToolsSchema imports (required for LLMContext.set_tools in Pipecat 1.0)
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -293,11 +294,25 @@ async def send_mobile_tts(ws: ClientConnection, pcm_chunk: bytes) -> None:
         pass  # Don't crash on WS errors for audio streaming
 
 
+def _handle_retry_model_download(data: dict[str, Any]) -> None:
+    """Handle a model-download retry request from the HUD.
+
+    The HUD sends this when the user clicks "retry" on a failed model in
+    the first-run overlay. We re-enter ``model_status.ensure_model`` with
+    ``force=True`` on a background task so this dispatcher stays sync.
+    """
+    asyncio.create_task(
+        model_status.handle_retry_message(data),
+        name=f"retry-model-{data.get('model', 'unknown')}",
+    )
+
+
 _MESSAGE_HANDLERS: dict[str, Any] = {
     "context": _handle_context,
     "tool_result": _handle_tool_result,
     "command": _handle_command,
     "mobile_audio": _handle_mobile_audio,
+    "retry_model_download": _handle_retry_model_download,
 }
 
 
@@ -1508,6 +1523,21 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
     # --- Subsystem init (same as v6) ---
     async def _ws_send(msg: dict[str, Any]) -> None:
         await ws.send(json.dumps(msg))
+
+    # Register the WS sink for model_status before any prefetch / lazy-load
+    # runs so download-progress events have somewhere to go. The loop ref is
+    # what ProgressTqdm (running inside snapshot_download's worker thread)
+    # uses to schedule emits back onto the event loop.
+    model_status.set_event_sink(_ws_send, asyncio.get_running_loop())
+
+    # Kick off the model prefetch in the background. On a fresh DMG install
+    # this downloads ~2.4 GB while the user sees the first-run overlay; on
+    # subsequent launches it's a cache-hit no-op that emits model_setup
+    # state=ready immediately so the HUD knows to skip the overlay.
+    asyncio.create_task(
+        model_status.prefetch_models(config),
+        name="model-prefetch",
+    )
 
     tool_exec = ToolExecutor(ws_send_fn=_ws_send)
     _tool_executor = tool_exec

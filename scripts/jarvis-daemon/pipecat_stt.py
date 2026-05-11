@@ -169,6 +169,19 @@ class LocalWhisperSTT(FrameProcessor):
         if self._backend_loaded:
             return
         self._backend_loaded = True
+        # Route the (potentially huge) first-run download through the
+        # model_status reporter so the HUD's first-run overlay can show
+        # progress. ensure_model is a no-op when the cache is already
+        # warm. We only gate the mlx-whisper download path -- Parakeet
+        # and faster-whisper handle their own caches internally and are
+        # also best-effort fallbacks; reporting their progress would
+        # confuse the HUD when the user only ever needs one backend.
+        try:
+            import model_status
+            await model_status.ensure_model("whisper")
+        except Exception:
+            logger.debug("model_status.ensure_model('whisper') failed; "
+                         "falling through to backend loader", exc_info=True)
         logger.info("Loading STT model (may take a few seconds)...")
         self._backend = await asyncio.get_event_loop().run_in_executor(
             None, self._load_backend

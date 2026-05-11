@@ -9,6 +9,7 @@ import { HudVoiceBar } from './hud/HudVoiceBar'
 import { HudInput } from './hud/HudInput'
 import { PlanPanel } from './hud/PlanPanel'
 import type { PlanStep } from './hud/PlanPanel'
+import { FirstRunDownloadOverlay } from './hud/FirstRunDownloadOverlay'
 import '../lib/hud-theme'
 import { useFlash } from '../lib/hud-animations'
 import { sendJarvisCommand } from '../lib/jarvis-api'
@@ -1061,6 +1062,14 @@ export function JarvisHudView(): React.ReactElement {
 
       {/* ---- Floating toast notifications ---- */}
       <JarvisToastContainer />
+
+      {/* ---- First-run model download overlay ----
+          Self-mounts when the daemon emits `model_setup state=downloading`
+          and at least one `model_download` event has flagged a model as
+          started/progress/error. Self-unmounts on `model_setup state=ready`.
+          z-index 80 -- above the orb scanline (50) but below the mic
+          permission banner (100). */}
+      <FirstRunDownloadOverlay />
     </div>
   )
 }

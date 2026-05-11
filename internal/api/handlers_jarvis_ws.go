@@ -222,6 +222,19 @@ func handleJarvisWS(c echo.Context, dc *JarvisDaemonConn, emitFn JarvisEventEmit
 				"sampleRate": msg.SampleRate,
 			})
 
+		case "model_download", "model_setup":
+			// First-run model download/setup progress events. The full JSON
+			// payload is forwarded verbatim to the React HUD so the download
+			// progress overlay can render status, percent, bytes, etc.
+			// without us having to enumerate every field here.
+			var payload map[string]interface{}
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				// Fall back to a minimal event with only the type so the
+				// overlay still knows something arrived.
+				payload = map[string]interface{}{"type": msg.Type}
+			}
+			emitJarvisEvent(emitFn, payload)
+
 		default:
 			logger.Warn("jarvis ws: unknown message type", "type", msg.Type)
 		}
