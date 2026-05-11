@@ -1,0 +1,110 @@
+# --- Build artifacts ---
+build/bin/
+build/python/
+build/daemon-venv/
+build/models/
+frontend/dist/
+frontend/build/
+mobile/dist/
+mobile/.expo/
+mobile/.expo-shared/
+mobile/web-build/
+mobile/ios/
+mobile/android/
+
+# Top-level Go binary (legacy artifact pre-rename)
+/awm
+/jarvis
+
+# --- Node / JS ---
+node_modules/
+*.tsbuildinfo
+.next/
+.nuxt/
+.parcel-cache/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Wails ---
+# wailsjs/ is generated but committed deliberately for type sharing.
+wails.local.json
+
+# --- Models & weights (bundled at build time, never in repo) ---
+*.pt
+*.safetensors
+*.onnx
+*.npz
+*.tflite
+*.gguf
+*.ckpt
+*.bin.lfs
+
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+*.dmg
+
+# --- IDE ---
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# --- Secrets & credentials ---
+.env
+.env.*
+!.env.example
+*credentials*
+*secret*
+*.pem
+*.key
+*.keystore
+*.mobileprovision
+
+# --- Backup & temp ---
+*.bak.*
+*.bak
+*.orig
+*.rej
+*.tmp
+tmp/
+out/
+
+# --- Go test / build artifacts ---
+coverage.out
+coverage.html
+*.test
+*.prof
+*.pprof
+
+# --- Local data dirs (defensive — should live in $HOME, never repo) ---
+.awm/
+.jarvis/
+
+# --- Internal planning docs (not for public repo) ---
+plans/
+.local-plans/
+.kiro/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Editor scratch / agent caches ---
+.claude/projects/
+.claude/local/
+CLAUDE.local.md

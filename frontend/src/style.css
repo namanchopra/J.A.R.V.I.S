@@ -1,0 +1,192 @@
+@import "tailwindcss";
+
+/* Force dark mode — Jarvis has no light mode */
+html { color-scheme: dark; }
+
+/* ------------------------------------------------------------------ */
+/* Jarvis Dark Sci-Fi Palette                                          */
+/* Always dark — :root and .dark are identical                         */
+/* ------------------------------------------------------------------ */
+
+:root, .dark {
+  --bg-app:          #0a0e1a;      /* deep space navy */
+  --bg-surface:      #111827;      /* panel surface with blue tint */
+  --bg-elevated:     #1a2332;      /* elevated panel */
+  --border-default:  rgba(0, 229, 255, 0.15);  /* subtle cyan border */
+  --border-muted:    rgba(0, 229, 255, 0.08);  /* very subtle cyan */
+  --text-primary:    #e8f4ff;      /* bright cool white */
+  --text-secondary:  #8ba4b8;      /* cool gray-blue */
+  --text-muted:      #4a6278;      /* muted blue-gray */
+  --accent-blue:     #00e5ff;      /* electric cyan (primary Jarvis color) */
+  --accent-indigo:   #7c5cbf;      /* keep for variety */
+  --accent-green:    #00ff88;      /* neon green for success */
+  --accent-red:      #ff4757;      /* red for errors */
+  --accent-amber:    #ffb800;      /* amber for warnings */
+  --accent-teal:     #0d9488;      /* teal for secondary accents */
+}
+
+/* ------------------------------------------------------------------ */
+/* Tailwind v4 theme extensions (CSS-variable-based utilities)         */
+/* ------------------------------------------------------------------ */
+
+@theme {
+  --color-app:        var(--bg-app);
+  --color-surface:    var(--bg-surface);
+  --color-elevated:   var(--bg-elevated);
+  --color-border:     var(--border-default);
+  --color-border-m:   var(--border-muted);
+  --color-primary:    var(--text-primary);
+  --color-secondary:  var(--text-secondary);
+  --color-muted:      var(--text-muted);
+  --color-acc-blue:   var(--accent-blue);
+  --color-acc-indigo: var(--accent-indigo);
+  --color-acc-green:  var(--accent-green);
+  --color-acc-red:    var(--accent-red);
+  --color-acc-amber:  var(--accent-amber);
+  --color-acc-teal:   var(--accent-teal);
+
+  --shadow-accent-glow: 0 0 20px rgba(0, 229, 255, 0.3);
+}
+
+/* ------------------------------------------------------------------ */
+/* Custom scrollbar — cyan-tinted                                      */
+/* ------------------------------------------------------------------ */
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0, 229, 255, 0.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 229, 255, 0.4); }
+
+/* ------------------------------------------------------------------ */
+/* Status pulse ring                                                   */
+/* ------------------------------------------------------------------ */
+
+@keyframes pulse-ring {
+  0%   { transform: scale(0.8); opacity: 0.5; }
+  100% { transform: scale(2);   opacity: 0;   }
+}
+.status-pulse::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  background: inherit;
+  animation: pulse-ring 1.5s ease-out infinite;
+}
+
+/* ------------------------------------------------------------------ */
+/* Body defaults                                                       */
+/* ------------------------------------------------------------------ */
+
+body {
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+}
+
+/* ------------------------------------------------------------------ */
+/* Jarvis Sci-Fi Utilities                                             */
+/* ------------------------------------------------------------------ */
+
+/* Holographic panel — semi-transparent with gradient border glow */
+.holo-panel {
+  background: linear-gradient(135deg, rgba(17, 24, 39, 0.9), rgba(10, 14, 26, 0.95));
+  border: 1px solid rgba(0, 229, 255, 0.2);
+  border-radius: 8px;
+  box-shadow:
+    0 0 15px rgba(0, 229, 255, 0.08),
+    inset 0 1px 0 rgba(0, 229, 255, 0.1);
+  backdrop-filter: blur(8px);
+}
+
+/* Glowing border effect */
+.glow-border {
+  border: 1px solid rgba(0, 229, 255, 0.3);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.15), inset 0 0 12px rgba(0, 229, 255, 0.05);
+}
+
+/* Active/selected glow (brighter) */
+.glow-active {
+  border-color: rgba(0, 229, 255, 0.6);
+  box-shadow: 0 0 20px rgba(0, 229, 255, 0.3), inset 0 0 8px rgba(0, 229, 255, 0.1);
+}
+
+/* Scanline overlay — subtle animated horizontal lines */
+.scanline::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 229, 255, 0.03) 2px,
+    rgba(0, 229, 255, 0.03) 4px
+  );
+  animation: scanline-scroll 8s linear infinite;
+  z-index: 1;
+}
+
+/* Pulse glow animation for active states */
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(0, 229, 255, 0.2); }
+  50% { box-shadow: 0 0 20px rgba(0, 229, 255, 0.4); }
+}
+
+.pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Scanline scroll animation */
+@keyframes scanline-scroll {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(4px); }
+}
+
+/* Fade in from bottom (for toasts/notifications) */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.fade-in-up {
+  animation: fade-in-up 0.3s ease-out forwards;
+}
+
+/* Fade out */
+@keyframes fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.fade-out {
+  animation: fade-out 0.3s ease-in forwards;
+}
+
+/* Sci-fi input styling */
+input.sci-fi, select.sci-fi, textarea.sci-fi {
+  background: rgba(10, 14, 26, 0.8);
+  border: 1px solid rgba(0, 229, 255, 0.15);
+  color: var(--text-primary);
+  border-radius: 6px;
+  padding: 8px 12px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+input.sci-fi:focus, select.sci-fi:focus, textarea.sci-fi:focus {
+  border-color: rgba(0, 229, 255, 0.5);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
+  outline: none;
+}
+
+/* Status dot with glow */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.status-dot.running { background: #00ff88; box-shadow: 0 0 8px rgba(0, 255, 136, 0.5); }
+.status-dot.needs-input { background: #ffb800; box-shadow: 0 0 8px rgba(255, 184, 0, 0.5); }
+.status-dot.failed { background: #ff4757; box-shadow: 0 0 8px rgba(255, 71, 87, 0.5); }
+.status-dot.idle { background: #4a6278; }

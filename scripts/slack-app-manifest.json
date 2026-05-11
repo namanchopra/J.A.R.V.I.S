@@ -1,0 +1,36 @@
+{
+  "display_information": {
+    "name": "Jarvis",
+    "description": "AI voice companion for Jarvis - reads and sends Slack messages",
+    "background_color": "#00ffcc",
+    "long_description": "Jarvis is the AI voice assistant in Jarvis (AWM). It monitors Slack for unread messages, sends messages on your behalf, and includes Slack context in briefings. This app gives Jarvis read/write access to your Slack workspace."
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Jarvis",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "mpim:history",
+        "mpim:read",
+        "users:read",
+        "users:read.email"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

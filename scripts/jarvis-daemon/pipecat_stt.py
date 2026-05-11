@@ -1,0 +1,434 @@
+"""Custom Pipecat STT processor using NVIDIA Parakeet (primary) with
+mlx-whisper / faster-whisper fallback.
+
+Wraps local speech-to-text transcription as a Pipecat FrameProcessor.
+Accumulates audio frames, transcribes periodically, and emits
+TranscriptionFrame when speech ends.
+
+Backend priority:
+  1. NVIDIA NeMo Parakeet (``nemo.collections.asr``)
+  2. mlx-whisper (Apple Silicon)
+  3. faster-whisper (CPU/GPU via CTranslate2)
+
+Key design: Pipecat 1.0's ``start(StartFrame)`` override is no longer called,
+so the model is loaded lazily on the first audio frame. The STT doesn't
+depend on VAD events from the downstream aggregator -- it transcribes on a
+timer and detects end-of-speech by comparing consecutive transcriptions.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import tempfile
+import time
+from typing import Final
+
+import numpy as np
+
+from pipecat.frames.frames import (
+    AudioRawFrame,
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
+    EndFrame,
+    Frame,
+    InterimTranscriptionFrame,
+    TranscriptionFrame,
+    UserStartedSpeakingFrame,
+    UserStoppedSpeakingFrame,
+)
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+
+logger: Final = logging.getLogger("jarvis-daemon.pipecat_stt")
+
+SAMPLE_RATE: Final[int] = 16000
+TRANSCRIBE_INTERVAL_S: Final[float] = 0.5
+MAX_BUFFER_S: Final[float] = 15.0
+SILENCE_FINALIZE_S: Final[float] = 1.0
+
+# Parakeet model identifiers, tried in order.
+_PARAKEET_MODELS: Final[tuple[str, ...]] = (
+    "nvidia/parakeet-tdt-0.6b-v2",
+    "nvidia/parakeet-ctc-0.6b",
+)
+
+# Whisper hallucination patterns — common false transcriptions on silence/noise.
+_HALLUCINATION_PATTERNS: Final[set[str]] = {
+    "you", "thank you", "thanks", "bye", "okay",
+    ".", "..", "...", ". . .", ". . . . .", "! ! !",
+    "thank you.", "thanks for watching.", "thanks for watching",
+    "subscribe", "like and subscribe",
+    "the end", "the end.", "you know",
+}
+
+
+def _is_hallucination(text: str) -> bool:
+    """Return True if the text is likely a Whisper hallucination."""
+    t = text.strip().lower().rstrip(".")
+    if t in _HALLUCINATION_PATTERNS:
+        return True
+    # Repetitive single chars or very short non-word output
+    if len(t) < 3:
+        return True
+    # All punctuation / whitespace
+    if not any(c.isalpha() for c in t):
+        return True
+    # Repetitive patterns (e.g., "g g g g g g")
+    words = t.split()
+    if len(words) >= 3 and len(set(words)) == 1:
+        return True
+    # Repeated phrases: split into sentences and check for duplicates.
+    # Catches "I'm going to the hospital. I'm going to the hospital. ..."
+    sentences = [s.strip() for s in text.strip().replace(".", "\n").split("\n") if s.strip()]
+    if len(sentences) >= 3 and len(set(s.lower() for s in sentences)) <= 2:
+        return True
+    # Very long output from silence is almost always hallucination.
+    # Real speech rarely produces 200+ chars in a single STT chunk.
+    if len(t) > 200 and len(sentences) >= 5 and len(set(s.lower() for s in sentences)) <= 3:
+        return True
+    # N-gram repetition loop. Whisper, when fed extended near-silence or
+    # microphone hum, can output things like:
+    #   "I'm going to do a little bit of a little bit of a little bit of ..."
+    # The sentence-level check above misses this because there are no
+    # full-sentence boundaries. Use the unique-word ratio instead: real
+    # speech maintains >35% unique tokens; a stuck loop falls well below.
+    if len(words) >= 12:
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.35:
+            return True
+    return False
+
+
+class LocalWhisperSTT(FrameProcessor):
+    """Pipecat STT using Parakeet (primary) with mlx-whisper/faster-whisper fallback."""
+
+    def __init__(self, model_name: str = "small.en", **kwargs):
+        super().__init__(**kwargs)
+        self._model_name = model_name
+        self._backend = None
+        self._backend_loaded = False
+        self._buffer: list[np.ndarray] = []
+        self._buffer_samples = 0
+        self._prev_text = ""
+        self._last_transcribe = 0.0
+        self._last_new_text_time = 0.0
+        self._transcribing = False  # Guard against overlapping calls
+        self._bot_speaking = False  # Suppress audio during bot speech to prevent echo
+        self.force_muted = False   # Hard mute — survives BotStoppedSpeakingFrame resets
+
+    # ------------------------------------------------------------------
+    # Backend loading
+    # ------------------------------------------------------------------
+
+    async def _ensure_backend(self):
+        """Load the STT model on first use (lazy init)."""
+        if self._backend_loaded:
+            return
+        self._backend_loaded = True
+        logger.info("Loading STT model (may take a few seconds)...")
+        self._backend = await asyncio.get_event_loop().run_in_executor(
+            None, self._load_backend
+        )
+        if self._backend:
+            logger.info(
+                "LocalWhisperSTT ready (backend=%s)", self._backend[0]
+            )
+        else:
+            logger.error("LocalWhisperSTT: no backend available")
+
+    def _load_backend(self):
+        """Try backends in priority order. Returns ``(kind, model)`` or ``None``.
+
+        Priority:
+          1. Parakeet (NeMo ASR) -- best accuracy for English
+          2. mlx-whisper         -- fast on Apple Silicon
+          3. faster-whisper      -- broad hardware support
+        """
+        # --- 1. NVIDIA Parakeet via NeMo ---
+        backend = self._try_load_parakeet()
+        if backend is not None:
+            return backend
+
+        # --- 2. mlx-whisper (Apple Silicon) ---
+        backend = self._try_load_mlx_whisper()
+        if backend is not None:
+            return backend
+
+        # --- 3. faster-whisper (CTranslate2) ---
+        backend = self._try_load_faster_whisper()
+        if backend is not None:
+            return backend
+
+        logger.error("No STT backend available")
+        return None
+
+    def _try_load_parakeet(self):
+        """Attempt to load NVIDIA Parakeet via ``nemo.collections.asr``."""
+        try:
+            import nemo.collections.asr as nemo_asr  # noqa: F401
+        except ImportError:
+            logger.info("nemo.collections.asr not installed, skipping Parakeet")
+            return None
+
+        for model_id in _PARAKEET_MODELS:
+            try:
+                model = nemo_asr.models.ASRModel.from_pretrained(model_id)
+                logger.info("Using Parakeet backend (model=%s)", model_id)
+                return ("parakeet", model)
+            except Exception as exc:
+                logger.info(
+                    "Parakeet model %s unavailable (%s), trying next",
+                    model_id,
+                    exc,
+                )
+
+        logger.info("No Parakeet model could be loaded, falling back to Whisper")
+        return None
+
+    def _try_load_mlx_whisper(self):
+        """Attempt to load mlx-whisper (Apple Silicon optimised)."""
+        try:
+            import mlx_whisper  # noqa: F401
+
+            repo = f"mlx-community/whisper-{self._model_name}-mlx"
+            # Warm-up transcription to validate the model is usable.
+            _dummy = np.zeros(SAMPLE_RATE, dtype=np.float32)
+            mlx_whisper.transcribe(_dummy, path_or_hf_repo=repo, language="en")
+            logger.info("Using mlx-whisper backend")
+            return ("mlx", None)
+        except Exception as exc:
+            logger.info("mlx-whisper not available (%s), trying faster-whisper", exc)
+            return None
+
+    def _try_load_faster_whisper(self):
+        """Attempt to load faster-whisper (CTranslate2)."""
+        try:
+            from faster_whisper import WhisperModel
+
+            model = WhisperModel(
+                self._model_name, device="auto", compute_type="int8"
+            )
+            logger.info("Using faster-whisper backend")
+            return ("faster-whisper", model)
+        except Exception as exc:
+            logger.error("faster-whisper not available: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Frame processing
+    # ------------------------------------------------------------------
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        # Track bot speaking state to suppress echo.
+        # BotStartedSpeakingFrame is broadcast by the output transport
+        # and propagates to all processors in the pipeline.
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._bot_speaking = True
+            # Clear buffer so we don't transcribe bot's own speech
+            self._buffer.clear()
+            self._buffer_samples = 0
+            self._prev_text = ""
+            self._last_new_text_time = 0.0
+            await self.push_frame(frame, direction)
+            return
+
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            self._bot_speaking = False
+            # Clear buffer again — any audio captured during speech is bot echo
+            self._buffer.clear()
+            self._buffer_samples = 0
+            self._prev_text = ""
+            self._last_new_text_time = 0.0
+            await self.push_frame(frame, direction)
+            return
+
+        if isinstance(frame, AudioRawFrame):
+            # Skip audio while bot is speaking or hard-muted
+            if self._bot_speaking or self.force_muted:
+                await self.push_frame(frame, direction)
+                return
+
+            await self._ensure_backend()
+
+            if not self._backend:
+                await self.push_frame(frame, direction)
+                return
+
+            # Convert 16-bit PCM bytes to float32 numpy array.
+            audio = (
+                np.frombuffer(frame.audio, dtype=np.int16).astype(np.float32)
+                / 32768.0
+            )
+            self._buffer.append(audio)
+            self._buffer_samples += len(audio)
+
+            # Trim buffer to MAX_BUFFER_S to keep transcription fast.
+            max_samples = int(MAX_BUFFER_S * SAMPLE_RATE)
+            while self._buffer_samples > max_samples and self._buffer:
+                removed = self._buffer.pop(0)
+                self._buffer_samples -= len(removed)
+
+            # Transcribe periodically (avoid overlapping calls).
+            now = time.monotonic()
+            if (
+                not self._transcribing
+                and (now - self._last_transcribe) >= TRANSCRIBE_INTERVAL_S
+                and self._buffer_samples >= SAMPLE_RATE
+            ):
+                await self._do_transcription()
+
+            # Detect end-of-speech: had text before, but no new text for
+            # SILENCE_FINALIZE_S.
+            if (
+                self._prev_text
+                and self._last_new_text_time > 0
+                and (now - self._last_new_text_time) > SILENCE_FINALIZE_S
+            ):
+                await self._emit_final()
+
+        elif isinstance(frame, EndFrame):
+            if self._prev_text:
+                await self._emit_final()
+
+        # Always pass frames through.
+        await self.push_frame(frame, direction)
+
+    # ------------------------------------------------------------------
+    # Transcription
+    # ------------------------------------------------------------------
+
+    async def _do_transcription(self):
+        """Run transcription in a thread executor."""
+        if not self._buffer or not self._backend or self._transcribing:
+            return
+
+        self._transcribing = True
+        try:
+            audio = np.concatenate(self._buffer)
+            kind, model = self._backend
+            text = await asyncio.get_event_loop().run_in_executor(
+                None, self._transcribe_sync, audio, kind, model
+            )
+            self._last_transcribe = time.monotonic()
+
+            if text and text.strip():
+                clean = text.strip()
+                if clean != self._prev_text:
+                    self._prev_text = clean
+                    self._last_new_text_time = time.monotonic()
+                    logger.debug("STT interim: %s", clean[:80])
+                    await self.push_frame(
+                        InterimTranscriptionFrame(
+                            text=clean,
+                            user_id="user",
+                            timestamp=str(time.time()),
+                        )
+                    )
+            else:
+                # Silence detected -- if we had accumulated text, finalize.
+                if self._prev_text:
+                    await self._emit_final()
+
+        finally:
+            self._transcribing = False
+
+    async def _emit_final(self):
+        """Emit a final ``TranscriptionFrame`` and reset state."""
+        if not self._prev_text:
+            return
+        final_text = self._prev_text.strip()
+        self._prev_text = ""
+        self._last_new_text_time = 0.0
+        self._buffer.clear()
+        self._buffer_samples = 0
+
+        if final_text and not _is_hallucination(final_text):
+            logger.info("STT final: %s", final_text[:80])
+            await self.push_frame(
+                TranscriptionFrame(
+                    text=final_text,
+                    user_id="user",
+                    timestamp=str(time.time()),
+                )
+            )
+        elif final_text:
+            logger.debug("STT filtered hallucination: %s", final_text[:40])
+
+    def _transcribe_sync(self, audio: np.ndarray, kind: str, model) -> str:
+        """Synchronous transcription dispatched by backend type.
+
+        Runs inside ``run_in_executor`` -- MUST NOT touch the event loop.
+        """
+        try:
+            if kind == "parakeet":
+                return self._transcribe_parakeet(audio, model)
+            elif kind == "mlx":
+                return self._transcribe_mlx(audio)
+            else:
+                return self._transcribe_faster_whisper(audio, model)
+        except Exception:
+            logger.debug("Transcription error", exc_info=True)
+            return ""
+
+    # -- Parakeet -------------------------------------------------------
+
+    @staticmethod
+    def _transcribe_parakeet(audio: np.ndarray, model) -> str:
+        """Transcribe using NVIDIA Parakeet (NeMo ASR).
+
+        Parakeet's ``model.transcribe()`` accepts file paths or tensors.
+        We write a temporary WAV file to avoid API surface differences
+        across NeMo versions.
+        """
+        import soundfile as sf
+
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+        try:
+            os.close(tmp_fd)
+            sf.write(tmp_path, audio, samplerate=SAMPLE_RATE)
+            results = model.transcribe([tmp_path])
+
+            # NeMo returns different shapes depending on the model variant.
+            # Handle both ``Hypothesis`` objects and plain strings.
+            if not results:
+                return ""
+
+            first = results[0]
+
+            # ``results`` may be a tuple ``(hypotheses, _)`` in some NeMo
+            # versions.
+            if isinstance(first, (list, tuple)):
+                first = first[0] if first else ""
+
+            if hasattr(first, "text"):
+                return first.text.strip()
+            return str(first).strip()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    # -- mlx-whisper ----------------------------------------------------
+
+    def _transcribe_mlx(self, audio: np.ndarray) -> str:
+        """Transcribe using mlx-whisper (Apple Silicon)."""
+        import mlx_whisper
+
+        repo = f"mlx-community/whisper-{self._model_name}-mlx"
+        result = mlx_whisper.transcribe(
+            audio, path_or_hf_repo=repo, language="en"
+        )
+        return result.get("text", "").strip()
+
+    # -- faster-whisper -------------------------------------------------
+
+    @staticmethod
+    def _transcribe_faster_whisper(audio: np.ndarray, model) -> str:
+        """Transcribe using faster-whisper (CTranslate2)."""
+        segments, _ = model.transcribe(
+            audio, language="en", beam_size=1, vad_filter=True, temperature=0.0
+        )
+        return " ".join(s.text.strip() for s in segments).strip()
