@@ -48,3 +48,47 @@ describe('DiagnosticsPanel (TASK-022)', () => {
     expect(SOURCE).toMatch(/clearInterval\(/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// TASK-026 — Mic permission row deep-link to System Settings.
+//
+// Contract:
+//   1. The panel imports `BrowserOpenURL` from the Wails runtime.
+//   2. The mic permission row receives an "Open System Settings" action
+//      ONLY in a branch gated on `'denied'` / `'restricted'`.
+//   3. The action's onClick invokes `BrowserOpenURL` with the documented
+//      `x-apple.systempreferences:` URL.
+// ---------------------------------------------------------------------------
+
+describe('DiagnosticsPanel mic permission deep-link (TASK-026)', () => {
+  it('imports BrowserOpenURL from the Wails runtime', () => {
+    expect(SOURCE).toMatch(
+      /import\s*\{[^}]*BrowserOpenURL[^}]*\}\s*from\s+['"][^'"]*wailsjs\/runtime\/runtime['"]/,
+    )
+  })
+
+  it('exposes an "Open System Settings" button text', () => {
+    expect(SOURCE).toMatch(/Open System Settings/)
+  })
+
+  it('gates the System Settings action on denied or restricted status', () => {
+    // The branch must mention both string literals so the button only
+    // shows when the binding reports those two states (TASK-026 contract).
+    expect(SOURCE).toMatch(/['"]denied['"]/)
+    expect(SOURCE).toMatch(/['"]restricted['"]/)
+    // Both literals should appear in the same gating expression — accept
+    // either order as long as both are present near each other (within ~80
+    // chars), which is the natural shape of a `=== 'denied' || === 'restricted'`
+    // check.
+    expect(SOURCE).toMatch(
+      /['"]denied['"][\s\S]{0,80}['"]restricted['"]|['"]restricted['"][\s\S]{0,80}['"]denied['"]/,
+    )
+  })
+
+  it('calls BrowserOpenURL with the macOS System Settings privacy URL', () => {
+    expect(SOURCE).toMatch(
+      /x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_Microphone/,
+    )
+    expect(SOURCE).toMatch(/BrowserOpenURL\(/)
+  })
+})

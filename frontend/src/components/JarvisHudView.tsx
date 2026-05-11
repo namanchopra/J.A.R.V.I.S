@@ -12,7 +12,18 @@ import type { PlanStep } from './hud/PlanPanel'
 import '../lib/hud-theme'
 import { useFlash } from '../lib/hud-animations'
 import { sendJarvisCommand } from '../lib/jarvis-api'
-import { EventsOn } from '../../wailsjs/runtime/runtime'
+import { EventsOn, BrowserOpenURL } from '../../wailsjs/runtime/runtime'
+// `GetMicPermissionStatus` was added in TASK-025. Until `wails generate
+// module` ships the regenerated binding surface to wailsjs/, we ts-expect-error
+// the import so the panel still compiles in dev. Same pattern Onboarding.tsx
+// and DiagnosticsPanel use for not-yet-generated bindings.
+// @ts-expect-error -- new binding, wails generate pending
+import { GetMicPermissionStatus } from '../../wailsjs/go/main/App'
+
+// URL that opens System Settings → Privacy → Microphone on macOS.
+// Source: Apple developer docs (x-apple.systempreferences scheme).
+const MIC_SETTINGS_URL =
+  'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -189,6 +200,48 @@ const APPROVALS_POLL_MS = 3000
 const COSTS_POLL_MS = 10000
 const ACTIVITY_POLL_MS = 5000
 const STATS_POLL_MS = 5000
+// 4s mic permission poll — must be ≤5s so the banner appears/disappears
+// "within ~5 seconds" of the user toggling permission in System Settings.
+const MIC_PERMISSION_POLL_MS = 4000
+
+type MicPermissionState =
+  | 'granted'
+  | 'denied'
+  | 'not_determined'
+  | 'restricted'
+  | 'unknown'
+
+async function getMicPermissionStatus(): Promise<MicPermissionState> {
+  try {
+    const fn = window?.go?.main?.App?.GetMicPermissionStatus as
+      | (() => Promise<string>)
+      | undefined
+    if (fn) {
+      const s = await fn()
+      if (
+        s === 'granted' ||
+        s === 'denied' ||
+        s === 'not_determined' ||
+        s === 'restricted'
+      ) {
+        return s
+      }
+    } else {
+      // Fall back to the generated wrapper when the runtime bridge
+      // hasn't attached `window.go.main.App` yet.
+      const s = await GetMicPermissionStatus()
+      if (
+        s === 'granted' ||
+        s === 'denied' ||
+        s === 'not_determined' ||
+        s === 'restricted'
+      ) {
+        return s
+      }
+    }
+  } catch { /* binding not available */ }
+  return 'unknown'
+}
 
 // ---------------------------------------------------------------------------
 // HudBracket -- corner-bracketed floating panel wrapper
@@ -476,6 +529,12 @@ export function JarvisHudView(): React.ReactElement {
   // -- Plan state (populated via Jarvis "plan" events) ----------------------
   const [plan, setPlan] = useState<{ goal: string; steps: PlanStep[] } | null>(null)
 
+  // -- Mic permission state (TASK-026) ---------------------------------------
+  // Polled every 4s so the red banner appears/disappears within ~5s of the
+  // user toggling mic permission in System Settings.
+  const [micPermissionState, setMicPermissionState] =
+    useState<MicPermissionState>('unknown')
+
   // -- Clock state -----------------------------------------------------------
   const [clockStr, setClockStr] = useState<string>(() =>
     new Date().toLocaleTimeString('en-GB', { hour12: false }),
@@ -659,6 +718,20 @@ export function JarvisHudView(): React.ReactElement {
     return () => clearInterval(id)
   }, [])
 
+  // -- Polling: Mic permission (4s) — TASK-026 -------------------------------
+  // Calls `GetMicPermissionStatus` and surfaces a red banner above the HUD
+  // when the result is `denied` or `restricted`. The 4s cadence guarantees
+  // the banner appears/disappears within ~5s of a System Settings toggle.
+  useEffect(() => {
+    const poll = async (): Promise<void> => {
+      const s = await getMicPermissionStatus()
+      if (mountedRef.current) setMicPermissionState(s)
+    }
+    void poll()
+    const id = setInterval(() => void poll(), MIC_PERMISSION_POLL_MS)
+    return () => clearInterval(id)
+  }, [])
+
   // ---------------------------------------------------------------------------
   // Derived: which sessions are actively running (for glow-active styling)
   // ---------------------------------------------------------------------------
@@ -676,6 +749,54 @@ export function JarvisHudView(): React.ReactElement {
       className="flex-1 flex flex-col min-h-0 relative overflow-hidden"
       style={{ background: '#020a08' }}
     >
+      {/* ---- TASK-026: Mic permission denied banner ----
+          Sits at the very top, above every other HUD layer (z=100) so the
+          scanline overlay (z=50) and top bar (z=30) can never cover it.
+          Polls `GetMicPermissionStatus` every 4s; disappears within ~5s of
+          the user granting permission in System Settings. */}
+      {(micPermissionState === 'denied' || micPermissionState === 'restricted') ? (
+        <div
+          role="alert"
+          className="relative flex items-center justify-between gap-3 px-4 py-2 flex-shrink-0"
+          style={{
+            zIndex: 100,
+            background: 'rgba(127, 29, 29, 0.4)',      // red-900/40
+            borderBottom: '1px solid rgb(185, 28, 28)', // red-700
+            color: 'rgb(254, 202, 202)',                // red-200
+          }}
+        >
+          <span
+            className="text-sm"
+            style={{
+              fontFamily: "'SF Mono', 'Menlo', monospace",
+              fontWeight: 500,
+              letterSpacing: '0.02em',
+            }}
+          >
+            🎤 Microphone access denied. Jarvis can't listen until you grant permission.
+          </span>
+          <button
+            type="button"
+            onClick={() => BrowserOpenURL(MIC_SETTINGS_URL)}
+            className="text-xs px-3 py-1 rounded text-white"
+            style={{
+              background: 'rgb(185, 28, 28)',  // red-700
+              fontFamily: "'SF Mono', 'Menlo', monospace",
+              fontWeight: 600,
+              letterSpacing: '0.05em',
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'rgb(220, 38, 38)' // red-600
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = 'rgb(185, 28, 28)' // red-700
+            }}
+          >
+            Open System Settings
+          </button>
+        </div>
+      ) : null}
+
       {/* Scanline overlay */}
       <div className="hud-scanlines absolute inset-0" style={{ zIndex: 50, pointerEvents: 'none' }} />
 

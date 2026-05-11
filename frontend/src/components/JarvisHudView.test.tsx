@@ -97,3 +97,60 @@ describe('JarvisHudView mute persistence (TASK-002)', () => {
     expect(SOURCE).toMatch(/localStorage\.removeItem\(\s*['"`]jarvis-muted['"`]\s*\)/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// TASK-026 — Mic permission denied banner.
+//
+// Contract:
+//   1. The component imports `GetMicPermissionStatus` (the binding added by
+//      TASK-025) and `BrowserOpenURL` from the Wails runtime.
+//   2. There is a render branch with `role="alert"` that includes the
+//      "Microphone" copy and references the `denied` / `restricted` states.
+//   3. The banner's button calls `BrowserOpenURL` with the documented
+//      `x-apple.systempreferences:` URL.
+// ---------------------------------------------------------------------------
+
+describe('JarvisHudView mic permission banner (TASK-026)', () => {
+  it('imports GetMicPermissionStatus from the App bindings', () => {
+    expect(SOURCE).toMatch(/GetMicPermissionStatus/)
+    // Either the named import or a direct `window.go.main.App.GetMicPermissionStatus`
+    // lookup is acceptable — both ultimately invoke the same binding.
+    expect(SOURCE).toMatch(
+      /(?:import[\s\S]*?GetMicPermissionStatus[\s\S]*?from\s+['"][^'"]*wailsjs\/go\/main\/App['"])|(?:GetMicPermissionStatus\s+as)|(?:window\?\.go\?\.main\?\.App\?\.GetMicPermissionStatus)/,
+    )
+  })
+
+  it('imports BrowserOpenURL from the Wails runtime', () => {
+    expect(SOURCE).toMatch(
+      /import\s*\{[^}]*BrowserOpenURL[^}]*\}\s*from\s+['"][^'"]*wailsjs\/runtime\/runtime['"]/,
+    )
+  })
+
+  it('renders a role="alert" banner that mentions Microphone', () => {
+    expect(SOURCE).toMatch(/role=['"]alert['"]/)
+    expect(SOURCE).toMatch(/Microphone/)
+  })
+
+  it('gates the banner render on denied or restricted state', () => {
+    // Tolerate either string-equality form or the union-state check.
+    expect(SOURCE).toMatch(/['"]denied['"]/)
+    expect(SOURCE).toMatch(/['"]restricted['"]/)
+    expect(SOURCE).toMatch(/micPermissionState/)
+  })
+
+  it('calls BrowserOpenURL with the macOS System Settings privacy URL', () => {
+    // Either the literal URL or a constant referencing it is acceptable.
+    expect(SOURCE).toMatch(
+      /x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_Microphone/,
+    )
+    expect(SOURCE).toMatch(/BrowserOpenURL\(/)
+  })
+
+  it('polls mic permission on a ≤5s interval so the banner auto-clears', () => {
+    // The constant must resolve to ≤5000ms. We pin on the literal that ships
+    // in the source (4000) — if a future patch wants to widen the window, it
+    // can update this test alongside the constant.
+    expect(SOURCE).toMatch(/MIC_PERMISSION_POLL_MS\s*=\s*4000/)
+    expect(SOURCE).toMatch(/setInterval\([\s\S]*?MIC_PERMISSION_POLL_MS\s*\)/)
+  })
+})

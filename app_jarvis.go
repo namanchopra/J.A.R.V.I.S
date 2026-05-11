@@ -29,6 +29,12 @@ const maxJarvisRestarts = 3
 // StartJarvis launches the Python Jarvis daemon as a subprocess. The daemon
 // handles all voice I/O (STT, TTS, wake-word, tool calls) and connects
 // back to AWM via the mobile API WebSocket.
+//
+// Path resolution order (TASK-011):
+//  1. Bundled (`<.app>/Contents/Resources/python/bin/python3` +
+//     `<Resources>/jarvis-daemon/main.py`) when running from a built .app
+//  2. Dev venv (`~/.jarvis/jarvis-daemon-env/bin/python3`) + source-tree script
+//     when running via `wails dev`
 func (a *App) StartJarvis() error {
 	a.jarvisMu.Lock()
 	defer a.jarvisMu.Unlock()
@@ -37,16 +43,27 @@ func (a *App) StartJarvis() error {
 		return fmt.Errorf("StartJarvis: already running")
 	}
 
-	// Locate the Python binary inside the dedicated venv.
-	pythonPath := paths.DataPath("jarvis-daemon-env", "bin", "python3")
-	if _, err := os.Stat(pythonPath); err != nil {
-		return fmt.Errorf("StartJarvis: venv python not found at %s: %w", pythonPath, err)
+	// Locate the Python binary. Prefer the bundled interpreter inside the
+	// .app when present (paths.BundledPython already verifies existence +
+	// execute bit); fall back to the dev venv for `wails dev` runs.
+	bundledPython := paths.BundledPython()
+	devPython := paths.DataPath("jarvis-daemon-env", "bin", "python3")
+
+	pythonPath := bundledPython
+	if pythonPath == "" {
+		if _, err := os.Stat(devPython); err != nil {
+			return fmt.Errorf("StartJarvis: could not find Python interpreter; tried bundled %q and dev %q: %w",
+				filepath.Join("<bundle>", "Contents", "Resources", "python", "bin", "python3"), devPython, err)
+		}
+		pythonPath = devPython
 	}
 
-	// Locate the daemon entry point script.
+	// Locate the daemon entry point script. findJarvisDaemonScript already
+	// prefers the bundled path when available.
 	scriptPath := findJarvisDaemonScript()
 	if scriptPath == "" {
-		return fmt.Errorf("StartJarvis: daemon script not found")
+		return fmt.Errorf("StartJarvis: could not find daemon script; tried bundled %q and source-tree fallbacks",
+			filepath.Join("<bundle>", "Contents", "Resources", "jarvis-daemon", "main.py"))
 	}
 
 	cmd := exec.Command(pythonPath, scriptPath)
@@ -55,6 +72,12 @@ func (a *App) StartJarvis() error {
 		"PYTHONUNBUFFERED=1",
 		"PIPECAT_LOG_LEVEL=WARNING",
 	)
+	// If bundled models are shipped inside the .app, expose their path to the
+	// daemon so it can resolve Whisper/etc. without re-downloading. Empty in
+	// dev mode — the daemon falls back to ~/.jarvis/models/ then.
+	if modelsDir := paths.BundledModelsDir(); modelsDir != "" {
+		cmd.Env = append(cmd.Env, "JARVIS_BUNDLED_MODELS_DIR="+modelsDir)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("StartJarvis: %w", err)
@@ -66,7 +89,12 @@ func (a *App) StartJarvis() error {
 	// Monitor the daemon in the background — restarts on unexpected exit.
 	go a.monitorJarvisDaemon(cmd)
 
-	slog.Info("jarvis daemon launched", "pid", cmd.Process.Pid, "script", scriptPath)
+	slog.Info("jarvis daemon launched",
+		"pid", cmd.Process.Pid,
+		"python", pythonPath,
+		"script", scriptPath,
+		"bundled", bundledPython != "",
+	)
 	return nil
 }
 
@@ -150,7 +178,17 @@ func (a *App) monitorJarvisDaemon(cmd *exec.Cmd) {
 
 // findJarvisDaemonScript searches common locations for the jarvis-daemon
 // entry-point script and returns the first path that exists, or "".
+//
+// Order: bundled .app Resources first (production), then source-tree
+// candidates relative to CWD and executable (dev mode), then ~/.jarvis fallback.
 func findJarvisDaemonScript() string {
+	// 1. Bundled .app path takes precedence in production. Returns "" in dev
+	//    mode, which lets the existing fallback chain run unchanged.
+	if bundled := paths.BundledDaemonScript(); bundled != "" {
+		slog.Info("found jarvis daemon script (bundled)", "path", bundled)
+		return bundled
+	}
+
 	candidates := []string{
 		"scripts/jarvis-daemon/main.py",
 		"../scripts/jarvis-daemon/main.py",

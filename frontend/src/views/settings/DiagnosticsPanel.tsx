@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SettingsPanelProps } from './types'
+import { BrowserOpenURL } from '../../../wailsjs/runtime/runtime'
+
+// macOS URL that opens System Settings → Privacy → Microphone. Used when the
+// mic permission row is in the `denied` / `restricted` state (TASK-026).
+const MIC_SETTINGS_URL =
+  'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
 
 // ---------------------------------------------------------------------------
 // DiagnosticsPanel — live system health surface (TASK-022).
@@ -161,12 +167,21 @@ async function copyText(text: string): Promise<boolean> {
 // Row component — label + value + copy button.
 // ---------------------------------------------------------------------------
 
+interface DiagnosticRowAction {
+  label: string
+  onClick: () => void
+  /** Optional aria-label override. Defaults to `label`. */
+  ariaLabel?: string
+}
+
 interface DiagnosticRowProps {
   label: string
   value: string
   raw: string
   ok?: boolean
   onCopy: (raw: string, label: string) => void
+  /** Optional inline action button rendered before the Copy button. */
+  action?: DiagnosticRowAction
 }
 
 function DiagnosticRow({
@@ -175,6 +190,7 @@ function DiagnosticRow({
   raw,
   ok,
   onCopy,
+  action,
 }: DiagnosticRowProps): React.ReactElement {
   const dotColor =
     ok === undefined
@@ -194,6 +210,21 @@ function DiagnosticRow({
       />
       <span className="text-xs text-[#8ba4b8] w-32 flex-shrink-0">{label}</span>
       <span className="text-sm text-[#e8f4ff] font-mono flex-1 truncate">{value}</span>
+      {action && (
+        <button
+          type="button"
+          onClick={action.onClick}
+          className="text-xs px-2 py-1 rounded text-[#e8f4ff] hover:text-white transition-colors"
+          style={{
+            background: 'rgba(127, 29, 29, 0.6)',          // red-900/60
+            border: '1px solid rgba(220, 38, 38, 0.6)',    // red-600/60
+          }}
+          aria-label={action.ariaLabel ?? action.label}
+          title={action.label}
+        >
+          {action.label}
+        </button>
+      )}
       <button
         type="button"
         onClick={() => onCopy(raw, label)}
@@ -373,12 +404,25 @@ export function DiagnosticsPanel({ activeTab }: DiagnosticsPanelProps): React.Re
             ok={rows.daemon.ok}
             onCopy={handleCopy}
           />
+          {/* TASK-026: when the binding reports `denied` or `restricted`, surface
+              an inline "Open System Settings" button that deep-links into
+              System Settings → Privacy → Microphone via the
+              `x-apple.systempreferences:` URL scheme. */}
           <DiagnosticRow
             label="Mic permission"
             value={rows.mic.display}
             raw={rows.mic.raw}
             ok={rows.mic.ok}
             onCopy={handleCopy}
+            action={
+              snapshot && (snapshot.micPermission === 'denied' || snapshot.micPermission === 'restricted')
+                ? {
+                    label: 'Open System Settings',
+                    ariaLabel: 'Open System Settings to grant microphone access',
+                    onClick: () => BrowserOpenURL(MIC_SETTINGS_URL),
+                  }
+                : undefined
+            }
           />
           <DiagnosticRow
             label="Mobile API"
