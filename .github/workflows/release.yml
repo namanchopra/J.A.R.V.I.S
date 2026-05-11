@@ -101,6 +101,12 @@ jobs:
         timeout-minutes: 10
         run: bash build/scripts/fetch-python.sh
 
+      # pyaudio publishes no cp313 arm64 wheel on macOS, so pip falls back to
+      # compiling from source — which needs portaudio's headers. Pre-install
+      # the C library so `pip install pyaudio` finds <portaudio.h>.
+      - name: Install portaudio (pyaudio build dep)
+        run: brew install portaudio
+
       - name: Build relocatable daemon venv (TASK-009)
         timeout-minutes: 20
         run: bash build/scripts/build-daemon-venv.sh
