@@ -184,7 +184,7 @@ export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.R
   // -------------------------------------------------------------------
   const [ttsProvider, setTtsProvider] = useState<TTSOption['value']>('vibevoice')
   const [sttModel, setSttModel] = useState<STTOption['value']>('whisper-small.en')
-  const [voicePreset, setVoicePreset] = useState<string>(TTS_OPTIONS[0].presets[0].value)
+  const [voicePreset, setVoicePreset] = useState<string>(TTS_OPTIONS[0]!.presets[0]!.value)
   const [micInputDevice, setMicInputDevice] = useState<string>('')
   const [wakeWordEnabled, setWakeWordEnabled] = useState<boolean>(true)
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([])
@@ -195,7 +195,7 @@ export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.R
   // Currently-selected TTS option (drives the dependent preset dropdown).
   // -------------------------------------------------------------------
   const selectedTTS = useMemo<TTSOption>(
-    () => TTS_OPTIONS.find((o) => o.value === ttsProvider) ?? TTS_OPTIONS[0],
+    () => TTS_OPTIONS.find((o) => o.value === ttsProvider) ?? TTS_OPTIONS[0]!,
     [ttsProvider],
   )
 
@@ -219,7 +219,7 @@ export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.R
       // so the dropdown is still functional.
       const fallback: AudioDevice[] = [{ id: 'default', name: 'Default', isDefault: true }]
       setAudioDevices(fallback)
-      setMicInputDevice(fallback[0].id)
+      setMicInputDevice(fallback[0]!.id)
       return
     }
     let cancelled = false
@@ -231,14 +231,14 @@ export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.R
           ? devs
           : [{ id: 'default', name: 'Default', isDefault: true }]
         setAudioDevices(list)
-        const def = list.find((d) => d.isDefault) ?? list[0]
+        const def = list.find((d) => d.isDefault) ?? list[0]!
         setMicInputDevice(def.id)
       })
       .catch(() => {
         if (cancelled) return
         const fallback: AudioDevice[] = [{ id: 'default', name: 'Default', isDefault: true }]
         setAudioDevices(fallback)
-        setMicInputDevice(fallback[0].id)
+        setMicInputDevice(fallback[0]!.id)
       })
     return () => {
       cancelled = true
@@ -407,7 +407,7 @@ export function VoicePanel({ cfg, setCfg, activeTab }: VoicePanelProps): React.R
           ))}
         </select>
         <p className="text-[10px] text-[#4a6278] mt-1.5 italic">
-          {audioDevices.length === 1 && audioDevices[0].id === 'default'
+          {audioDevices.length === 1 && audioDevices[0]?.id === 'default'
             ? 'No additional inputs detected. The system default microphone will be used.'
             : `${audioDevices.length} input${audioDevices.length === 1 ? '' : 's'} detected via Core Audio.`}
         </p>

@@ -207,11 +207,11 @@ export namespace config {
 	    jarvisWakeSensitivity: number;
 	    jarvisElevenLabsKey: string;
 	    jarvisElevenLabsVoice: string;
-	    useLiveKitTransport: boolean;
-	    livekitUrl: string;
-	    livekitApiKey: string;
-	    livekitApiSecret: string;
-	    livekitRoomName: string;
+	    useLiveKitTransport?: boolean;
+	    livekitUrl?: string;
+	    livekitApiKey?: string;
+	    livekitApiSecret?: string;
+	    livekitRoomName?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -660,6 +660,157 @@ export namespace jarvis {
 
 export namespace main {
 	
+	export class APIKeyValidationResult {
+	    valid: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new APIKeyValidationResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.valid = source["valid"];
+	        this.error = source["error"];
+	    }
+	}
+	export class AudioDevice {
+	    id: string;
+	    name: string;
+	    isDefault: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AudioDevice(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.isDefault = source["isDefault"];
+	    }
+	}
+	export class DaemonStatus {
+	    running: boolean;
+	    restarts: number;
+	    lastError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DaemonStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.running = source["running"];
+	        this.restarts = source["restarts"];
+	        this.lastError = source["lastError"];
+	    }
+	}
+	export class DiskUsageStatus {
+	    jarvisHome: string;
+	    sizeMb: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiskUsageStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.jarvisHome = source["jarvisHome"];
+	        this.sizeMb = source["sizeMb"];
+	    }
+	}
+	export class ModelStatus {
+	    name: string;
+	    path: string;
+	    loaded: boolean;
+	    sizeMb?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ModelStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.path = source["path"];
+	        this.loaded = source["loaded"];
+	        this.sizeMb = source["sizeMb"];
+	    }
+	}
+	export class LLMChainStatus {
+	    active: string;
+	    lastError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LLMChainStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.active = source["active"];
+	        this.lastError = source["lastError"];
+	    }
+	}
+	export class MobileAPIStatus {
+	    port: number;
+	    tokenPreview: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MobileAPIStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.port = source["port"];
+	        this.tokenPreview = source["tokenPreview"];
+	    }
+	}
+	export class DiagnosticsSnapshot {
+	    daemon: DaemonStatus;
+	    micPermission: string;
+	    mobileApi: MobileAPIStatus;
+	    llmChain: LLMChainStatus;
+	    models: ModelStatus[];
+	    ollamaRunning: boolean;
+	    diskUsage: DiskUsageStatus;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiagnosticsSnapshot(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.daemon = this.convertValues(source["daemon"], DaemonStatus);
+	        this.micPermission = source["micPermission"];
+	        this.mobileApi = this.convertValues(source["mobileApi"], MobileAPIStatus);
+	        this.llmChain = this.convertValues(source["llmChain"], LLMChainStatus);
+	        this.models = this.convertValues(source["models"], ModelStatus);
+	        this.ollamaRunning = source["ollamaRunning"];
+	        this.diskUsage = this.convertValues(source["diskUsage"], DiskUsageStatus);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
 	export class MobileConnectionInfo {
 	    ips: string[];
 	    port: number;
@@ -676,6 +827,7 @@ export namespace main {
 	        this.token = source["token"];
 	    }
 	}
+	
 	export class WorkflowPhase {
 	    agentType: string;
 	    repoPath: string;

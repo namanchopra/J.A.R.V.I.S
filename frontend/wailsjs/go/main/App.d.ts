@@ -24,6 +24,8 @@ export function BroadcastCommand(arg1:Array<number>,arg2:string):Promise<Record<
 
 export function BroadcastToAll(arg1:string):Promise<Record<number, string>>;
 
+export function BrowseForDirectory(arg1:string):Promise<string>;
+
 export function CreateRecipe(arg1:string,arg2:Array<model.TemplateParam>,arg3:Array<model.RecipeStep>):Promise<model.SessionTemplate>;
 
 export function CreateSessionGroup(arg1:string,arg2:string,arg3:string):Promise<model.SessionGroup>;
@@ -62,6 +64,8 @@ export function ExecuteNLQuery(arg1:string):Promise<nlquery.QueryResult>;
 
 export function ExecuteWorkflow(arg1:Array<main.WorkflowPhase>):Promise<void>;
 
+export function ExportConfig():Promise<string>;
+
 export function FocusCMuxSurface(arg1:string):Promise<void>;
 
 export function FocusSession(arg1:number):Promise<void>;
@@ -75,6 +79,8 @@ export function GetActiveSessions():Promise<Array<model.Session>>;
 export function GetActivityFeed(arg1:number,arg2:string):Promise<Array<model.ActivityEvent>>;
 
 export function GetAllCosts():Promise<Array<claude.SessionUsage>>;
+
+export function GetAudioInputDevices():Promise<Array<main.AudioDevice>>;
 
 export function GetAutoDetectedCount():Promise<number>;
 
@@ -94,11 +100,15 @@ export function GetDailyCostSummary():Promise<Array<model.DailyCost>>;
 
 export function GetDashboardStats():Promise<model.DashboardStats>;
 
+export function GetDiagnostics():Promise<main.DiagnosticsSnapshot>;
+
 export function GetImpactWarnings():Promise<Array<impact.ImpactWarning>>;
 
 export function GetJarvisHistory():Promise<Array<jarvis.Message>>;
 
 export function GetJarvisState():Promise<string>;
+
+export function GetMicPermissionStatus():Promise<string>;
 
 export function GetMobileConnectionInfo():Promise<main.MobileConnectionInfo>;
 
@@ -174,9 +184,15 @@ export function GitStashDrop(arg1:string,arg2:number):Promise<void>;
 
 export function GitStashList(arg1:string):Promise<Array<git.StashEntry>>;
 
+export function ImportConfig(arg1:string,arg2:boolean):Promise<void>;
+
 export function IsCMuxAvailable():Promise<boolean>;
 
+export function IsFirstRun():Promise<boolean>;
+
 export function IsJarvisDaemonConnected():Promise<boolean>;
+
+export function IsOllamaRunning():Promise<boolean>;
 
 export function LaunchFromTemplate(arg1:string):Promise<void>;
 
@@ -198,13 +214,19 @@ export function ListSessions(arg1:string):Promise<Array<model.Session>>;
 
 export function ListWorkspaces():Promise<Array<workspace.Workspace>>;
 
+export function MarkFirstRunComplete():Promise<void>;
+
 export function OpenApp(arg1:string):Promise<void>;
+
+export function OpenFileForImport():Promise<string>;
 
 export function OpenPRInBrowser(arg1:string):Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
 
 export function OpenWorkspaceInTerminal(arg1:string):Promise<void>;
+
+export function PreviewVoice(arg1:string,arg2:string):Promise<void>;
 
 export function QueueSession(arg1:string,arg2:string,arg3:string,arg4:Array<string>,arg5:string):Promise<model.Session>;
 
@@ -217,6 +239,10 @@ export function RegenerateMobileToken():Promise<void>;
 export function RemoveFromSessionGroup(arg1:string,arg2:string):Promise<void>;
 
 export function RemoveTaskFromWorkflow(arg1:string):Promise<model.Task>;
+
+export function RequestMicPermission():Promise<void>;
+
+export function ResetConfig(arg1:boolean):Promise<void>;
 
 export function RespondToApproval(arg1:number,arg2:string):Promise<void>;
 
@@ -269,5 +295,7 @@ export function UpdateSessionTodo(arg1:string,arg2:string):Promise<void>;
 export function UpdateTaskOutputPath(arg1:string,arg2:string):Promise<model.Task>;
 
 export function UpdateTaskStatus(arg1:string,arg2:string):Promise<model.Task>;
+
+export function ValidateAPIKey(arg1:string,arg2:string):Promise<main.APIKeyValidationResult>;
 
 export function WatchTaskOutput(arg1:string):Promise<void>;

@@ -17,7 +17,6 @@ import { EventsOn, BrowserOpenURL } from '../../wailsjs/runtime/runtime'
 // module` ships the regenerated binding surface to wailsjs/, we ts-expect-error
 // the import so the panel still compiles in dev. Same pattern Onboarding.tsx
 // and DiagnosticsPanel use for not-yet-generated bindings.
-// @ts-expect-error -- new binding, wails generate pending
 import { GetMicPermissionStatus } from '../../wailsjs/go/main/App'
 
 // URL that opens System Settings → Privacy → Microphone on macOS.

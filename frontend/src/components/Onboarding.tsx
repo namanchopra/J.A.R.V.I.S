@@ -40,7 +40,6 @@ import { useEffect, useState } from 'react'
 // (IsFirstRun / MarkFirstRunComplete) until `wails generate module` runs, and
 // TASK-017/018/025 bindings may not have shipped to wailsjs/ in the dev branch
 // either. We ts-expect-error the import sites so the panel still compiles.
-// @ts-expect-error -- new bindings, wails generate pending
 import {
   ValidateAPIKey,
   IsOllamaRunning,

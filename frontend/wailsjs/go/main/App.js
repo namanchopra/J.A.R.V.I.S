@@ -18,6 +18,10 @@ export function BroadcastToAll(arg1) {
   return window['go']['main']['App']['BroadcastToAll'](arg1);
 }
 
+export function BrowseForDirectory(arg1) {
+  return window['go']['main']['App']['BrowseForDirectory'](arg1);
+}
+
 export function CreateRecipe(arg1, arg2, arg3) {
   return window['go']['main']['App']['CreateRecipe'](arg1, arg2, arg3);
 }
@@ -94,6 +98,10 @@ export function ExecuteWorkflow(arg1) {
   return window['go']['main']['App']['ExecuteWorkflow'](arg1);
 }
 
+export function ExportConfig() {
+  return window['go']['main']['App']['ExportConfig']();
+}
+
 export function FocusCMuxSurface(arg1) {
   return window['go']['main']['App']['FocusCMuxSurface'](arg1);
 }
@@ -120,6 +128,10 @@ export function GetActivityFeed(arg1, arg2) {
 
 export function GetAllCosts() {
   return window['go']['main']['App']['GetAllCosts']();
+}
+
+export function GetAudioInputDevices() {
+  return window['go']['main']['App']['GetAudioInputDevices']();
 }
 
 export function GetAutoDetectedCount() {
@@ -158,6 +170,10 @@ export function GetDashboardStats() {
   return window['go']['main']['App']['GetDashboardStats']();
 }
 
+export function GetDiagnostics() {
+  return window['go']['main']['App']['GetDiagnostics']();
+}
+
 export function GetImpactWarnings() {
   return window['go']['main']['App']['GetImpactWarnings']();
 }
@@ -168,6 +184,10 @@ export function GetJarvisHistory() {
 
 export function GetJarvisState() {
   return window['go']['main']['App']['GetJarvisState']();
+}
+
+export function GetMicPermissionStatus() {
+  return window['go']['main']['App']['GetMicPermissionStatus']();
 }
 
 export function GetMobileConnectionInfo() {
@@ -318,12 +338,24 @@ export function GitStashList(arg1) {
   return window['go']['main']['App']['GitStashList'](arg1);
 }
 
+export function ImportConfig(arg1, arg2) {
+  return window['go']['main']['App']['ImportConfig'](arg1, arg2);
+}
+
 export function IsCMuxAvailable() {
   return window['go']['main']['App']['IsCMuxAvailable']();
 }
 
+export function IsFirstRun() {
+  return window['go']['main']['App']['IsFirstRun']();
+}
+
 export function IsJarvisDaemonConnected() {
   return window['go']['main']['App']['IsJarvisDaemonConnected']();
+}
+
+export function IsOllamaRunning() {
+  return window['go']['main']['App']['IsOllamaRunning']();
 }
 
 export function LaunchFromTemplate(arg1) {
@@ -366,8 +398,16 @@ export function ListWorkspaces() {
   return window['go']['main']['App']['ListWorkspaces']();
 }
 
+export function MarkFirstRunComplete() {
+  return window['go']['main']['App']['MarkFirstRunComplete']();
+}
+
 export function OpenApp(arg1) {
   return window['go']['main']['App']['OpenApp'](arg1);
+}
+
+export function OpenFileForImport() {
+  return window['go']['main']['App']['OpenFileForImport']();
 }
 
 export function OpenPRInBrowser(arg1) {
@@ -380,6 +420,10 @@ export function OpenURL(arg1) {
 
 export function OpenWorkspaceInTerminal(arg1) {
   return window['go']['main']['App']['OpenWorkspaceInTerminal'](arg1);
+}
+
+export function PreviewVoice(arg1, arg2) {
+  return window['go']['main']['App']['PreviewVoice'](arg1, arg2);
 }
 
 export function QueueSession(arg1, arg2, arg3, arg4, arg5) {
@@ -404,6 +448,14 @@ export function RemoveFromSessionGroup(arg1, arg2) {
 
 export function RemoveTaskFromWorkflow(arg1) {
   return window['go']['main']['App']['RemoveTaskFromWorkflow'](arg1);
+}
+
+export function RequestMicPermission() {
+  return window['go']['main']['App']['RequestMicPermission']();
+}
+
+export function ResetConfig(arg1) {
+  return window['go']['main']['App']['ResetConfig'](arg1);
 }
 
 export function RespondToApproval(arg1, arg2) {
@@ -508,6 +560,10 @@ export function UpdateTaskOutputPath(arg1, arg2) {
 
 export function UpdateTaskStatus(arg1, arg2) {
   return window['go']['main']['App']['UpdateTaskStatus'](arg1, arg2);
+}
+
+export function ValidateAPIKey(arg1, arg2) {
+  return window['go']['main']['App']['ValidateAPIKey'](arg1, arg2);
 }
 
 export function WatchTaskOutput(arg1) {

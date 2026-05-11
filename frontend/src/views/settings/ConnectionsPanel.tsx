@@ -1,9 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SettingsPanelProps } from './types'
-// New Wails bindings shipped in app_validators.go. The auto-generated TS
-// declarations don't include these yet (regeneration happens after Wave 3
-// merges), so we ts-expect-error the import sites.
-// @ts-expect-error -- new binding, wails generate pending
 import { ValidateAPIKey, IsOllamaRunning } from '../../../wailsjs/go/main/App'
 
 // ---------------------------------------------------------------------------
@@ -349,7 +345,7 @@ export function ConnectionsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ollamaRunning, cfg.jarvisAPIKey, googleKey, anthropicKey, cartesiaKey])
 
-  const [selectedLLM, setSelectedLLM] = useState<string>(LLM_OPTIONS[0].value)
+  const [selectedLLM, setSelectedLLM] = useState<string>(LLM_OPTIONS[0]!.value)
   const selectedAvailability = llmAvailability.find((a) => a.option.value === selectedLLM)
 
   return (

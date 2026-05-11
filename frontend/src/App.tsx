@@ -16,7 +16,6 @@ import { Onboarding } from './components/Onboarding'
 // TASK-024: IsFirstRun is a new Wails binding (app_onboarding.go) that may
 // not be in the generated wailsjs/ declarations yet. ts-expect-error keeps
 // the panel compiling until `wails generate module` runs.
-// @ts-expect-error -- new binding, wails generate pending
 import { IsFirstRun } from '../wailsjs/go/main/App'
 
 // ---------------------------------------------------------------------------
