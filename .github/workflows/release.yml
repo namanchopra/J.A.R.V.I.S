@@ -126,12 +126,18 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash build/scripts/fetch-models.sh
 
-      # The darwin postBuildHook in wails.json automatically invokes
-      # build/scripts/post-build.sh after this step, which rsyncs the
-      # daemon venv and bundled models into Jarvis.app/Contents/Resources/.
       - name: Build Jarvis.app (TASK-027)
         timeout-minutes: 20
         run: wails build -platform darwin/arm64 -clean
+
+      # Wails v2's wails.json `postBuildHooks` field is silently ignored
+      # (it's not part of the v2 schema, despite the docs implying so).
+      # Invoke post-build.sh explicitly so the daemon venv + bundled models
+      # actually end up inside Jarvis.app/Contents/Resources/ -- without this
+      # the DMG ships as a ~10MB empty shell with no Python runtime.
+      - name: Bundle daemon venv + models into Jarvis.app
+        timeout-minutes: 10
+        run: bash build/scripts/post-build.sh
 
       - name: Codesign Jarvis.app (ad-hoc, hardened runtime)
         timeout-minutes: 10
