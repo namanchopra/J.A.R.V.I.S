@@ -11,7 +11,9 @@ Jarvis is a desktop voice assistant that drives your AI coding agents the way yo
 
 ## Download
 
-➜ **[Get the latest DMG](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)** · Apple Silicon Macs (M1 / M2 / M3 / M4) · macOS 12+ · ~2.5 GB (bundles a portable Python runtime + the VibeVoice and Whisper models — no first-run download required)
+➜ **[Get the latest DMG](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)** · Apple Silicon Macs (M1 / M2 / M3 / M4) · macOS 12+ · ~1.7 GB DMG (bundles a portable Python runtime + the VibeVoice voice preset)
+
+**First launch** downloads ~2.4 GB of model weights (VibeVoice + Whisper) to `~/.cache/huggingface/` — about 5–10 min on home internet. After that, Jarvis runs fully offline.
 
 After downloading, see **[Install](#install)** below — the first launch needs a one-time Gatekeeper workaround because the build is ad-hoc signed.
 
@@ -24,7 +26,7 @@ After downloading, see **[Install](#install)** below — the first launch needs 
 
 > Apple Silicon (M1 or later) running macOS 12 or newer.
 
-1. **Download** the latest `Jarvis-vX.Y.Z.dmg` from the [Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases) page. The DMG is about 3.5 GB because it bundles a portable Python runtime and the VibeVoice + Whisper models — no first-run download required.
+1. **Download** the latest `Jarvis-vX.Y.Z.dmg` from the [Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases) page. The DMG is about 1.7 GB and bundles a portable Python runtime plus the VibeVoice voice preset. On first launch Jarvis fetches the ~2.4 GB of VibeVoice + Whisper model weights to `~/.cache/huggingface/` (one-time, ~5–10 min on home internet); after that it runs fully offline.
 2. **Mount and install.** Open the DMG and drag **Jarvis.app** into `/Applications`.
 3. **Get past Gatekeeper.** The first launch will be blocked with a *"developer cannot be verified"* warning. This is expected — the v0.1 build is ad-hoc signed because there is no Apple Developer ID attached yet, and Apple's notarization service requires one. To get past it:
    - Open `/Applications` in Finder.

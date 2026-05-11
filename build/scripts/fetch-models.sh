@@ -295,25 +295,44 @@ voice_preset_download() {
 
 log "Fetching models into ${MODELS_DIR}"
 log "  (HF_TOKEN $([[ -n "${HF_TOKEN:-}" ]] && echo "is set" || echo "not set"); cache enabled; re-runs are no-ops)"
+log "  LIGHT_BUNDLE=${LIGHT_BUNDLE:-0} (1 = skip big HF model files, ship voice preset only)"
 log ""
 
-log "[1/3] VibeVoice realtime model: ${VIBEVOICE_REPO}"
-hf_download "${VIBEVOICE_REPO}" "${VIBEVOICE_DIR}" "${VIBEVOICE_MAIN_FILE}"
-vibevoice_bytes="$(dir_bytes "${VIBEVOICE_DIR}")"
-log "       subtotal: $(fmt_bytes "${vibevoice_bytes}")"
-log ""
+if [[ "${LIGHT_BUNDLE:-0}" == "1" ]]; then
+    # Voice preset stays bundled because it's tiny (~4 MB) and the daemon's
+    # VibeVoice service can't pick a voice without it. The big model weights
+    # (~2.4 GB combined) are NOT bundled — they auto-download via HuggingFace
+    # on first launch, the same as Kokoro does. This keeps the DMG under
+    # GitHub's 2 GB asset limit while preserving a self-contained DMG file.
+    log "[1/1] VibeVoice voice preset: ${VOICE_PRESET_NAME}"
+    voice_preset_download
+    voices_bytes="$(dir_bytes "${VIBEVOICE_VOICES_DIR}")"
+    log "       subtotal (voices/): $(fmt_bytes "${voices_bytes}")"
+    log ""
+    log "LIGHT_BUNDLE: skipped VibeVoice + Whisper model downloads."
+    log "  The daemon will fetch them to ~/.cache/huggingface on first launch:"
+    log "    - ${VIBEVOICE_REPO} (~1.9 GiB)"
+    log "    - ${WHISPER_REPO} (~460 MiB)"
+    log ""
+else
+    log "[1/3] VibeVoice realtime model: ${VIBEVOICE_REPO}"
+    hf_download "${VIBEVOICE_REPO}" "${VIBEVOICE_DIR}" "${VIBEVOICE_MAIN_FILE}"
+    vibevoice_bytes="$(dir_bytes "${VIBEVOICE_DIR}")"
+    log "       subtotal: $(fmt_bytes "${vibevoice_bytes}")"
+    log ""
 
-log "[2/3] VibeVoice voice preset: ${VOICE_PRESET_NAME}"
-voice_preset_download
-voices_bytes="$(dir_bytes "${VIBEVOICE_VOICES_DIR}")"
-log "       subtotal (voices/): $(fmt_bytes "${voices_bytes}")"
-log ""
+    log "[2/3] VibeVoice voice preset: ${VOICE_PRESET_NAME}"
+    voice_preset_download
+    voices_bytes="$(dir_bytes "${VIBEVOICE_VOICES_DIR}")"
+    log "       subtotal (voices/): $(fmt_bytes "${voices_bytes}")"
+    log ""
 
-log "[3/3] Whisper MLX model: ${WHISPER_REPO}"
-hf_download "${WHISPER_REPO}" "${WHISPER_DIR}" "${WHISPER_MAIN_FILE}"
-whisper_bytes="$(dir_bytes "${WHISPER_DIR}")"
-log "       subtotal: $(fmt_bytes "${whisper_bytes}")"
-log ""
+    log "[3/3] Whisper MLX model: ${WHISPER_REPO}"
+    hf_download "${WHISPER_REPO}" "${WHISPER_DIR}" "${WHISPER_MAIN_FILE}"
+    whisper_bytes="$(dir_bytes "${WHISPER_DIR}")"
+    log "       subtotal: $(fmt_bytes "${whisper_bytes}")"
+    log ""
+fi
 
 # -----------------------------------------------------------------------------
 # Size cap enforcement (TASK-013 acceptance criterion)

@@ -120,8 +120,15 @@ jobs:
       # HF_TOKEN must be configured in repo Actions secrets
       # (Settings → Secrets and variables → Actions → New repository secret).
       # A read-scope token is sufficient.
-      - name: Fetch VibeVoice + Whisper models (TASK-013)
-        timeout-minutes: 30
+      # LIGHT_BUNDLE=1 skips the 2.4 GB of VibeVoice + Whisper model weights
+      # and bundles only the 4 MB voice preset. We need this to keep the DMG
+      # under GitHub's 2 GiB release-asset hard limit. The daemon will fetch
+      # the model weights to ~/.cache/huggingface on first launch via the
+      # same HuggingFace mechanism Kokoro already uses.
+      - name: Fetch VibeVoice voice preset (light bundle)
+        env:
+          LIGHT_BUNDLE: '1'
+        timeout-minutes: 5
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash build/scripts/fetch-models.sh
