@@ -146,15 +146,34 @@ class VibeVoiceTTSService(FrameProcessor):
             # ~/.jarvis/models/vibevoice) so we never hit the network on a
             # fresh DMG install. Falls through to the HF repo id when no
             # local snapshot is present (wails dev / first run).
+            #
+            # IMPORTANT: only override when the directory actually contains
+            # the model weights. Dev-mode users may have a partial layout
+            # where ~/.jarvis/models/vibevoice/voices/ exists (voice presets)
+            # but the main weights live in the HuggingFace cache. Pointing
+            # from_pretrained at a weights-less directory raises
+            # "Error no file named model.safetensors found in directory ..."
+            # and falls back to Edge TTS.
             resolved_dir = _resolve_model_dir()
             if resolved_dir:
                 local_vibevoice = os.path.join(resolved_dir, "vibevoice")
-                if os.path.isdir(local_vibevoice):
+                has_weights = (
+                    os.path.isfile(os.path.join(local_vibevoice, "model.safetensors"))
+                    or os.path.isfile(os.path.join(local_vibevoice, "pytorch_model.bin"))
+                )
+                if os.path.isdir(local_vibevoice) and has_weights:
                     logger.info(
                         "Using bundled VibeVoice snapshot at %s",
                         local_vibevoice,
                     )
                     self._model_path = local_vibevoice
+                elif os.path.isdir(local_vibevoice):
+                    logger.info(
+                        "Local %s exists but is missing model weights — "
+                        "loading model from HuggingFace cache (voices/ "
+                        "still read from local).",
+                        local_vibevoice,
+                    )
 
             logger.info("Loading VibeVoice model from %s (device=%s)...", self._model_path, self._device)
 
