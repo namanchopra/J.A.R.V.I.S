@@ -155,10 +155,16 @@ dir_bytes() {
 # Tool detection
 # -----------------------------------------------------------------------------
 
-have_hf_cli=0
-if command -v huggingface-cli >/dev/null 2>&1; then
-    have_hf_cli=1
+# huggingface_hub >= 1.x ships the `hf` command; the legacy `huggingface-cli`
+# was deprecated and prints a hard "no longer works" warning. Prefer `hf` and
+# fall back to the old name only if a really old huggingface_hub is around.
+HF_BIN=""
+if command -v hf >/dev/null 2>&1; then
+    HF_BIN="hf"
+elif command -v huggingface-cli >/dev/null 2>&1; then
+    HF_BIN="huggingface-cli"
 fi
+have_hf_cli=$([[ -n "${HF_BIN}" ]] && echo 1 || echo 0)
 
 # -----------------------------------------------------------------------------
 # Dry-run path: report plan and exit before any network I/O.
@@ -170,7 +176,7 @@ if [[ "${DRY_RUN}" == "1" ]]; then
     log "Repo root:              ${REPO_ROOT}"
     log "Models directory:       ${MODELS_DIR}"
     log "Size cap:               $(fmt_bytes "${SIZE_CAP_BYTES}") (${SIZE_CAP_BYTES} bytes)"
-    log "huggingface-cli:        $([[ ${have_hf_cli} -eq 1 ]] && echo "found ($(command -v huggingface-cli))" || echo "MISSING - install with: pip3 install --user 'huggingface_hub[cli]'")"
+    log "HuggingFace CLI:        $([[ ${have_hf_cli} -eq 1 ]] && echo "found: ${HF_BIN} ($(command -v "${HF_BIN}"))" || echo "MISSING - install with: brew install huggingface-cli")"
     log "HF_TOKEN:               $([[ -n "${HF_TOKEN:-}" ]] && echo "set (will pass through to huggingface-cli)" || echo "not set (anonymous access)")"
     log ""
     log "Planned downloads:"
@@ -194,12 +200,12 @@ fi
 # -----------------------------------------------------------------------------
 
 if [[ ${have_hf_cli} -ne 1 ]]; then
-    die "huggingface-cli not found on PATH.
+    die "HuggingFace CLI not found on PATH (looked for 'hf' and 'huggingface-cli').
        Install with one of:
-           pip3 install --user 'huggingface_hub[cli]'
+           brew install huggingface-cli         # macOS, recommended
            pipx install 'huggingface_hub[cli]'
            uv tool install 'huggingface_hub[cli]'
-       Then ensure ~/.local/bin (or pipx's bin) is on PATH and re-run."
+       Then re-run."
 fi
 
 if ! command -v curl >/dev/null 2>&1; then
@@ -227,7 +233,10 @@ hf_download() {
     local dest="$2"
     local canonical_file="$3"
 
-    local args=(download "${repo}" --local-dir "${dest}" --local-dir-use-symlinks False)
+    # hf >=1.0 dropped `--local-dir-use-symlinks` (it's now the default to
+    # materialize real files in --local-dir). The legacy huggingface-cli still
+    # accepts it but emits a deprecation warning; safe to omit either way.
+    local args=(download "${repo}" --local-dir "${dest}")
     if [[ -n "${HF_TOKEN:-}" ]]; then
         args+=(--token "${HF_TOKEN}")
     fi
@@ -240,10 +249,9 @@ hf_download() {
         fi
     fi
 
-    # Run huggingface-cli; it handles its own caching so re-runs are cheap.
-    # We pipe stderr through unchanged so users see HF progress bars on TTY.
-    log "  running: huggingface-cli download ${repo} --local-dir ${dest} ..."
-    huggingface-cli "${args[@]}" >/dev/null
+    # Run the HF CLI; it handles its own caching so re-runs are cheap.
+    log "  running: ${HF_BIN} download ${repo} --local-dir ${dest} ..."
+    "${HF_BIN}" "${args[@]}" >/dev/null
 
     if [[ ! -f "${dest}/${canonical_file}" ]]; then
         die "expected file '${canonical_file}' missing from ${dest} after download.
