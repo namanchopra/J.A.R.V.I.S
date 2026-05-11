@@ -12,6 +12,12 @@ import { SessionGroups } from './components/SessionGroups'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { JarvisView } from './components/JarvisView'
 import { JarvisHudView } from './components/JarvisHudView'
+import { Onboarding } from './components/Onboarding'
+// TASK-024: IsFirstRun is a new Wails binding (app_onboarding.go) that may
+// not be in the generated wailsjs/ declarations yet. ts-expect-error keeps
+// the panel compiling until `wails generate module` runs.
+// @ts-expect-error -- new binding, wails generate pending
+import { IsFirstRun } from '../wailsjs/go/main/App'
 
 // ---------------------------------------------------------------------------
 // App
@@ -21,6 +27,15 @@ function App(): React.ReactElement {
   const [activeView, setActiveView] = useState<ViewId>('jarvis')
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null)
   const [pendingSessionId, setPendingSessionId] = useState<string | null>(null)
+  // TASK-024: first-run modal gate. `null` while we're still waiting on the
+  // backend; the HUD render is suppressed during that brief window so users
+  // never see a flash of unconfigured UI.
+  const [firstRun, setFirstRun] = useState<boolean | null>(null)
+  useEffect(() => {
+    IsFirstRun()
+      .then((v: boolean) => setFirstRun(Boolean(v)))
+      .catch(() => setFirstRun(false))
+  }, [])
 
   // Navigate to tasks view by task ID (from search or activity)
   const handleSelectTaskById = useCallback((taskId: string) => {
@@ -73,6 +88,15 @@ function App(): React.ReactElement {
     })
     return () => { cancel() }
   }, [])
+
+  // TASK-024: hold rendering until IsFirstRun resolves so we don't flash
+  // the HUD behind a modal that's about to mount.
+  if (firstRun === null) {
+    return <div className="flex h-screen bg-app text-primary" />
+  }
+  if (firstRun) {
+    return <Onboarding onComplete={() => setFirstRun(false)} />
+  }
 
   return (
     <div className="flex h-screen bg-app text-primary">
