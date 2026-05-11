@@ -9,5 +9,12 @@
   "author": {
     "name": "namanchopra",
     "email": "78446083+namanchopra@users.noreply.github.com"
+  },
+  "info": {
+    "companyName": "Jarvis",
+    "productName": "Jarvis",
+    "productVersion": "0.1.0",
+    "copyright": "Copyright (c) 2026 namanchopra",
+    "comments": "Jarvis - AI Voice Companion. macOS permission strings (NSMicrophoneUsageDescription, NSAppleEventsUsageDescription), LSMinimumSystemVersion=12.0, and LSArchitecturePriority=[arm64] are declared in build/darwin/Info.plist (Wails v2 renders that template into the bundled .app). Hardened-runtime entitlements live at build/darwin/entitlements.plist and are picked up by codesign during `wails build`."
   }
 }

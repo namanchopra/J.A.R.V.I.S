@@ -556,34 +556,26 @@ export function JarvisHudView(): React.ReactElement {
     return () => { mountedRef.current = false }
   }, [])
 
-  // -- Mute state (persisted in localStorage) ---------------------------------
-  const MUTE_STORAGE_KEY = 'jarvis-muted'
+  // -- Mute state (session-only; intentionally NOT persisted) -----------------
+  // Rationale: persisting mute across launches is a footgun -- a user who
+  // muted in a previous session would launch a fresh DMG install and find
+  // the mic permanently disabled with no obvious cause. Always start
+  // unmuted; only honor toggles within the current session.
+  const [isMuted, setIsMuted] = useState<boolean>(false)
 
-  const [isMuted, setIsMuted] = useState<boolean>(() => {
+  // Best-effort: clear any stale legacy key from older builds that did
+  // persist mute. Runs once on mount; failures are silently ignored.
+  useEffect(() => {
     try {
-      return localStorage.getItem(MUTE_STORAGE_KEY) === 'true'
-    } catch {
-      return false
-    }
-  })
+      localStorage.removeItem('jarvis-muted')
+    } catch { /* storage unavailable */ }
+  }, [])
 
   const toggleMute = useCallback(async () => {
     const next = !isMuted
     setIsMuted(next)
-    try {
-      localStorage.setItem(MUTE_STORAGE_KEY, String(next))
-    } catch { /* storage unavailable */ }
     await sendJarvisCommand(next ? '__mute__' : '__unmute__')
   }, [isMuted])
-
-  // Restore mute state on mount: if localStorage says muted, send __mute__
-  useEffect(() => {
-    if (isMuted) {
-      void sendJarvisCommand('__mute__')
-    }
-    // Only run on mount -- deliberately ignore isMuted changes here
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   // -- Keyboard shortcut: Cmd+Shift+M (macOS) / Ctrl+Shift+M -----------------
   useEffect(() => {

@@ -3,12 +3,14 @@ package main
 import (
 	"embed"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 
 	"time"
 
 	"github.com/namanchopra/jarvis/internal/agent"
+	"github.com/namanchopra/jarvis/internal/arch"
 	"github.com/namanchopra/jarvis/internal/cli"
 	"github.com/namanchopra/jarvis/internal/cmux"
 	"github.com/namanchopra/jarvis/internal/paths"
@@ -73,6 +75,18 @@ func isCLIMode() bool {
 }
 
 func main() {
+	// Architecture guard: Jarvis requires native Apple Silicon (arm64). If the
+	// Universal binary is launched under Rosetta 2 (x86_64), the Python daemon
+	// will fail deep inside an MPS call. Fail fast with a clear message that
+	// is visible both on stderr (terminal) and in Console.app (.app bundle —
+	// stderr from launchd-started apps is captured into the system log).
+	if err := arch.Check(); err != nil {
+		// log.Fatalln writes to the standard logger (stderr by default) and
+		// calls os.Exit(1). The timestamped prefix makes the message easy
+		// to find in Console.app when launched as a .app bundle.
+		log.Fatalln(err.Error())
+	}
+
 	// Migrate ~/.awm → ~/.jarvis if needed (one-shot, idempotent on subsequent runs).
 	if err := paths.MigrateLegacyHome(); err != nil {
 		slog.Warn("legacy home migration failed; continuing with new path", "err", err)

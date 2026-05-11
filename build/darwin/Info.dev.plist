@@ -18,11 +18,19 @@
         <key>CFBundleIconFile</key>
         <string>iconfile</string>
         <key>LSMinimumSystemVersion</key>
-        <string>10.13.0</string>
+        <string>12.0</string>
+        <key>LSArchitecturePriority</key>
+        <array>
+            <string>arm64</string>
+        </array>
         <key>NSHighResolutionCapable</key>
         <string>true</string>
         <key>NSHumanReadableCopyright</key>
         <string>{{.Info.Copyright}}</string>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>Jarvis listens for your voice commands when you say 'Hey Jarvis' or activate the HUD.</string>
+        <key>NSAppleEventsUsageDescription</key>
+        <string>Jarvis can focus and send commands to terminal sessions on your behalf.</string>
         {{if .Info.FileAssociations}}
         <key>CFBundleDocumentTypes</key>
         <array>

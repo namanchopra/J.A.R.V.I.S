@@ -1,0 +1,66 @@
+# CI workflow for Jarvis — verifies that source builds and tests pass on every
+# PR to main and every push to main. No signing, no DMG, no secrets.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel an in-flight CI run for a PR when new commits are pushed. Group by
+# workflow + ref so PR runs and `push to main` runs don't cancel each other.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: macos-14  # Apple Silicon, same as release.yml for parity
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go test
+        run: go test ./...
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Wails build (compile check)
+        # No -platform flag — we just want to confirm the full app compiles.
+        # No signing, no DMG. Skip if -clean ever causes runner issues.
+        run: wails build -skipbindings=false

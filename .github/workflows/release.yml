@@ -1,0 +1,108 @@
+# Release workflow for Jarvis — builds and publishes a signed DMG on tag push.
+#
+# Status: SKELETON (TASK-007). Most build steps are commented-out placeholders;
+# TASK-027 fills them in once build/scripts/fetch-python.sh,
+# build/scripts/build-daemon-venv.sh, build/scripts/fetch-models.sh,
+# build/darwin/entitlements.plist, and CHANGELOG.md exist.
+#
+# The current state runs to completion as a no-op on any v*.*.* tag, which lets
+# us validate the workflow trigger + concurrency wiring without producing a DMG.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# Prevent two builds of the same tag from racing each other.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Minimum permissions: read source. release.yml will need `contents: write` for
+# `gh release create` (commented for now — uncomment when TASK-027 enables it).
+permissions:
+  contents: read
+  # contents: write  # TASK-027: required for `gh release create` step below
+
+jobs:
+  build-dmg:
+    name: Build and publish Jarvis DMG
+    runs-on: macos-14  # Apple Silicon runner (arm64)
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # ----------------------------------------------------------------------
+      # The steps below are stubbed out until TASK-008/009/013/004/027 land the
+      # supporting build scripts and entitlements. Once those exist, uncomment.
+      # ----------------------------------------------------------------------
+
+      # - name: Fetch python-build-standalone (TASK-008)
+      #   run: bash build/scripts/fetch-python.sh
+
+      # - name: Build relocatable daemon venv (TASK-009)
+      #   run: bash build/scripts/build-daemon-venv.sh
+
+      # - name: Fetch VibeVoice + Whisper models (TASK-013)
+      #   env:
+      #     HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      #   run: bash build/scripts/fetch-models.sh
+
+      # - name: Build Jarvis.app (TASK-027)
+      #   run: wails build -platform darwin/arm64 -clean
+
+      # - name: Codesign Jarvis.app (ad-hoc, hardened runtime) (TASK-004 + TASK-027)
+      #   run: |
+      #     codesign --force --deep \
+      #       --options runtime \
+      #       --entitlements build/darwin/entitlements.plist \
+      #       --sign - \
+      #       build/bin/Jarvis.app
+
+      # - name: Create DMG (TASK-027)
+      #   run: |
+      #     brew install create-dmg
+      #     VERSION="${GITHUB_REF_NAME#v}"
+      #     create-dmg \
+      #       --volname "Jarvis" \
+      #       --window-size 600 400 \
+      #       --icon-size 100 \
+      #       "Jarvis-${VERSION}.dmg" \
+      #       build/bin/Jarvis.app
+
+      # - name: Publish GitHub Release (TASK-027 + TASK-029)
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: |
+      #     VERSION="${GITHUB_REF_NAME#v}"
+      #     gh release create "${GITHUB_REF_NAME}" \
+      #       "Jarvis-${VERSION}.dmg" \
+      #       --title "Jarvis ${GITHUB_REF_NAME}" \
+      #       --notes-file CHANGELOG.md
+
+      - name: Skeleton no-op marker
+        run: |
+          echo "release.yml skeleton ran for tag ${GITHUB_REF_NAME}."
+          echo "Build steps are stubbed pending TASK-008/009/013/004/027."

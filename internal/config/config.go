@@ -72,15 +72,18 @@ type Config struct {
 	JarvisElevenLabsKey   string  `json:"jarvisElevenLabsKey"`   // ElevenLabs API key for high-quality voice
 	JarvisElevenLabsVoice string  `json:"jarvisElevenLabsVoice"` // ElevenLabs voice ID (empty = default Daniel)
 
-	// LiveKit voice transport settings (spike — opt-in via UseLiveKitTransport).
-	// When enabled, the daemon joins a LiveKit room as audio I/O instead of
-	// using the local Mac mic+speaker. Mobile clients connect to the same
-	// room to talk to Jarvis from anywhere over Tailscale or LiveKit Cloud.
-	UseLiveKitTransport bool   `json:"useLiveKitTransport"`
-	LiveKitURL          string `json:"livekitUrl"`          // wss://<project>.livekit.cloud or self-host URL
-	LiveKitAPIKey       string `json:"livekitApiKey"`       // LiveKit API key (used to mint tokens server-side)
-	LiveKitAPISecret    string `json:"livekitApiSecret"`    // LiveKit API secret (server-only, never sent to clients)
-	LiveKitRoomName     string `json:"livekitRoomName"`     // Default room (e.g. "jarvis")
+	// LiveKit voice transport settings (opt-in via UseLiveKitTransport).
+	// Defaults: disabled, no credentials. A fresh install starts with
+	// LocalAudioTransport and these keys are omitted from the on-disk JSON
+	// (omitempty) so the default config stays clean. Users who want LiveKit
+	// must explicitly set UseLiveKitTransport=true and provide credentials;
+	// existing users whose config already has useLiveKitTransport=true are
+	// preserved on load (no force-overwrite — see Load()).
+	UseLiveKitTransport bool   `json:"useLiveKitTransport,omitempty"`
+	LiveKitURL          string `json:"livekitUrl,omitempty"`      // wss://<project>.livekit.cloud or self-host URL
+	LiveKitAPIKey       string `json:"livekitApiKey,omitempty"`   // LiveKit API key (used to mint tokens server-side)
+	LiveKitAPISecret    string `json:"livekitApiSecret,omitempty"` // LiveKit API secret (server-only, never sent to clients)
+	LiveKitRoomName     string `json:"livekitRoomName,omitempty"` // Default room (e.g. "jarvis")
 }
 
 // UnmarshalJSON reads jarvis* keys preferentially. If a jarvis* key is absent
