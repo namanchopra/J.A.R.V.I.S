@@ -43,7 +43,6 @@ if TYPE_CHECKING:
 
     from events import EventStore
     from priority import PriorityEngine
-    from tts import TTSEngine
 
 logger: Final = logging.getLogger("jarvis-daemon.briefing")
 

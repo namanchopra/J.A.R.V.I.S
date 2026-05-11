@@ -24,11 +24,11 @@ import { describe, it, expect } from 'vitest'
 import SOURCE from './VoicePanel.tsx?raw'
 
 describe('VoicePanel TASK-018 (TTS + STT dropdowns)', () => {
-  it('lists all 4 TTS providers in the TTS_OPTIONS catalogue', () => {
+  it('lists the 3 TTS providers in the TTS_OPTIONS catalogue (Edge removed)', () => {
     expect(SOURCE).toMatch(/value:\s*['"]vibevoice['"]/)
     expect(SOURCE).toMatch(/value:\s*['"]kokoro['"]/)
-    expect(SOURCE).toMatch(/value:\s*['"]edge['"]/)
     expect(SOURCE).toMatch(/value:\s*['"]cartesia['"]/)
+    expect(SOURCE).not.toMatch(/value:\s*['"]edge['"]/)
   })
 
   it('renders a <select> bound to ttsProvider with all 4 options', () => {

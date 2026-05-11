@@ -66,7 +66,7 @@ function wailsApp(): WailsAppBindings | null {
 type Availability = 'bundled' | 'available' | 'needs-key'
 
 interface TTSOption {
-  value: 'vibevoice' | 'kokoro' | 'edge' | 'cartesia'
+  value: 'vibevoice' | 'kokoro' | 'cartesia'
   label: string
   availability: Availability
   hint: string
@@ -96,19 +96,6 @@ const TTS_OPTIONS: TTSOption[] = [
       { value: 'am_adam', label: 'Adam (male, US)' },
       { value: 'bf_emma', label: 'Emma (female, UK)' },
       { value: 'bm_george', label: 'George (male, UK)' },
-    ],
-  },
-  {
-    value: 'edge',
-    label: 'Microsoft Edge TTS (cloud-free)',
-    availability: 'available',
-    hint: 'Uses Microsoft Edge\'s anonymous TTS endpoint. No API key needed.',
-    presets: [
-      { value: 'en-GB-RyanNeural', label: 'Ryan (male, UK)' },
-      { value: 'en-GB-SoniaNeural', label: 'Sonia (female, UK)' },
-      { value: 'en-US-GuyNeural', label: 'Guy (male, US)' },
-      { value: 'en-US-JennyNeural', label: 'Jenny (female, US)' },
-      { value: 'en-AU-WilliamNeural', label: 'William (male, AU)' },
     ],
   },
   {

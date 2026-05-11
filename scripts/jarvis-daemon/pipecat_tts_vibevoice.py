@@ -79,7 +79,6 @@ class VibeVoiceTTSService(FrameProcessor):
         device: str | None = None,
         inference_steps: int = 5,
         cfg_scale: float = 1.5,
-        fallback_voice: str = "en-GB-RyanNeural",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -87,7 +86,6 @@ class VibeVoiceTTSService(FrameProcessor):
         self._voice = voice
         self._inference_steps = inference_steps
         self._cfg_scale = cfg_scale
-        self._fallback_voice = fallback_voice
         self._text_buffer: str = ""
         self._in_response = False
         self._service = None  # Lazy-loaded StreamingTTSService
@@ -404,7 +402,12 @@ class VibeVoiceTTSService(FrameProcessor):
         await self.push_frame(frame, direction)
 
     async def _synthesize(self, text: str):
-        """Synthesize text to audio via VibeVoice, with Edge TTS fallback."""
+        """Synthesize text to audio via VibeVoice.
+
+        No silent fallback. If VibeVoice fails, the error is logged and
+        propagated as missing audio; the user sees the failure rather than
+        silently switching to a cloud TTS with a different voice.
+        """
         logger.info("TTS synthesizing: %s", text[:60])
         self._audio_chunk_counter = 0
         await self.push_frame(TTSStartedFrame())
@@ -412,16 +415,12 @@ class VibeVoiceTTSService(FrameProcessor):
         try:
             await self._synthesize_vibevoice(text)
             self._consecutive_failures = 0
-        except Exception as e:
+        except Exception:
             self._consecutive_failures += 1
-            logger.warning(
-                "VibeVoice TTS failed (%s, attempt %d), falling back to Edge TTS",
-                e, self._consecutive_failures,
+            logger.exception(
+                "VibeVoice TTS failed (attempt %d) for: %s",
+                self._consecutive_failures, text[:60],
             )
-            try:
-                await self._synthesize_edge_fallback(text)
-            except Exception:
-                logger.exception("Edge TTS fallback also failed for: %s", text[:60])
         finally:
             await self.push_frame(TTSStoppedFrame())
             if self._audio_send_fn is not None:
@@ -523,48 +522,6 @@ class VibeVoiceTTSService(FrameProcessor):
             thread.join(timeout=5.0)
             if errors:
                 raise errors[0]
-
-    async def _synthesize_edge_fallback(self, text: str):
-        """Fallback to Edge TTS when VibeVoice fails."""
-        import edge_tts
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            tmp_path = tmp.name
-
-        try:
-            communicate = edge_tts.Communicate(text, self._fallback_voice)
-            await communicate.save(tmp_path)
-
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-i", tmp_path,
-                "-f", "s16le", "-acodec", "pcm_s16le",
-                "-ar", str(SAMPLE_RATE), "-ac", "1",
-                "-loglevel", "quiet", "-",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            pcm_data, _ = await proc.communicate()
-
-            if pcm_data:
-                chunk_size = SAMPLE_RATE * 2 // 50
-                for i in range(0, len(pcm_data), chunk_size):
-                    chunk = pcm_data[i:i + chunk_size]
-                    await self.push_frame(TTSAudioRawFrame(
-                        audio=chunk,
-                        sample_rate=SAMPLE_RATE,
-                        num_channels=1,
-                    ))
-                    self._maybe_send_audio_level(chunk)
-                    self._maybe_send_mobile_tts(chunk)
-            else:
-                logger.warning("Edge TTS produced no audio for: %s", text[:40])
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
 
 class _VibeVoiceState:
     """Holds loaded model, processor, and voice preset."""

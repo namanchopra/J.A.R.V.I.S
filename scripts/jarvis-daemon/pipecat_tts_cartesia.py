@@ -1,12 +1,9 @@
 """Pipecat TTS processor using Cartesia Sonic 3 (streaming, ~40ms TTFB).
 
-Drop-in replacement for EdgeTTSService. Uses Cartesia's WebSocket API for
-real-time streaming synthesis — no temp files, no ffmpeg, no disk I/O.
-
-Maintains a persistent WebSocket connection for low-latency back-to-back
-synthesis. Reconnects automatically on failure.
-
-Falls back to EdgeTTSService if Cartesia key is not configured or synthesis fails.
+Cloud-based TTS that streams PCM audio over a persistent WebSocket — no
+temp files, no ffmpeg, no disk I/O. Maintains the connection for low-latency
+back-to-back synthesis and reconnects automatically on failure. On synthesis
+error, logs and stops; there is no silent cloud fallback.
 """
 from __future__ import annotations
 
@@ -48,7 +45,7 @@ class CartesiaTTSService(FrameProcessor):
 
     40ms TTFB, streams PCM audio chunks directly — no temp files.
     Keeps a persistent WebSocket connection open across calls.
-    Falls back to EdgeTTSService on failure.
+    On synthesis error, logs and stops (no silent fallback).
     """
 
     def __init__(
@@ -56,14 +53,12 @@ class CartesiaTTSService(FrameProcessor):
         api_key: str,
         voice_id: str = "1463a4e1-56a1-4b41-b257-728d56e93605",
         model: str = "sonic-3",
-        fallback_voice: str = "en-GB-RyanNeural",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._api_key = api_key
         self._voice_id = voice_id
         self._model = model
-        self._fallback_voice = fallback_voice
         self._text_buffer: str = ""
         self._in_response = False
         self._ws = None  # Persistent WebSocket connection
@@ -166,17 +161,13 @@ class CartesiaTTSService(FrameProcessor):
         try:
             await self._synthesize_cartesia(text)
             self._consecutive_failures = 0
-        except Exception as e:
+        except Exception:
             self._consecutive_failures += 1
-            logger.warning(
-                "Cartesia TTS failed (%s, attempt %d), falling back to Edge TTS",
-                e, self._consecutive_failures,
+            logger.exception(
+                "Cartesia TTS failed (attempt %d) for: %s",
+                self._consecutive_failures, text[:60],
             )
             await self._close_ws()  # Force reconnect on next call
-            try:
-                await self._synthesize_edge_fallback(text)
-            except Exception:
-                logger.exception("Edge TTS fallback also failed for: %s", text[:60])
         finally:
             await self.push_frame(TTSStoppedFrame())
             # Reset orb animation level to 0 when speech ends.
@@ -275,44 +266,3 @@ class CartesiaTTSService(FrameProcessor):
 
             await asyncio.wait_for(_read_response(), timeout=_SYNTH_TIMEOUT)
 
-    async def _synthesize_edge_fallback(self, text: str):
-        """Fallback to Edge TTS (same as the original EdgeTTSService)."""
-        import edge_tts
-        import os
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            tmp_path = tmp.name
-
-        try:
-            communicate = edge_tts.Communicate(text, self._fallback_voice)
-            await communicate.save(tmp_path)
-
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-i", tmp_path,
-                "-f", "s16le", "-acodec", "pcm_s16le",
-                "-ar", str(SAMPLE_RATE), "-ac", "1",
-                "-loglevel", "quiet", "-",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            pcm_data, _ = await proc.communicate()
-
-            if pcm_data:
-                chunk_size = SAMPLE_RATE * 2 // 50
-                for i in range(0, len(pcm_data), chunk_size):
-                    chunk = pcm_data[i:i + chunk_size]
-                    await self.push_frame(TTSAudioRawFrame(
-                        audio=chunk,
-                        sample_rate=SAMPLE_RATE,
-                        num_channels=1,
-                    ))
-                    self._maybe_send_audio_level(chunk)
-                    self._maybe_send_mobile_tts(chunk)
-            else:
-                logger.warning("Edge TTS produced no audio for: %s", text[:40])
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass

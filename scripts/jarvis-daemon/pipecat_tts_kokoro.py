@@ -1,9 +1,9 @@
 """Pipecat TTS processor using Kokoro (local, free, ~real-time on Apple Silicon).
 
-Drop-in replacement for CartesiaTTSService. Uses kokoro-onnx for local neural
-TTS — no API key, no network calls, no cost. Falls back to EdgeTTSService on failure.
+Uses kokoro-onnx for local neural TTS — no API key, no network, no cost.
+On synthesis error, logs and stops; there is no cloud fallback.
 
-Model files are auto-downloaded on first use to ~/.awm/models/kokoro/.
+Model files auto-download on first use to ~/.jarvis/models/kokoro/.
 
 Requires: pip install kokoro-onnx
 """
@@ -82,7 +82,7 @@ class KokoroTTSService(FrameProcessor):
 
     Runs the Kokoro 82M parameter neural TTS model locally via ONNX Runtime.
     No API key needed. ~300MB model download on first use.
-    Falls back to EdgeTTSService on failure.
+    On synthesis error, logs and stops (no silent fallback).
     """
 
     def __init__(
@@ -90,14 +90,12 @@ class KokoroTTSService(FrameProcessor):
         voice: str = "af_sarah",
         speed: float = 1.0,
         lang: str = "en-us",
-        fallback_voice: str = "en-GB-RyanNeural",
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._voice = voice
         self._speed = speed
         self._lang = lang
-        self._fallback_voice = fallback_voice
         self._text_buffer: str = ""
         self._in_response = False
         self._kokoro = None  # Lazy-loaded Kokoro instance
@@ -212,16 +210,12 @@ class KokoroTTSService(FrameProcessor):
         try:
             await self._synthesize_kokoro(text)
             self._consecutive_failures = 0
-        except Exception as e:
+        except Exception:
             self._consecutive_failures += 1
-            logger.warning(
-                "Kokoro TTS failed (%s, attempt %d), falling back to Edge TTS",
-                e, self._consecutive_failures,
+            logger.exception(
+                "Kokoro TTS failed (attempt %d) for: %s",
+                self._consecutive_failures, text[:60],
             )
-            try:
-                await self._synthesize_edge_fallback(text)
-            except Exception:
-                logger.exception("Edge TTS fallback also failed for: %s", text[:60])
         finally:
             await self.push_frame(TTSStoppedFrame())
             if self._audio_send_fn is not None:
@@ -256,43 +250,3 @@ class KokoroTTSService(FrameProcessor):
                 self._maybe_send_audio_level(chunk)
                 self._maybe_send_mobile_tts(chunk)
 
-    async def _synthesize_edge_fallback(self, text: str):
-        """Fallback to Edge TTS when Kokoro fails."""
-        import edge_tts
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-            tmp_path = tmp.name
-
-        try:
-            communicate = edge_tts.Communicate(text, self._fallback_voice)
-            await communicate.save(tmp_path)
-
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-i", tmp_path,
-                "-f", "s16le", "-acodec", "pcm_s16le",
-                "-ar", str(SAMPLE_RATE), "-ac", "1",
-                "-loglevel", "quiet", "-",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            pcm_data, _ = await proc.communicate()
-
-            if pcm_data:
-                chunk_size = SAMPLE_RATE * 2 // 50
-                for i in range(0, len(pcm_data), chunk_size):
-                    chunk = pcm_data[i:i + chunk_size]
-                    await self.push_frame(TTSAudioRawFrame(
-                        audio=chunk,
-                        sample_rate=SAMPLE_RATE,
-                        num_channels=1,
-                    ))
-                    self._maybe_send_audio_level(chunk)
-                    self._maybe_send_mobile_tts(chunk)
-            else:
-                logger.warning("Edge TTS produced no audio for: %s", text[:40])
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass

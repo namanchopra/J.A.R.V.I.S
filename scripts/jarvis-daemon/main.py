@@ -118,7 +118,6 @@ from mcp_client import MCPManager, load_mcp_configs
 from tool_bridge import ToolBridge, DeferredResultQueue
 from pipecat_llm import get_anthropic_tools, update_system_instruction, MODEL, JARVIS_SYSTEM as JARVIS_SYSTEM_FULL
 from pipecat_stt import LocalWhisperSTT
-from pipecat_tts import EdgeTTSService
 from pipecat_tts_cartesia import CartesiaTTSService
 from pipecat_tts_kokoro import KokoroTTSService
 from pipecat_tts_vibevoice import VibeVoiceTTSService
@@ -1033,25 +1032,27 @@ def create_pipeline_components(
     kokoro_lang = config.get("kokoroLang", "") or "en-us"
     vibevoice_voice = config.get("vibevoiceVoice", "") or "en-Carter_man"
 
-    if tts_provider == "cartesia" and cartesia_key:
+    # TTS provider selection. Local-first chain:
+    #   vibevoice (best, requires the vibevoice pip module)
+    #   kokoro    (also local, requires kokoro_onnx)
+    #   cartesia  (cloud, requires cartesiaAPIKey)
+    # No silent cloud fallback. If the configured provider is missing
+    # its dependency, we raise so the user sees the problem instead of
+    # getting a different voice without warning.
+    if tts_provider == "cartesia":
+        if not cartesia_key:
+            raise RuntimeError("tts_provider=cartesia but cartesiaAPIKey is unset")
         tts = CartesiaTTSService(
             api_key=cartesia_key,
             voice_id=cartesia_voice or "1463a4e1-56a1-4b41-b257-728d56e93605",
         )
         logger.info("TTS: CartesiaTTSService (Sonic 3, explicit config)")
-    elif tts_provider == "edge":
-        tts = EdgeTTSService(voice="en-GB-RyanNeural")
-        logger.info("TTS: EdgeTTSService (en-GB-RyanNeural, explicit config)")
     elif tts_provider == "kokoro":
-        try:
-            import kokoro_onnx  # noqa: F401
-            tts = KokoroTTSService(voice=kokoro_voice, speed=kokoro_speed, lang=kokoro_lang)
-            logger.info("TTS: KokoroTTSService (explicit config, voice=%s)", kokoro_voice)
-        except ImportError:
-            logger.warning("kokoro-onnx not installed, falling back to Edge TTS")
-            tts = EdgeTTSService(voice="en-GB-RyanNeural")
+        import kokoro_onnx  # noqa: F401  (raises ImportError if missing — loud)
+        tts = KokoroTTSService(voice=kokoro_voice, speed=kokoro_speed, lang=kokoro_lang)
+        logger.info("TTS: KokoroTTSService (explicit config, voice=%s)", kokoro_voice)
     else:
-        # Auto or explicit "vibevoice" — try VibeVoice first (best TTFB), then Kokoro, then others
+        # Auto or explicit "vibevoice" — try VibeVoice first, then Kokoro, then Cartesia.
         tts = None
         if tts_provider in ("", "vibevoice"):
             try:
@@ -1070,18 +1071,20 @@ def create_pipeline_components(
                 tts = KokoroTTSService(voice=kokoro_voice, speed=kokoro_speed, lang=kokoro_lang)
                 logger.info("TTS: KokoroTTSService (local, free, voice=%s)", kokoro_voice)
             except ImportError:
-                logger.debug("kokoro-onnx not installed, trying Cartesia/Edge")
+                logger.debug("kokoro-onnx not installed, trying Cartesia")
+
+        if tts is None and cartesia_key:
+            tts = CartesiaTTSService(
+                api_key=cartesia_key,
+                voice_id=cartesia_voice or "1463a4e1-56a1-4b41-b257-728d56e93605",
+            )
+            logger.info("TTS: CartesiaTTSService (cloud fallback)")
 
         if tts is None:
-            if cartesia_key:
-                tts = CartesiaTTSService(
-                    api_key=cartesia_key,
-                    voice_id=cartesia_voice or "1463a4e1-56a1-4b41-b257-728d56e93605",
-                )
-                logger.info("TTS: CartesiaTTSService (fallback)")
-            else:
-                tts = EdgeTTSService(voice="en-GB-RyanNeural")
-                logger.info("TTS: EdgeTTSService (final fallback)")
+            raise RuntimeError(
+                "No TTS provider available: install vibevoice or kokoro_onnx, "
+                "or set cartesiaAPIKey in config."
+            )
 
     # --- LLM provider chain: OpenRouter → Google AI Studio → Ollama (with runtime failover) ---
     # Anthropic-direct (sk-ant-) takes a separate path because its SDK isn't OpenAI-compatible.

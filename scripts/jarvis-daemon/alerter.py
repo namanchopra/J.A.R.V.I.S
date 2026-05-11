@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from typing import Any
 
     from priority import JarvisEvent
-    from tts import TTSEngine
 
 logger: Final = logging.getLogger("jarvis-daemon.alerter")
 
