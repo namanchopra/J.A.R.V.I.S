@@ -164,20 +164,454 @@ body {
   animation: fade-out 0.3s ease-in forwards;
 }
 
-/* Sci-fi input styling */
+/* ------------------------------------------------------------------ */
+/* Form controls — Mission Control Diagnostic style                    */
+/* ------------------------------------------------------------------ */
+
+/* Common base for text-like inputs and selects */
 input.sci-fi, select.sci-fi, textarea.sci-fi {
-  background: rgba(10, 14, 26, 0.8);
-  border: 1px solid rgba(0, 229, 255, 0.15);
+  background: linear-gradient(180deg, rgba(2,18,16,0.85), rgba(2,10,8,0.9));
+  border: 1px solid rgba(0, 229, 255, 0.18);
+  border-bottom-color: rgba(0, 229, 255, 0.45);
   color: var(--text-primary);
-  border-radius: 6px;
-  padding: 8px 12px;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  border-radius: 3px;
+  padding: 9px 12px;
+  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+  caret-color: var(--accent-blue);
+}
+
+input.sci-fi::placeholder, textarea.sci-fi::placeholder {
+  color: rgba(207, 231, 255, 0.25);
+  font-style: italic;
+}
+
+input.sci-fi:hover:not(:focus), select.sci-fi:hover:not(:focus), textarea.sci-fi:hover:not(:focus) {
+  border-color: rgba(0, 229, 255, 0.32);
+  border-bottom-color: rgba(0, 229, 255, 0.6);
 }
 
 input.sci-fi:focus, select.sci-fi:focus, textarea.sci-fi:focus {
-  border-color: rgba(0, 229, 255, 0.5);
-  box-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
+  border-color: rgba(0, 229, 255, 0.55);
+  border-bottom-color: rgba(0, 229, 255, 1);
+  background: linear-gradient(180deg, rgba(2,22,20,0.95), rgba(2,14,12,0.95));
+  box-shadow:
+    0 0 0 1px rgba(0, 229, 255, 0.12),
+    0 0 18px rgba(0, 229, 255, 0.22),
+    inset 0 0 12px rgba(0, 229, 255, 0.06);
   outline: none;
+}
+
+input.sci-fi:disabled, select.sci-fi:disabled, textarea.sci-fi:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Custom <select> chevron — wipe default, paint a small cyan triangle */
+select.sci-fi {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  padding-right: 32px;
+  background-image:
+    linear-gradient(180deg, rgba(2,18,16,0.85), rgba(2,10,8,0.9)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%2300e5ff' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-position: right 12px center, 100% 50%;
+  background-size: 10px 6px, auto;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+select.sci-fi option {
+  background: #061613;
+  color: var(--text-primary);
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+
+/* ---- Checkbox: bracket square that flips to glowing cyan ---- */
+input.sci-fi[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  position: relative;
+  background: rgba(2,12,10,0.9);
+  border: 1px solid rgba(0, 229, 255, 0.4);
+  border-radius: 2px;
+  cursor: pointer;
+  vertical-align: middle;
+  flex-shrink: 0;
+  display: inline-grid;
+  place-content: center;
+  transition: background 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+
+/* Bracket corners on the checkbox box */
+input.sci-fi[type="checkbox"]::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  pointer-events: none;
+  background:
+    linear-gradient(to right, rgba(0,229,255,0.7) 4px, transparent 4px) top left,
+    linear-gradient(to bottom, rgba(0,229,255,0.7) 4px, transparent 4px) top left,
+    linear-gradient(to left, rgba(0,229,255,0.7) 4px, transparent 4px) top right,
+    linear-gradient(to bottom, rgba(0,229,255,0.7) 4px, transparent 4px) top right,
+    linear-gradient(to right, rgba(0,229,255,0.7) 4px, transparent 4px) bottom left,
+    linear-gradient(to top, rgba(0,229,255,0.7) 4px, transparent 4px) bottom left,
+    linear-gradient(to left, rgba(0,229,255,0.7) 4px, transparent 4px) bottom right,
+    linear-gradient(to top, rgba(0,229,255,0.7) 4px, transparent 4px) bottom right;
+  background-size: 5px 1px, 1px 5px, 5px 1px, 1px 5px, 5px 1px, 1px 5px, 5px 1px, 1px 5px;
+  background-repeat: no-repeat;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+input.sci-fi[type="checkbox"]:hover {
+  border-color: rgba(0, 229, 255, 0.7);
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.25);
+}
+
+input.sci-fi[type="checkbox"]:hover::before { opacity: 1; }
+
+input.sci-fi[type="checkbox"]:checked {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  box-shadow:
+    0 0 10px rgba(0, 229, 255, 0.55),
+    inset 0 0 6px rgba(255, 255, 255, 0.2);
+}
+
+input.sci-fi[type="checkbox"]:checked::after {
+  content: '';
+  width: 4px;
+  height: 8px;
+  border: solid #001416;
+  border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+
+input.sci-fi[type="checkbox"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---- Range slider: gradient-filled track + bracket thumb ---- */
+input.sci-fi[type="range"],
+input[type="range"]:not([class*="sci-fi"]) {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+}
+
+/* WebKit track */
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background:
+    linear-gradient(90deg, var(--accent-blue) 0%, var(--accent-blue) var(--range-pct, 50%), rgba(0,229,255,0.15) var(--range-pct, 50%), rgba(0,229,255,0.15) 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 229, 255, 0.2),
+    0 0 8px rgba(0, 229, 255, 0.15);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 1px;
+  background: #001a18;
+  border: 2px solid var(--accent-blue);
+  box-shadow:
+    0 0 10px rgba(0, 229, 255, 0.6),
+    inset 0 0 4px rgba(0, 229, 255, 0.4);
+  cursor: grab;
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+
+input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+  box-shadow:
+    0 0 14px rgba(0, 229, 255, 0.85),
+    inset 0 0 6px rgba(0, 229, 255, 0.6);
+}
+
+input[type="range"]:active::-webkit-slider-thumb { cursor: grabbing; }
+
+input[type="range"]:disabled::-webkit-slider-thumb {
+  border-color: rgba(0, 229, 255, 0.25);
+  box-shadow: none;
+}
+
+input[type="range"]:disabled::-webkit-slider-runnable-track {
+  opacity: 0.35;
+}
+
+/* Firefox track (cosmetic fallback) */
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(0, 229, 255, 0.15);
+  box-shadow: inset 0 0 0 1px rgba(0, 229, 255, 0.2);
+}
+input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--accent-blue);
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.4);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 1px;
+  background: #001a18;
+  border: 2px solid var(--accent-blue);
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.6);
+  cursor: grab;
+}
+
+/* ---- Holographic panel with corner brackets ---- */
+.holo-panel {
+  position: relative;
+  background:
+    linear-gradient(135deg, rgba(8,22,20,0.72), rgba(2,12,10,0.88)),
+    repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,229,255,0.018) 3px, rgba(0,229,255,0.018) 4px);
+  border: 1px solid rgba(0, 229, 255, 0.18);
+  border-radius: 2px;
+  box-shadow:
+    0 0 24px rgba(0, 229, 255, 0.045),
+    inset 0 1px 0 rgba(0, 229, 255, 0.08),
+    inset 0 0 0 1px rgba(2, 22, 20, 0.5);
+  backdrop-filter: blur(6px);
+  padding: 18px 20px 20px;
+}
+
+.holo-panel::before,
+.holo-panel::after {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(0, 229, 255, 0.65);
+  pointer-events: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.holo-panel::before {
+  top: -1px;
+  left: -1px;
+  border-right: none;
+  border-bottom: none;
+}
+
+.holo-panel::after {
+  bottom: -1px;
+  right: -1px;
+  border-left: none;
+  border-top: none;
+}
+
+.holo-panel:hover::before,
+.holo-panel:hover::after {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.5);
+}
+
+/* Section header inside a holo-panel: prefix with ▸ marker and a divider */
+.holo-panel > h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'SF Mono', 'Menlo', monospace !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.18em !important;
+  text-transform: uppercase;
+  color: var(--accent-blue) !important;
+  text-shadow: 0 0 8px rgba(0, 229, 255, 0.35);
+  margin-bottom: 4px !important;
+}
+
+.holo-panel > h2::before {
+  content: '▸';
+  color: var(--accent-blue);
+  font-size: 12px;
+  text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
+}
+
+.holo-panel > h2::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(0,229,255,0.3), transparent 70%);
+  margin-left: 6px;
+}
+
+/* Labels above inputs — small monospace ledger style */
+.holo-panel label {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: rgba(207, 231, 255, 0.65);
+}
+
+/* Buttons inside settings panels — outline by default, fill on hover.
+   This pattern targets the existing palette of small action buttons
+   (e.g. "Validate", "Preview", "Pull & Sync") without forcing a class
+   change on every callsite. */
+.holo-panel button[class*="bg-[#0d9488]"],
+.holo-panel button[class*="bg-teal"] {
+  background: transparent !important;
+  border: 1px solid rgba(0, 229, 255, 0.4) !important;
+  color: var(--accent-blue) !important;
+  font-family: 'SF Mono', 'Menlo', monospace !important;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 10px !important;
+  padding: 6px 14px !important;
+  border-radius: 2px !important;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s, border-color 0.15s !important;
+}
+
+.holo-panel button[class*="bg-[#0d9488]"]:not(:disabled):hover,
+.holo-panel button[class*="bg-teal"]:not(:disabled):hover {
+  background: var(--accent-blue) !important;
+  color: #001416 !important;
+  border-color: var(--accent-blue) !important;
+  box-shadow: 0 0 14px rgba(0, 229, 255, 0.5) !important;
+}
+
+.holo-panel button[class*="bg-[#0d9488]"]:disabled,
+.holo-panel button[class*="bg-teal"]:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+
+/* ---- Settings-specific scanline atmosphere ---- */
+.settings-bg {
+  position: relative;
+  background:
+    radial-gradient(ellipse at top, rgba(0, 229, 255, 0.04), transparent 60%),
+    linear-gradient(180deg, #020a08 0%, #03110e 50%, #020a08 100%);
+}
+
+.settings-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 229, 255, 0.022) 2px,
+    rgba(0, 229, 255, 0.022) 3px
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Faint grid pattern overlay */
+.settings-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(0, 229, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 229, 255, 0.04) 1px, transparent 1px);
+  background-size: 48px 48px;
+  background-position: 0 0;
+  pointer-events: none;
+  mask-image: radial-gradient(ellipse at center, black 0%, transparent 75%);
+  -webkit-mask-image: radial-gradient(ellipse at center, black 0%, transparent 75%);
+  z-index: 0;
+}
+
+/* ---- Bracket-style primary CTA button ---- */
+.jarvis-cta {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 22px;
+  background: linear-gradient(180deg, rgba(0, 229, 255, 0.18), rgba(0, 229, 255, 0.08));
+  border: 1px solid var(--accent-blue);
+  color: var(--accent-blue);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border-radius: 2px;
+  text-shadow: 0 0 6px rgba(0, 229, 255, 0.5);
+  box-shadow:
+    0 0 0 1px rgba(0, 229, 255, 0.15),
+    0 0 18px rgba(0, 229, 255, 0.25),
+    inset 0 0 14px rgba(0, 229, 255, 0.1);
+  transition: all 0.18s;
+  cursor: pointer;
+}
+
+.jarvis-cta::before,
+.jarvis-cta::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--accent-blue);
+  pointer-events: none;
+}
+
+.jarvis-cta::before { top: -3px; left: -3px; border-right: none; border-bottom: none; }
+.jarvis-cta::after  { bottom: -3px; right: -3px; border-left: none; border-top: none; }
+
+.jarvis-cta:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--accent-blue), rgba(0, 229, 255, 0.7));
+  color: #001416;
+  text-shadow: none;
+  box-shadow:
+    0 0 0 1px var(--accent-blue),
+    0 0 26px rgba(0, 229, 255, 0.55),
+    inset 0 0 20px rgba(255, 255, 255, 0.1);
+  transform: translateY(-1px);
+}
+
+.jarvis-cta:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Subtle icon-button — used for close/X in headers */
+.jarvis-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  width: 28px;
+  border-radius: 2px;
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  background: rgba(2, 14, 12, 0.7);
+  color: rgba(0, 229, 255, 0.75);
+  transition: all 0.15s;
+  cursor: pointer;
+}
+
+.jarvis-iconbtn:hover {
+  border-color: var(--accent-blue);
+  background: rgba(0, 229, 255, 0.12);
+  color: var(--accent-blue);
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
 }
 
 /* Status dot with glow */

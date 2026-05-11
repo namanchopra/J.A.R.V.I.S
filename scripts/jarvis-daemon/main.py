@@ -30,6 +30,7 @@ import json
 import logging
 import signal
 import sys
+import time
 import uuid
 from typing import Any
 
@@ -45,6 +46,8 @@ try:
         BotStartedSpeakingFrame,
         BotStoppedSpeakingFrame,
         Frame,
+        LLMFullResponseEndFrame,
+        LLMFullResponseStartFrame,
         LLMMessagesAppendFrame,
         LLMRunFrame,
         TextFrame,
@@ -476,12 +479,26 @@ class ResponseFlushProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+# Grace window after the LLM starts generating during which a VAD-triggered
+# UserStartedSpeakingFrame is treated as a phantom (tail of the user's own
+# utterance, breath, or low-amplitude room noise) and dropped instead of
+# cancelling the in-flight response. Without this guard, a single false VAD
+# tick between LLM start and TTS start silently kills Jarvis's reply before
+# we ever hear it.
+_INTERRUPT_GRACE_SECONDS: float = 2.5
+
+
 class InterruptionHandler(FrameProcessor):
     """Allows the user to interrupt Jarvis by speaking during TTS playback.
 
     Tracks bot speaking state via BotStarted/StoppedSpeakingFrame. When
     UserStartedSpeakingFrame arrives during bot speech, cancels the current
     TTS output so the pipeline transitions to listening.
+
+    Also enforces a ~2.5s grace window after the LLM starts responding,
+    during which VAD-only UserStartedSpeakingFrames are dropped (a phantom
+    VAD tick during the LLM/TTS handoff was killing the reply before audio
+    ever played).
     """
 
     def __init__(
@@ -493,6 +510,8 @@ class InterruptionHandler(FrameProcessor):
         self._bot_speaking = False
         self._ws_bridge = ws_bridge
         self._wake_gate = wake_gate
+        self._llm_responding = False
+        self._llm_started_at: float = 0.0
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         # MUST call super first so Pipecat's base class handles StartFrame
@@ -500,7 +519,12 @@ class InterruptionHandler(FrameProcessor):
         # is rejected with "StartFrame not received yet".
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, BotStartedSpeakingFrame):
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._llm_responding = True
+            self._llm_started_at = time.monotonic()
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            self._llm_responding = False
+        elif isinstance(frame, BotStartedSpeakingFrame):
             self._bot_speaking = True
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._bot_speaking = False
@@ -509,12 +533,24 @@ class InterruptionHandler(FrameProcessor):
             # background chatter for the rest of its 6s lifetime.
             if self._wake_gate is not None and self._wake_gate.armed:
                 self._wake_gate.rearm()
-        elif isinstance(frame, UserStartedSpeakingFrame) and self._bot_speaking:
-            logger.info("User interrupted Jarvis -- stopping speech")
-            self._bot_speaking = False
-            await self.push_frame(BotStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
-            if self._ws_bridge:
-                await self._ws_bridge._set_state("listening")
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            # Suppress phantom VAD ticks during the LLM→TTS handoff window.
+            within_grace = (
+                self._llm_responding
+                and (time.monotonic() - self._llm_started_at) < _INTERRUPT_GRACE_SECONDS
+            )
+            if within_grace and not self._bot_speaking:
+                logger.info(
+                    "Suppressing phantom UserStartedSpeakingFrame (LLM responding, +%.2fs)",
+                    time.monotonic() - self._llm_started_at,
+                )
+                return  # don't push -- swallow the frame entirely
+            if self._bot_speaking:
+                logger.info("User interrupted Jarvis -- stopping speech")
+                self._bot_speaking = False
+                await self.push_frame(BotStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
+                if self._ws_bridge:
+                    await self._ws_bridge._set_state("listening")
 
         await self.push_frame(frame, direction)
 
@@ -1134,6 +1170,13 @@ def create_pipeline_components(
 
     # --- Context aggregators (handles conversation history + VAD) ---
     from pipecat.turns.user_mute.always_user_mute_strategy import AlwaysUserMuteStrategy
+    from pipecat.turns.user_start.transcription_user_turn_start_strategy import (
+        TranscriptionUserTurnStartStrategy,
+    )
+    from pipecat.turns.user_start.vad_user_turn_start_strategy import (
+        VADUserTurnStartStrategy,
+    )
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
     context = SanitizedLLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -1141,11 +1184,23 @@ def create_pipeline_components(
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(
-                    confidence=0.7,
-                    start_secs=1.0,   # Require 1s of sustained speech to trigger (rejects ambient noise)
+                    confidence=0.85,  # Stricter Silero threshold -- reject low-confidence speech ticks
+                    start_secs=1.5,   # Require 1.5s of sustained speech (rejects breath, throat noise, tail)
                     stop_secs=0.6,    # 600ms silence before end-of-speech (prevents premature cutoff)
-                    min_volume=0.95,  # Very high volume threshold — only direct speech, not TV/music
+                    min_volume=0.95,  # Very high volume threshold -- only direct speech, not TV/music
                 ),
+            ),
+            # Disable interruption broadcast on user-turn-start. Without AEC,
+            # phantom VAD ticks during the LLM->TTS handoff were cancelling the
+            # in-flight reply before any audio played. Turn detection still
+            # runs (for context aggregation), it just no longer kills the
+            # current response. The InterruptionHandler downstream still allows
+            # interruptions during actual bot speech via its own logic.
+            user_turn_strategies=UserTurnStrategies(
+                start=[
+                    VADUserTurnStartStrategy(enable_interruptions=False),
+                    TranscriptionUserTurnStartStrategy(enable_interruptions=False),
+                ],
             ),
             # Mute mic input while bot is speaking to prevent echo feedback.
             # Local audio has no AEC, so bot's TTS output is picked up by the mic.

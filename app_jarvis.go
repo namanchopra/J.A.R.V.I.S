@@ -67,7 +67,11 @@ func (a *App) StartJarvis() error {
 	}
 
 	cmd := exec.Command(pythonPath, scriptPath)
-	cmd.Stderr = &jarvisLogWriter{}
+	// Tee daemon stderr+stdout to ~/.jarvis/logs/daemon.log so it survives
+	// across Jarvis restarts and is readable without keeping a terminal open.
+	logWriter := newJarvisLogWriter()
+	cmd.Stderr = logWriter
+	cmd.Stdout = logWriter
 	cmd.Env = append(os.Environ(),
 		"PYTHONUNBUFFERED=1",
 		"PIPECAT_LOG_LEVEL=WARNING",
@@ -222,10 +226,31 @@ func findJarvisDaemonScript() string {
 // ---------------------------------------------------------------------------
 
 // jarvisLogWriter implements io.Writer and forwards each line of daemon
-// stderr output to slog so it appears alongside AWM's own logs.
-type jarvisLogWriter struct{}
+// stderr+stdout output to slog AND appends to ~/.jarvis/logs/daemon.log.
+// Keeping a persistent file is what lets us diagnose voice issues without
+// asking the user to redirect a terminal.
+type jarvisLogWriter struct {
+	file *os.File
+}
+
+func newJarvisLogWriter() *jarvisLogWriter {
+	w := &jarvisLogWriter{}
+	logPath := paths.DataPath("logs", "daemon.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err == nil {
+		// Truncate on every daemon start so the file only contains the
+		// current session -- prevents unbounded growth and makes "tail"
+		// always show what the current run is doing.
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+			w.file = f
+		}
+	}
+	return w
+}
 
 func (w *jarvisLogWriter) Write(p []byte) (int, error) {
+	if w.file != nil {
+		_, _ = w.file.Write(p)
+	}
 	slog.Info("[jarvis-daemon] " + strings.TrimSpace(string(p)))
 	return len(p), nil
 }

@@ -2,11 +2,18 @@
 
 > A native macOS voice companion for orchestrating AI coding agents.
 
-![Status](https://img.shields.io/badge/status-pre--release-orange)
+[![Latest release](https://img.shields.io/github/v/release/namanchopra/J.A.R.V.I.S?label=download&color=00e5ff)](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-lightgrey)
+![Status](https://img.shields.io/badge/status-pre--release-orange)
 
 Jarvis is a desktop voice assistant that drives your AI coding agents the way you'd drive a junior engineer — by talking to them. Say "Hey Jarvis" to launch Claude Code, Kiro, Gemini, Codex, or Aider sessions across multiple repositories, dispatch work in parallel, and get notified when sessions need your attention. Built-in cross-session conflict detection warns you when two agents are about to step on each other's changes.
+
+## Download
+
+➜ **[Get the latest DMG](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)** · Apple Silicon Macs (M1 / M2 / M3 / M4) · macOS 12+ · ~2.5 GB (bundles a portable Python runtime + the VibeVoice and Whisper models — no first-run download required)
+
+After downloading, see **[Install](#install)** below — the first launch needs a one-time Gatekeeper workaround because the build is ad-hoc signed.
 
 ## Demo
 
