@@ -111,15 +111,11 @@ jobs:
         timeout-minutes: 20
         run: bash build/scripts/build-daemon-venv.sh
 
-      # fetch-models.sh shells out to `huggingface-cli`, which is provided by
-      # the `huggingface_hub[cli]` PyPI package. The release runner doesn't
-      # ship it by default; install via pipx so PATH resolution works without
-      # mutating the system Python.
+      # fetch-models.sh shells out to `huggingface-cli`. macos-14 runners
+      # ship a PEP 668 "externally managed" system Python, so we can't use
+      # `pip install`. Homebrew has a first-party formula — use that.
       - name: Install huggingface-cli
-        run: |
-          python3 -m pip install --upgrade pipx
-          pipx install 'huggingface_hub[cli]'
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        run: brew install huggingface-cli
 
       # HF_TOKEN must be configured in repo Actions secrets
       # (Settings → Secrets and variables → Actions → New repository secret).
