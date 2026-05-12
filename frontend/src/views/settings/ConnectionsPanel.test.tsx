@@ -29,13 +29,14 @@ describe('ConnectionsPanel API key cluster (TASK-017)', () => {
     expect(SOURCE).toMatch(/['"]picovoice['"]/)
   })
 
-  it('mentions every human-readable provider label', () => {
+  it('renders the two surfaced human-readable provider labels (v0.1.6)', () => {
+    // v0.1.6 collapsed the API-key UI from 6 rows to 2 — OpenRouter (one
+    // key for every cloud LLM) and Cartesia (the optional paid TTS). The
+    // other four labels were removed from the rendered KEY_ROWS but their
+    // ProviderId switch cases in readKey/writeKey stay for backward
+    // compat with existing on-disk configs.
     expect(SOURCE).toMatch(/OpenRouter/)
-    expect(SOURCE).toMatch(/Google AI Studio/)
-    expect(SOURCE).toMatch(/Anthropic/)
     expect(SOURCE).toMatch(/Cartesia/)
-    expect(SOURCE).toMatch(/ElevenLabs/)
-    expect(SOURCE).toMatch(/Picovoice/)
   })
 
   it('calls the ValidateAPIKey Wails binding', () => {

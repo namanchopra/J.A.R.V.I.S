@@ -141,19 +141,19 @@ def test_unknown_llm_model_falls_back(caplog: pytest.LogCaptureFixture) -> None:
 # prefix, full-slug for OpenRouter).
 
 
-def test_google_prefix_routes_to_google_openai_compat(
+def test_google_prefix_routes_to_openrouter(
     monkeypatch: pytest.MonkeyPatch,
     chain_state: dict[str, Any],
 ) -> None:
-    """``google/...`` -> OpenAILLMService against the Google AI Studio
-    OpenAI-compat base URL, with the ``google/`` prefix stripped from the
-    model id (Google's endpoint wants the bare model name).
+    """v0.1.6: ``google/...`` routes through OpenRouter (was Google-direct in
+    v0.1.5). The full slug ``google/gemini-2.5-flash`` is passed unchanged —
+    OpenRouter resolves it server-side.
     """
     fake_openai = _install_fake_pipecat_openai(monkeypatch)
 
     cfg: dict[str, Any] = {
         "llmModel": "google/gemini-2.5-flash",
-        "googleAPIKey": "AIza-google-test",
+        "jarvisAPIKey": "sk-or-v1-openrouter-test",
     }
     result = llm_picker.build_user_picked_llm(
         cfg,
@@ -165,15 +165,14 @@ def test_google_prefix_routes_to_google_openai_compat(
 
     fake_openai.assert_called_once()
     kwargs = fake_openai.call_args.kwargs
-    assert kwargs["base_url"] == (
-        "https://generativelanguage.googleapis.com/v1beta/openai/"
-    ), "Google branch must hit the v1beta OpenAI-compat endpoint"
-    assert kwargs["api_key"] == "AIza-google-test"
-    # Settings() got the post-prefix model id.
+    assert kwargs["base_url"] == "https://openrouter.ai/api/v1", (
+        "v0.1.6: every cloud pick is routed through OpenRouter"
+    )
+    assert kwargs["api_key"] == "sk-or-v1-openrouter-test"
     fake_openai.Settings.assert_called_once()
     settings_kwargs = fake_openai.Settings.call_args.kwargs
-    assert settings_kwargs["model"] == "gemini-2.5-flash", (
-        "Google's endpoint takes the bare model id, not the vendor-prefixed slug"
+    assert settings_kwargs["model"] == "google/gemini-2.5-flash", (
+        "OpenRouter routes by full slug — pass the dropdown value as-is"
     )
     assert settings_kwargs["system_instruction"] == SYS_PROMPT
     # Successful pick disables the failover chain.
@@ -181,110 +180,91 @@ def test_google_prefix_routes_to_google_openai_compat(
     assert chain_state["service"] is None
 
 
-def test_google_prefix_falls_back_when_key_missing(
+def test_google_prefix_falls_back_when_no_openrouter_key(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     chain_state: dict[str, Any],
 ) -> None:
-    """``google/...`` with no googleAPIKey -> ``None`` + WARNING (legacy path).
-
-    Belt-and-braces: even if the dropdown picks Google, missing credentials
-    must not crash the daemon -- just log and defer to the legacy chain.
+    """v0.1.6: ``google/...`` requires an OpenRouter ``sk-or-`` key.
+    A bare googleAPIKey no longer satisfies the pick (Google-direct path
+    removed). Missing key -> ``None`` + WARNING -> legacy chain takes over.
     """
     _install_fake_pipecat_openai(monkeypatch)
 
     with caplog.at_level("WARNING"):
         result = llm_picker.build_user_picked_llm(
-            {"llmModel": "google/gemini-2.5-flash"},
-            system_instruction=SYS_PROMPT,
-            anthropic_service_cls=_fake_anthropic_service_cls(),
-            chain_state=chain_state,
-        )
-    assert result is None
-    assert any("googleAPIKey" in rec.message for rec in caplog.records)
-
-
-def test_anthropic_prefix_routes_to_anthropic_sdk(
-    monkeypatch: pytest.MonkeyPatch,
-    chain_state: dict[str, Any],
-) -> None:
-    """``anthropic/...`` -> AnthropicLLMService constructed with the dated
-    model id (the SDK currently requires ``claude-haiku-4-5-20251001``).
-    """
-    _install_fake_anthropic(monkeypatch)
-    fake_anth_svc = _fake_anthropic_service_cls()
-
-    cfg: dict[str, Any] = {
-        "llmModel": "anthropic/claude-haiku-4-5",
-        "anthropicAPIKey": "sk-ant-test-key",
-    }
-    result = llm_picker.build_user_picked_llm(
-        cfg,
-        system_instruction=SYS_PROMPT,
-        anthropic_service_cls=fake_anth_svc,
-        chain_state=chain_state,
-    )
-    assert result is not None
-
-    fake_anth_svc.assert_called_once()
-    kwargs = fake_anth_svc.call_args.kwargs
-    assert kwargs["api_key"] == "sk-ant-test-key"
-    # The dated suffix is required by the existing Anthropic-direct branch;
-    # the picker mirrors that mapping so the user sees identical behaviour.
-    fake_anth_svc.Settings.assert_called_once()
-    settings_kwargs = fake_anth_svc.Settings.call_args.kwargs
-    assert settings_kwargs["model"] == "claude-haiku-4-5-20251001"
-    assert settings_kwargs["system_instruction"] == SYS_PROMPT
-
-
-def test_anthropic_prefix_uses_jarvis_key_when_sk_ant(
-    monkeypatch: pytest.MonkeyPatch,
-    chain_state: dict[str, Any],
-) -> None:
-    """When ``anthropicAPIKey`` is unset but ``jarvisAPIKey`` starts with
-    ``sk-ant-``, the picker uses it (matches legacy ``use_anthropic_direct``
-    behaviour so config migrations don't break the user's pick).
-    """
-    _install_fake_anthropic(monkeypatch)
-    fake_anth_svc = _fake_anthropic_service_cls()
-
-    cfg: dict[str, Any] = {
-        "llmModel": "anthropic/claude-haiku-4-5",
-        "jarvisAPIKey": "sk-ant-jarvis-fallback-key",
-    }
-    result = llm_picker.build_user_picked_llm(
-        cfg,
-        system_instruction=SYS_PROMPT,
-        anthropic_service_cls=fake_anth_svc,
-        chain_state=chain_state,
-    )
-    assert result is not None
-    assert (
-        fake_anth_svc.call_args.kwargs["api_key"] == "sk-ant-jarvis-fallback-key"
-    )
-
-
-def test_anthropic_prefix_falls_back_when_no_anthropic_key(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    chain_state: dict[str, Any],
-) -> None:
-    """``anthropic/...`` with neither anthropicAPIKey nor an sk-ant- jarvisAPIKey
-    -> ``None`` + WARNING. An ``sk-or-`` jarvisAPIKey does NOT satisfy this.
-    """
-    _install_fake_anthropic(monkeypatch)
-    with caplog.at_level("WARNING"):
-        result = llm_picker.build_user_picked_llm(
             {
-                "llmModel": "anthropic/claude-haiku-4-5",
-                "jarvisAPIKey": "sk-or-not-anthropic",
+                "llmModel": "google/gemini-2.5-flash",
+                # A Google-direct key is no longer accepted for the user-pick
+                # path. Legacy auto-detect still honours it.
+                "googleAPIKey": "AIza-google-test",
             },
             system_instruction=SYS_PROMPT,
             anthropic_service_cls=_fake_anthropic_service_cls(),
             chain_state=chain_state,
         )
     assert result is None
-    assert any("Anthropic key" in rec.message for rec in caplog.records)
+    assert any("sk-or-" in rec.message for rec in caplog.records)
+
+
+def test_anthropic_prefix_routes_to_openrouter(
+    monkeypatch: pytest.MonkeyPatch,
+    chain_state: dict[str, Any],
+) -> None:
+    """v0.1.6: ``anthropic/...`` routes through OpenRouter (was Anthropic-direct
+    in v0.1.5). The full slug ``anthropic/claude-haiku-4-5`` is passed as-is —
+    OpenRouter knows how to dispatch it.
+    """
+    fake_openai = _install_fake_pipecat_openai(monkeypatch)
+
+    cfg: dict[str, Any] = {
+        "llmModel": "anthropic/claude-haiku-4-5",
+        "jarvisAPIKey": "sk-or-v1-openrouter-test",
+    }
+    result = llm_picker.build_user_picked_llm(
+        cfg,
+        system_instruction=SYS_PROMPT,
+        anthropic_service_cls=_fake_anthropic_service_cls(),
+        chain_state=chain_state,
+    )
+    assert result is not None
+
+    fake_openai.assert_called_once()
+    kwargs = fake_openai.call_args.kwargs
+    assert kwargs["base_url"] == "https://openrouter.ai/api/v1"
+    assert kwargs["api_key"] == "sk-or-v1-openrouter-test"
+    fake_openai.Settings.assert_called_once()
+    settings_kwargs = fake_openai.Settings.call_args.kwargs
+    # OpenRouter resolves the model from the full slug; no date suffix needed.
+    assert settings_kwargs["model"] == "anthropic/claude-haiku-4-5"
+    assert settings_kwargs["system_instruction"] == SYS_PROMPT
+
+
+def test_anthropic_prefix_falls_back_when_no_openrouter_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    chain_state: dict[str, Any],
+) -> None:
+    """v0.1.6: ``anthropic/...`` with only an Anthropic-direct ``sk-ant-`` key
+    no longer satisfies the user-pick path. The picker returns ``None`` and
+    the legacy auto-detect chain (which still honours sk-ant- direct) takes
+    over.
+    """
+    _install_fake_pipecat_openai(monkeypatch)
+    with caplog.at_level("WARNING"):
+        result = llm_picker.build_user_picked_llm(
+            {
+                "llmModel": "anthropic/claude-haiku-4-5",
+                # Even an sk-ant- jarvisAPIKey no longer satisfies the user-pick
+                # path — OpenRouter is the source of truth for explicit picks.
+                "jarvisAPIKey": "sk-ant-direct-key",
+            },
+            system_instruction=SYS_PROMPT,
+            anthropic_service_cls=_fake_anthropic_service_cls(),
+            chain_state=chain_state,
+        )
+    assert result is None
+    assert any("sk-or-" in rec.message for rec in caplog.records)
 
 
 def test_openai_prefix_routes_to_openrouter(

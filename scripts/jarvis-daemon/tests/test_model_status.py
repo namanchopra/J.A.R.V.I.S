@@ -325,3 +325,50 @@ def test_prefetch_when_all_cached_emits_only_ready(recorder: _Recorder,
     assert setup_events[0]["models_pending"] == []
     # No download events should fire.
     assert not [e for e in recorder.events if e.get("type") == "model_download"]
+
+
+# ---------------------------------------------------------------------------
+# v0.1.6: HUD `request_model_setup` re-emits the latest cached payload.
+# Fixes the race where the daemon emitted model_setup ~1-2s before the
+# React HUD connected, so a fresh DMG install missed the overlay entirely.
+# ---------------------------------------------------------------------------
+
+
+def test_request_setup_replays_latest_payload(recorder: _Recorder) -> None:
+    """After prefetch emits a `downloading` setup event, `handle_request_setup_message`
+    re-emits the cached payload so a late-mounting HUD can pick up the state.
+    """
+    async def _drive() -> None:
+        model_status.set_event_sink(recorder, asyncio.get_running_loop())
+        # Seed the cache as if prefetch had emitted a downloading payload.
+        await model_status._emit_setup(["vibevoice", "whisper"])
+        recorder.events.clear()
+        # Late-mounting HUD asks for the latest state.
+        await model_status.handle_request_setup_message({})
+
+    asyncio.run(_drive())
+
+    assert len(recorder.events) == 1
+    replay = recorder.events[0]
+    assert replay["type"] == "model_setup"
+    assert replay["state"] == "downloading"
+    assert {m["name"] for m in replay["models_pending"]} == {"vibevoice", "whisper"}
+
+
+def test_request_setup_emits_ready_when_cache_empty(recorder: _Recorder) -> None:
+    """When the daemon has just started and prefetch hasn't run yet, the
+    handler emits a synthetic `ready` so the HUD doesn't sit with no state.
+    """
+    # Make sure the module global is clear so we exercise the empty branch.
+    model_status._latest_setup_payload = None  # type: ignore[attr-defined]
+
+    async def _drive() -> None:
+        model_status.set_event_sink(recorder, asyncio.get_running_loop())
+        await model_status.handle_request_setup_message({})
+
+    asyncio.run(_drive())
+
+    assert len(recorder.events) == 1
+    assert recorder.events[0]["type"] == "model_setup"
+    assert recorder.events[0]["state"] == "ready"
+    assert recorder.events[0]["models_pending"] == []

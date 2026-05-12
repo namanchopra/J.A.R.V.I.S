@@ -352,6 +352,22 @@ def _handle_request_pipeline_status(data: dict[str, Any]) -> None:
     )
 
 
+def _handle_request_model_setup(data: dict[str, Any]) -> None:
+    """Handle a HUD ``request_model_setup`` message (v0.1.6).
+
+    Fix for the race condition where the daemon emits the first
+    ``model_setup`` event ~1-2s before the React HUD's WS connection
+    is established. Without this, a fresh-install user never saw the
+    FirstRunDownloadOverlay because the ``downloading`` state arrived
+    while no client was subscribed. The HUD now sends this message on
+    mount, and ``model_status`` replays the most recent cached payload.
+    """
+    asyncio.create_task(
+        model_status.handle_request_setup_message(data),
+        name="resend-model-setup",
+    )
+
+
 _MESSAGE_HANDLERS: dict[str, Any] = {
     "context": _handle_context,
     "tool_result": _handle_tool_result,
@@ -359,6 +375,7 @@ _MESSAGE_HANDLERS: dict[str, Any] = {
     "mobile_audio": _handle_mobile_audio,
     "retry_model_download": _handle_retry_model_download,
     "request_pipeline_status": _handle_request_pipeline_status,
+    "request_model_setup": _handle_request_model_setup,
 }
 
 

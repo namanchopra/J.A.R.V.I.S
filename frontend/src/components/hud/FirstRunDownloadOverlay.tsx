@@ -579,6 +579,14 @@ export function FirstRunDownloadOverlay(
         }
       }
     })
+    // v0.1.6: Ask the daemon to re-emit its latest model_setup payload.
+    // The daemon emits the first model_setup event ~1-2s before the React
+    // HUD's WS connection is established, so without this request a fresh
+    // DMG install's first-run download silently happens with no overlay.
+    // The daemon caches the latest payload in model_status and replays it
+    // here. Safe to send pre-WS-connect; sendJarvisCommand queues until
+    // the bridge is up.
+    void sendJarvisCommand(JSON.stringify({ type: 'request_model_setup' }))
     return () => {
       cancel()
     }

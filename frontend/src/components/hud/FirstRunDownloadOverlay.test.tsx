@@ -77,6 +77,15 @@ describe('FirstRunDownloadOverlay -- event wiring', () => {
     expect(SOURCE).toMatch(/EventsOn\(\s*['"]jarvis['"]/)
   })
 
+  it('requests a fresh model_setup payload on mount (v0.1.6 race fix)', () => {
+    // Daemon emits the first model_setup ~1-2s before the React HUD's WS
+    // connection is established. Without this request, a fresh DMG install
+    // never sees the first-run overlay because the downloading state event
+    // was already broadcast before any client was listening.
+    expect(SOURCE).toMatch(/['"]request_model_setup['"]/)
+    expect(SOURCE).toMatch(/sendJarvisCommand\(JSON\.stringify\(\s*\{\s*type:\s*['"]request_model_setup['"]/)
+  })
+
   it('defines a type guard for the model_setup event', () => {
     expect(SOURCE).toMatch(/function\s+isModelSetupEvent\s*\(/)
     expect(SOURCE).toMatch(/['"]model_setup['"]/)
