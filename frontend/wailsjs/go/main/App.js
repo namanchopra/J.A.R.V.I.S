@@ -50,6 +50,10 @@ export function CreateWorkspaceAndLaunch(arg1, arg2, arg3) {
   return window['go']['main']['App']['CreateWorkspaceAndLaunch'](arg1, arg2, arg3);
 }
 
+export function DaemonRestartNeeded(arg1, arg2) {
+  return window['go']['main']['App']['DaemonRestartNeeded'](arg1, arg2);
+}
+
 export function DeleteSavedProject(arg1) {
   return window['go']['main']['App']['DeleteSavedProject'](arg1);
 }
@@ -464,6 +468,10 @@ export function ResetConfig(arg1) {
 
 export function RespondToApproval(arg1, arg2) {
   return window['go']['main']['App']['RespondToApproval'](arg1, arg2);
+}
+
+export function RestartJarvis() {
+  return window['go']['main']['App']['RestartJarvis']();
 }
 
 export function ResumeSession(arg1) {

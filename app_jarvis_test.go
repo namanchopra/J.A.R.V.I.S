@@ -89,6 +89,7 @@ func TestDaemonRestartNeeded(t *testing.T) {
 			LiveKitAPIKey:       "lk-key",
 			LiveKitAPISecret:    "lk-secret",
 			LiveKitRoomName:     "jarvis",
+			LlmModel:            "anthropic/claude-haiku-4-5",
 		}
 		if daemonRestartNeeded(base, base) {
 			t.Errorf("identical configs reported as needing restart")
@@ -122,6 +123,8 @@ func TestDaemonRestartNeeded(t *testing.T) {
 		{"LiveKitAPIKey changed", func(c *config.Config) { c.LiveKitAPIKey = "lk-key-2" }},
 		{"LiveKitAPISecret changed", func(c *config.Config) { c.LiveKitAPISecret = "lk-secret-2" }},
 		{"LiveKitRoomName changed", func(c *config.Config) { c.LiveKitRoomName = "lounge" }},
+		{"LlmModel changed", func(c *config.Config) { c.LlmModel = "openai/gpt-4o-mini" }},
+		{"LlmModel cleared (set to empty)", func(c *config.Config) { c.LlmModel = "" }},
 	}
 
 	base := config.Config{
@@ -143,6 +146,7 @@ func TestDaemonRestartNeeded(t *testing.T) {
 		LiveKitAPIKey:       "lk-key",
 		LiveKitAPISecret:    "lk-secret",
 		LiveKitRoomName:     "jarvis",
+		LlmModel:            "anthropic/claude-haiku-4-5",
 	}
 
 	for _, tc := range restartRelevant {
@@ -154,6 +158,24 @@ func TestDaemonRestartNeeded(t *testing.T) {
 			}
 		})
 	}
+
+	// v0.1.5: explicit "change LlmModel then change it back" round-trip
+	// asserts the comparator is symmetric — flipping the field reports
+	// restart-needed, restoring it reports no-restart-needed. This is the
+	// React-side contract for the "Discard changes" affordance.
+	t.Run("LlmModel flipped then restored yields no restart", func(t *testing.T) {
+		flipped := base
+		flipped.LlmModel = "google/gemini-2.5-flash"
+		if !daemonRestartNeeded(base, flipped) {
+			t.Errorf("LlmModel flipped: expected restart needed; got false")
+		}
+		// Restore to baseline value.
+		restored := flipped
+		restored.LlmModel = base.LlmModel
+		if daemonRestartNeeded(base, restored) {
+			t.Errorf("LlmModel restored to baseline: expected no restart; got true")
+		}
+	})
 
 	// Fields that should NOT trigger a restart — the daemon either doesn't
 	// read them at boot, or it reads them but on demand each call.

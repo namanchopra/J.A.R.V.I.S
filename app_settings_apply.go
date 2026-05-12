@@ -66,6 +66,7 @@ func (a *App) DaemonRestartNeeded(old, next config.Config) bool {
 //   - Agent invocation: DefaultAgent, DefaultCommand
 //   - Voice transport: UseLiveKitTransport, LiveKitURL, LiveKitAPIKey,
 //     LiveKitAPISecret, LiveKitRoomName
+//   - LLM routing: LlmModel
 func daemonRestartNeeded(old, next config.Config) bool {
 	// Voice / STT / TTS configuration.
 	if old.TtsProvider != next.TtsProvider {
@@ -126,6 +127,13 @@ func daemonRestartNeeded(old, next config.Config) bool {
 		return true
 	}
 	if old.LiveKitRoomName != next.LiveKitRoomName {
+		return true
+	}
+
+	// LLM routing — daemon caches the active model client at boot, so a
+	// change to the dropdown selection requires a restart for the new
+	// provider/model to take effect.
+	if old.LlmModel != next.LlmModel {
 		return true
 	}
 

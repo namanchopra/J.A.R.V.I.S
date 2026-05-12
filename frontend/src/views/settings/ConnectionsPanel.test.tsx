@@ -142,3 +142,45 @@ describe('ConnectionsPanel LLM model dropdown (TASK-018)', () => {
     expect(SOURCE).toMatch(/<select\b/)
   })
 })
+
+describe('ConnectionsPanel LLM model persistence (v0.1.5)', () => {
+  // v0.1.5 promotes the LLM dropdown out of component-local useState and
+  // into cfg.llmModel, mirroring the v0.1.2 cfg migration for the three
+  // API keys. These assertions pin the shape of that migration at the
+  // source level so the regression cannot silently reappear.
+
+  it('reads the LLM selection from cfg (not local state)', () => {
+    // The panel must reach into cfg / ccfg for the llmModel slot. We accept
+    // either `cfg.llmModel` or `cfg?.llmModel` (and the ccfg alias used
+    // inside the body, same as the v0.1.2 keys).
+    expect(SOURCE).toMatch(/(?:cfg|ccfg)\??\.llmModel/)
+  })
+
+  it('removes the setSelectedLLM local-state setter', () => {
+    // Pre-v0.1.5 line we want gone:
+    //   const [selectedLLM, setSelectedLLM] = useState<string>(LLM_OPTIONS[0]!.value)
+    // and its call sites onChange={(e) => setSelectedLLM(e.target.value)}.
+    expect(SOURCE).not.toMatch(/setSelectedLLM/)
+  })
+
+  it('writes the LLM selection through setCfg with the llmModel field', () => {
+    // The setCfg call inside the <select> onChange must carry an
+    // `llmModel:` property. Whitespace / newline drift is tolerated by
+    // the `[\s\S]*?` non-greedy spanner.
+    expect(SOURCE).toMatch(/setCfg\([\s\S]*?llmModel/)
+  })
+
+  it('falls back to LLM_OPTIONS[0]!.value when cfg.llmModel is empty/undefined', () => {
+    // Today's default behaviour is preserved by reading
+    //   ccfg.llmModel && ccfg.llmModel !== '' ? ccfg.llmModel : LLM_OPTIONS[0]!.value
+    // We pin the fallback expression so the default cannot silently drift.
+    expect(SOURCE).toMatch(/LLM_OPTIONS\[0\]!\.value/)
+  })
+
+  it('extends the ConnectionsConfig superset cast with llmModel (v0.1.5)', () => {
+    // Until `wails generate module` re-emits models.ts with LlmModel
+    // included, the superset cast bridges the gap — same pattern as the
+    // v0.1.2 keys.
+    expect(SOURCE).toMatch(/llmModel\?:/)
+  })
+})

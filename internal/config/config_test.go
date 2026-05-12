@@ -376,6 +376,89 @@ func TestConfigBackwardCompatUnmarshalsOldShape(t *testing.T) {
 	}
 }
 
+// TestConfigRoundTripLlmModel asserts that the v0.1.5 LlmModel field marshals
+// to JSON and unmarshals back into an equivalent Config with the value intact.
+// This is the v0.1.5 acceptance for the LLM-model-dropdown bug: "SaveConfig
+// actually persists the selected LLM model so it survives reloads".
+func TestConfigRoundTripLlmModel(t *testing.T) {
+	cases := []string{
+		"google/gemini-2.5-flash",
+		"anthropic/claude-haiku-4-5",
+		"openai/gpt-4o-mini",
+		"ollama:qwen3:4b",
+	}
+
+	for _, want := range cases {
+		t.Run(want, func(t *testing.T) {
+			orig := Config{LlmModel: want}
+
+			data, err := json.Marshal(&orig)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			var got Config
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+
+			if got.LlmModel != orig.LlmModel {
+				t.Errorf("LlmModel: got %q, want %q", got.LlmModel, orig.LlmModel)
+			}
+
+			// Sanity-check the on-the-wire camelCase key.
+			outStr := string(data)
+			wantSub := `"llmModel":"` + want + `"`
+			if !strings.Contains(outStr, wantSub) {
+				t.Errorf("marshaled JSON missing %q:\n%s", wantSub, outStr)
+			}
+		})
+	}
+}
+
+// TestConfigBackwardCompatNoLlmModel verifies that an old config file from
+// v0.1.4 or earlier (which has no llmModel field) unmarshals cleanly with
+// LlmModel at its zero value, and that re-marshaling a cleared LlmModel
+// omits the key entirely (omitempty contract).
+func TestConfigBackwardCompatNoLlmModel(t *testing.T) {
+	oldJSON := `{
+		"defaultAgent": "claude-code",
+		"scanIntervalSeconds": 5,
+		"defaultCommand": "claude",
+		"mobileAPIPort": 4422,
+		"jarvisEnabled": true,
+		"ttsProvider": "vibevoice",
+		"sttModel": "whisper-small.en"
+	}`
+
+	var cfg Config
+	if err := json.Unmarshal([]byte(oldJSON), &cfg); err != nil {
+		t.Fatalf("unmarshal old-shape config: %v", err)
+	}
+
+	// Existing fields preserved.
+	if cfg.DefaultAgent != "claude-code" {
+		t.Errorf("DefaultAgent: got %q, want %q", cfg.DefaultAgent, "claude-code")
+	}
+	if cfg.TtsProvider != "vibevoice" {
+		t.Errorf("TtsProvider: got %q, want %q", cfg.TtsProvider, "vibevoice")
+	}
+
+	// New v0.1.5 field defaults to empty (= use legacy key-driven detection).
+	if cfg.LlmModel != "" {
+		t.Errorf("LlmModel: got %q, want empty (unset in old config)", cfg.LlmModel)
+	}
+
+	// Re-marshal must omit the unset llmModel key.
+	out, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(out), `"llmModel"`) {
+		t.Errorf("marshaled JSON should omit unset llmModel key:\n%s", string(out))
+	}
+}
+
 // TestExistingLiveKitConfigPreserved verifies TASK-001 acceptance: an existing
 // user who has useLiveKitTransport=true with credentials is NOT downgraded by
 // the load path. Their settings round-trip through unmarshal+marshal intact.

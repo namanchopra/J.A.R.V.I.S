@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { SettingsPanelProps } from './types'
 import { BrowserOpenURL } from '../../../wailsjs/runtime/runtime'
+import { usePipelineStatus } from '../../lib/use-pipeline-status'
 
 // macOS URL that opens System Settings → Privacy → Microphone. Used when the
 // mic permission row is in the `denied` / `restricted` state (TASK-026).
@@ -243,6 +244,107 @@ function DiagnosticRow({
 }
 
 // ---------------------------------------------------------------------------
+// Voice Pipeline block — live `pipeline_status` from the daemon (v0.1.5).
+//
+// Schema and refresh contract live in `lib/use-pipeline-status.ts`. We
+// render a small 4-line readout (LLM / STT / TTS / Wake) plus an "X s ago"
+// stamp in the header. If no event has arrived yet, we surface a dim empty
+// state with a "Request now" button that re-asks the daemon.
+// ---------------------------------------------------------------------------
+
+function formatSecondsAgo(receivedAt: number, now: number): string {
+  if (receivedAt === 0) return ''
+  const secs = Math.max(0, Math.floor((now - receivedAt) / 1000))
+  if (secs < 1) return 'just now'
+  if (secs === 1) return '1s ago'
+  if (secs < 60) return `${secs}s ago`
+  const mins = Math.floor(secs / 60)
+  if (mins === 1) return '1m ago'
+  return `${mins}m ago`
+}
+
+function VoicePipelineRow(): React.ReactElement {
+  const { status, receivedAt, refresh } = usePipelineStatus()
+
+  // Tick once a second so the "X s ago" stamp stays fresh without a global
+  // store. Costs ~1 setState/s while the Diagnostics tab is mounted.
+  const [now, setNow] = useState<number>(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const stamp = formatSecondsAgo(receivedAt, now)
+
+  return (
+    <section
+      className="rounded border border-[#1a2332] bg-[rgba(10,14,26,0.6)] p-3"
+      aria-label="Voice Pipeline"
+    >
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-xs font-mono tracking-[0.2em] text-[#00e5ff]">
+          <span aria-hidden="true">▸ </span>VOICE PIPELINE
+        </h3>
+        {status && stamp && (
+          <span className="text-[10px] font-mono text-[#4a6278]">
+            · last updated {stamp}
+          </span>
+        )}
+      </div>
+
+      {status ? (
+        <dl className="grid grid-cols-[64px_1fr] gap-y-1 gap-x-3 text-sm">
+          <dt className="text-xs font-mono uppercase text-[#8ba4b8]">LLM</dt>
+          <dd className="font-mono text-[#e8f4ff] truncate">
+            {status.llm.provider} · {status.llm.model}
+            {status.llm.source === 'user-pick' && (
+              <span className="ml-2 text-[#00e5ff]" aria-label="user pick">
+                ◆ user-pick
+              </span>
+            )}
+          </dd>
+
+          <dt className="text-xs font-mono uppercase text-[#8ba4b8]">STT</dt>
+          <dd className="font-mono text-[#e8f4ff] truncate">
+            {status.stt.model}
+          </dd>
+
+          <dt className="text-xs font-mono uppercase text-[#8ba4b8]">TTS</dt>
+          <dd className="font-mono text-[#e8f4ff] truncate">
+            {status.tts.provider} · {status.tts.voice}
+          </dd>
+
+          <dt className="text-xs font-mono uppercase text-[#8ba4b8]">Wake</dt>
+          <dd className="font-mono text-[#e8f4ff] truncate">
+            {status.wake_word.enabled ? 'ENABLED' : 'DISABLED'}
+            {' · sensitivity '}
+            {status.wake_word.sensitivity.toFixed(2)}
+          </dd>
+        </dl>
+      ) : (
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-mono italic text-[#4a6278]">
+            — no pipeline_status received from daemon yet —
+          </span>
+          <button
+            type="button"
+            onClick={refresh}
+            className="text-xs px-2 py-1 rounded text-[#8ba4b8] hover:text-[#00e5ff] transition-colors"
+            style={{
+              background: 'rgba(10, 14, 26, 0.8)',
+              border: '1px solid rgba(0, 229, 255, 0.15)',
+            }}
+            aria-label="Request pipeline status now"
+          >
+            Request now
+          </button>
+        </div>
+      )}
+    </section>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Main panel
 // ---------------------------------------------------------------------------
 
@@ -478,6 +580,11 @@ export function DiagnosticsPanel({ activeTab }: DiagnosticsPanelProps): React.Re
           )}
         </div>
       </section>
+
+      {/* Voice Pipeline — live `pipeline_status` from the Python daemon
+          (v0.1.5). Subscribes to the same `'jarvis'` channel as the HUD
+          orb labels via `usePipelineStatus()`. */}
+      <VoicePipelineRow />
     </div>
   )
 }

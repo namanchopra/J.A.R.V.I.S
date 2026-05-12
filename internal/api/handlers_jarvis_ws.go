@@ -222,11 +222,12 @@ func handleJarvisWS(c echo.Context, dc *JarvisDaemonConn, emitFn JarvisEventEmit
 				"sampleRate": msg.SampleRate,
 			})
 
-		case "model_download", "model_setup":
-			// First-run model download/setup progress events. The full JSON
-			// payload is forwarded verbatim to the React HUD so the download
-			// progress overlay can render status, percent, bytes, etc.
-			// without us having to enumerate every field here.
+		case "model_download", "model_setup", "pipeline_status":
+			// First-run model download/setup progress events and the v0.1.5
+			// ``pipeline_status`` event (resolved TTS / STT / LLM choices).
+			// The full JSON payload is forwarded verbatim to the React HUD
+			// so each consumer can render its own fields without us having
+			// to enumerate every key here.
 			var payload map[string]interface{}
 			if err := json.Unmarshal(raw, &payload); err != nil {
 				// Fall back to a minimal event with only the type so the
