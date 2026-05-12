@@ -14,6 +14,7 @@ import (
 	"github.com/namanchopra/jarvis/internal/config"
 	"github.com/namanchopra/jarvis/internal/jarvis"
 	"github.com/namanchopra/jarvis/internal/paths"
+	"github.com/namanchopra/jarvis/internal/permissions"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -41,6 +42,12 @@ func (a *App) StartJarvis() error {
 
 	if a.jarvisProcess != nil {
 		return fmt.Errorf("StartJarvis: already running")
+	}
+
+	// Ensure mic permission is requested before starting the voice pipeline.
+	// On first launch this triggers the OS prompt; on subsequent launches it's a no-op.
+	if permissions.MicStatus() == "not_determined" {
+		permissions.RequestMic()
 	}
 
 	// Locate the Python binary. Prefer the bundled interpreter inside the
