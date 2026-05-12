@@ -281,8 +281,12 @@ jobs:
           fi
 
       - name: Publish GitHub Release
+        # The built-in GITHUB_TOKEN with `permissions: contents: write` (declared
+        # at the workflow level) has everything `gh release create` needs.
+        # The previous GH_PAT secret was missing the right scope and the
+        # publish step kept dying at HTTP 403.
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           gh release create "${GITHUB_REF_NAME}" \
