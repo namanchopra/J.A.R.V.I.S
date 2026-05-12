@@ -21,6 +21,55 @@ if [[ ! -d "${APP_BUNDLE}" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Bundle libportaudio.2.dylib and rewrite the load path in the binary.
+#
+# The Go binary links against the system PortAudio (via gordonklaus/portaudio
+# cgo). At build time the linker bakes in the absolute Homebrew path as an
+# LC_LOAD_DYLIB, which doesn't exist on end-user machines. We fix this by:
+#   1. Copying the dylib into Contents/Frameworks/
+#   2. Using install_name_tool to rewrite the reference to a relative
+#      @executable_path/../Frameworks/ path.
+# ---------------------------------------------------------------------------
+FRAMEWORKS="${APP_BUNDLE}/Contents/Frameworks"
+BINARY="${APP_BUNDLE}/Contents/MacOS/jarvis"
+PORTAUDIO_SRC="/opt/homebrew/opt/portaudio/lib/libportaudio.2.dylib"
+
+if [[ -f "${PORTAUDIO_SRC}" ]]; then
+    mkdir -p "${FRAMEWORKS}"
+
+    # Resolve the real file (not symlink) so we copy actual bytes
+    PORTAUDIO_REAL="$(realpath "${PORTAUDIO_SRC}")"
+    cp "${PORTAUDIO_REAL}" "${FRAMEWORKS}/libportaudio.2.dylib"
+    chmod 755 "${FRAMEWORKS}/libportaudio.2.dylib"
+
+    # Fix the dylib's own install name
+    install_name_tool -id "@executable_path/../Frameworks/libportaudio.2.dylib" \
+        "${FRAMEWORKS}/libportaudio.2.dylib"
+
+    # Find the exact load path baked into the binary and rewrite it
+    OLD_PATH="$(otool -L "${BINARY}" | grep libportaudio | awk '{print $1}')"
+    if [[ -n "${OLD_PATH}" ]]; then
+        install_name_tool -change "${OLD_PATH}" \
+            "@executable_path/../Frameworks/libportaudio.2.dylib" \
+            "${BINARY}"
+        echo "post-build: bundled libportaudio.2.dylib and rewrote load path"
+        echo "post-build:   old: ${OLD_PATH}"
+        echo "post-build:   new: @executable_path/../Frameworks/libportaudio.2.dylib"
+    else
+        echo "post-build: WARN: could not find libportaudio reference in binary" >&2
+    fi
+
+    # Re-sign the binary and dylib (ad-hoc) since install_name_tool invalidates signatures
+    codesign --force --sign - "${FRAMEWORKS}/libportaudio.2.dylib"
+    codesign --force --sign - --entitlements "${REPO_ROOT}/build/darwin/entitlements.plist" "${BINARY}"
+    echo "post-build: re-signed binary and dylib (ad-hoc)"
+else
+    echo "post-build: ERROR: libportaudio not found at ${PORTAUDIO_SRC}" >&2
+    echo "post-build: Install it with: brew install portaudio" >&2
+    exit 1
+fi
+
 # Copy the daemon venv (Python interpreter + site-packages) into the bundle.
 if [[ -d "${REPO_ROOT}/build/daemon-venv" ]]; then
     echo "post-build: copying daemon-venv -> Resources/python/"
