@@ -1,8 +1,8 @@
 # Release workflow for Jarvis — builds and publishes a signed DMG on tag push.
 #
 # Triggered by pushing a semver tag (e.g. `v0.1.0`). Produces:
-#   - build/bin/Jarvis.app             (Wails-built, codesigned ad-hoc)
-#   - Jarvis-<version>.dmg             (drag-to-Applications installer)
+#   - build/bin/Jarvis.app             (Wails-built, Developer ID signed + notarized)
+#   - Jarvis-<version>.dmg             (drag-to-Applications installer, notarized)
 #   - GitHub Release with the DMG attached and CHANGELOG.md as release notes
 #
 # Heavy steps (python-build-standalone fetch, daemon venv build, HF model
@@ -10,10 +10,15 @@
 # (Apple Silicon, arm64) runner so the produced binaries are native.
 #
 # Secrets required (configure under Settings → Secrets and variables → Actions):
-#   HF_TOKEN  - Hugging Face read-scope token used by build/scripts/fetch-models.sh
-#               to pull microsoft/VibeVoice-Realtime-0.5B and
-#               mlx-community/whisper-small.en-mlx. Public repos still benefit
-#               from the higher rate limit an authenticated token provides.
+#   APPLE_CERTIFICATE          - Base64-encoded .p12 Developer ID Application certificate
+#   APPLE_CERTIFICATE_PASSWORD - Password for the .p12 file
+#   APPLE_SIGNING_IDENTITY     - e.g. "Developer ID Application: Your Name (TEAM_ID)"
+#   APPLE_ID                   - Apple ID email for notarytool
+#   APPLE_PASSWORD             - App-specific password for notarytool
+#   TEAM_ID                    - Apple Developer Team ID
+#   KEYCHAIN_PASSWORD          - Arbitrary password for the temporary CI keychain
+#   GH_PAT                     - GitHub PAT with repo scope for creating releases
+#   HF_TOKEN                   - Hugging Face read-scope token for model downloads
 
 name: Release
 
@@ -145,14 +150,62 @@ jobs:
         timeout-minutes: 10
         run: bash build/scripts/post-build.sh
 
-      - name: Codesign Jarvis.app (ad-hoc, hardened runtime)
-        timeout-minutes: 10
+      # ------------------------------------------------------------------
+      # Code Signing & Notarization
+      # ------------------------------------------------------------------
+      - name: Import Apple Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
+          # Decode the .p12 certificate from base64
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+
+          # Create a temporary keychain
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import the certificate into the keychain
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Allow codesign to access the keychain without UI prompt
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add the temporary keychain to the search list
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain
+
+      - name: Codesign Jarvis.app (Developer ID, hardened runtime)
+        timeout-minutes: 10
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          # Sign all nested frameworks/dylibs first (deep signing)
+          find build/bin/Jarvis.app -type f \( -name "*.dylib" -o -name "*.so" \) -exec \
+            codesign --force --options runtime \
+              --entitlements build/darwin/entitlements.plist \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              --timestamp {} \;
+
+          # Sign the main bundle
           codesign --force --deep \
             --options runtime \
             --entitlements build/darwin/entitlements.plist \
-            --sign - \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --timestamp \
             build/bin/Jarvis.app
+
+          # Verify the signature
+          codesign --verify --deep --strict --verbose=2 build/bin/Jarvis.app
 
       - name: Install create-dmg
         run: brew install create-dmg
@@ -168,9 +221,47 @@ jobs:
             "Jarvis-${VERSION}.dmg" \
             build/bin/Jarvis.app
 
+      - name: Codesign DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          codesign --force \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --timestamp \
+            "Jarvis-${VERSION}.dmg"
+
+      - name: Notarize DMG
+        timeout-minutes: 30
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG_PATH="Jarvis-${VERSION}.dmg"
+
+          # Submit for notarization and wait for completion
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --wait
+
+          # Staple the notarization ticket to the DMG
+          xcrun stapler staple "$DMG_PATH"
+
+      - name: Clean up keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
+
       - name: Publish GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           gh release create "${GITHUB_REF_NAME}" \
