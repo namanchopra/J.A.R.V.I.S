@@ -23,13 +23,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # Bundle libportaudio.2.dylib and rewrite the load path in the binary.
-#
-# The Go binary links against the system PortAudio (via gordonklaus/portaudio
-# cgo). At build time the linker bakes in the absolute Homebrew path as an
-# LC_LOAD_DYLIB, which doesn't exist on end-user machines. We fix this by:
-#   1. Copying the dylib into Contents/Frameworks/
-#   2. Using install_name_tool to rewrite the reference to a relative
-#      @executable_path/../Frameworks/ path.
 # ---------------------------------------------------------------------------
 FRAMEWORKS="${APP_BUNDLE}/Contents/Frameworks"
 BINARY="${APP_BUNDLE}/Contents/MacOS/jarvis"
@@ -38,16 +31,13 @@ PORTAUDIO_SRC="/opt/homebrew/opt/portaudio/lib/libportaudio.2.dylib"
 if [[ -f "${PORTAUDIO_SRC}" ]]; then
     mkdir -p "${FRAMEWORKS}"
 
-    # Resolve the real file (not symlink) so we copy actual bytes
     PORTAUDIO_REAL="$(realpath "${PORTAUDIO_SRC}")"
     cp "${PORTAUDIO_REAL}" "${FRAMEWORKS}/libportaudio.2.dylib"
     chmod 755 "${FRAMEWORKS}/libportaudio.2.dylib"
 
-    # Fix the dylib's own install name
     install_name_tool -id "@executable_path/../Frameworks/libportaudio.2.dylib" \
         "${FRAMEWORKS}/libportaudio.2.dylib"
 
-    # Find the exact load path baked into the binary and rewrite it
     OLD_PATH="$(otool -L "${BINARY}" | grep libportaudio | awk '{print $1}')"
     if [[ -n "${OLD_PATH}" ]]; then
         install_name_tool -change "${OLD_PATH}" \
@@ -59,19 +49,15 @@ if [[ -f "${PORTAUDIO_SRC}" ]]; then
     else
         echo "post-build: WARN: could not find libportaudio reference in binary" >&2
     fi
-
-    # Re-sign the binary and dylib (ad-hoc) since install_name_tool invalidates signatures
-    codesign --force --deep --options runtime \
-        --entitlements "${REPO_ROOT}/build/darwin/entitlements.plist" \
-        --sign - "${APP_BUNDLE}"
-    echo "post-build: re-signed Jarvis.app (ad-hoc, hardened runtime)"
 else
     echo "post-build: ERROR: libportaudio not found at ${PORTAUDIO_SRC}" >&2
     echo "post-build: Install it with: brew install portaudio" >&2
     exit 1
 fi
 
-# Copy the daemon venv (Python interpreter + site-packages) into the bundle.
+# ---------------------------------------------------------------------------
+# Copy daemon venv
+# ---------------------------------------------------------------------------
 if [[ -d "${REPO_ROOT}/build/daemon-venv" ]]; then
     echo "post-build: copying daemon-venv -> Resources/python/"
     rsync -a --delete \
@@ -84,7 +70,9 @@ else
     echo "post-build: WARN: build/daemon-venv/ not found; run build/scripts/build-daemon-venv.sh first" >&2
 fi
 
-# Copy the daemon source code into the bundle.
+# ---------------------------------------------------------------------------
+# Copy daemon source
+# ---------------------------------------------------------------------------
 echo "post-build: copying scripts/jarvis-daemon/ -> Resources/jarvis-daemon/"
 rsync -a --delete \
     --exclude='__pycache__/' \
@@ -94,17 +82,9 @@ rsync -a --delete \
     --exclude='*_test.py' \
     "${REPO_ROOT}/scripts/jarvis-daemon/" "${RESOURCES}/jarvis-daemon/"
 
-# Copy bundled models if they exist (TASK-014).
-#
-# build/models/ is populated by build/scripts/fetch-models.sh (TASK-013) and
-# contains the VibeVoice TTS model, the en-Carter_man voice preset, and the
-# Whisper MLX STT model. We use `rsync -a` (NOT --copy-links) so that the
-# HuggingFace cache symlink layout is preserved - the Python daemon resolves
-# files through those symlinks at runtime.
-#
-# A stamp file at Resources/models/.bundled-version records the pinned repo
-# IDs and the build date so app code can distinguish bundled models from
-# anything later downloaded on the user's machine.
+# ---------------------------------------------------------------------------
+# Copy bundled models (TASK-014)
+# ---------------------------------------------------------------------------
 if [[ -d "${REPO_ROOT}/build/models" ]]; then
     echo "post-build: copying build/models/ -> Resources/models/"
     rsync -a --delete "${REPO_ROOT}/build/models/" "${RESOURCES}/models/"
@@ -121,5 +101,14 @@ if [[ -d "${REPO_ROOT}/build/models" ]]; then
 else
     echo "post-build: WARN: build/models/ not found; run build/scripts/fetch-models.sh first" >&2
 fi
+
+# ---------------------------------------------------------------------------
+# Codesign the ENTIRE .app bundle LAST (after all resources are in place).
+# Must be the final step — any file change after this invalidates the seal.
+# ---------------------------------------------------------------------------
+codesign --force --deep --options runtime \
+    --entitlements "${REPO_ROOT}/build/darwin/entitlements.plist" \
+    --sign - "${APP_BUNDLE}"
+echo "post-build: codesigned Jarvis.app (ad-hoc, hardened runtime)"
 
 echo "post-build: done"
