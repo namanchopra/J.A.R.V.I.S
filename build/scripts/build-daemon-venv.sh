@@ -202,7 +202,9 @@ log "  found: ${pycache_count} __pycache__ dirs, ${pyi_count} .pyi files, ${test
 find "${SITE_PACKAGES}" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Remove *.pyi stubs (we ship a runtime, not a typecheck target).
-find "${SITE_PACKAGES}" -type f -name '*.pyi' -delete 2>/dev/null || true
+# Remove *.pyi stubs (we ship a runtime, not a typecheck target).
+# EXCEPT librosa which uses .pyi stubs at runtime via lazy_loader.
+find "${SITE_PACKAGES}" -type f -name '*.pyi' -not -path '*/librosa/*' -delete 2>/dev/null || true
 
 # Remove tests/ subpackages.
 find "${SITE_PACKAGES}" -type d -name 'tests' -prune -exec rm -rf {} + 2>/dev/null || true
