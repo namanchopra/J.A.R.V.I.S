@@ -61,9 +61,10 @@ if [[ -f "${PORTAUDIO_SRC}" ]]; then
     fi
 
     # Re-sign the binary and dylib (ad-hoc) since install_name_tool invalidates signatures
-    codesign --force --sign - "${FRAMEWORKS}/libportaudio.2.dylib"
-    codesign --force --sign - --entitlements "${REPO_ROOT}/build/darwin/entitlements.plist" "${BINARY}"
-    echo "post-build: re-signed binary and dylib (ad-hoc)"
+    codesign --force --deep --options runtime \
+        --entitlements "${REPO_ROOT}/build/darwin/entitlements.plist" \
+        --sign - "${APP_BUNDLE}"
+    echo "post-build: re-signed Jarvis.app (ad-hoc, hardened runtime)"
 else
     echo "post-build: ERROR: libportaudio not found at ${PORTAUDIO_SRC}" >&2
     echo "post-build: Install it with: brew install portaudio" >&2
