@@ -106,6 +106,10 @@ fi
 # Codesign the ENTIRE .app bundle LAST (after all resources are in place).
 # Must be the final step — any file change after this invalidates the seal.
 # ---------------------------------------------------------------------------
+# Purge __pycache__ dirs — Python regenerates them at runtime, and any .pyc
+# created after signing would invalidate the bundle seal.
+find "${APP_BUNDLE}" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+
 codesign --force --deep --options runtime \
     --entitlements "${REPO_ROOT}/build/darwin/entitlements.plist" \
     --sign - "${APP_BUNDLE}"
