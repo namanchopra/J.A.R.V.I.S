@@ -4,9 +4,37 @@ import OrbClient from '@/components/OrbClient'
 
 const REPO_URL = 'https://github.com/namanchopra/J.A.R.V.I.S'
 const RELEASES_URL = `${REPO_URL}/releases/latest`
-const DMG_URL = `${REPO_URL}/releases/download/v0.1.4/Jarvis-0.1.4.dmg`
 
-export default function Page() {
+// Hardcoded fallback — kept in sync with the latest released DMG so the
+// site never serves a 404 even if the GitHub API call below fails at
+// build time (e.g. rate-limited or offline). Bump this whenever a new
+// tag ships; `fetchLatestVersion` will override it on every cache miss.
+const FALLBACK_VERSION = '0.1.6'
+
+/** Latest release tag (e.g. "0.1.6"), fetched once per hour at build time. */
+async function fetchLatestVersion(): Promise<string> {
+  try {
+    const res = await fetch(
+      'https://api.github.com/repos/namanchopra/J.A.R.V.I.S/releases/latest',
+      {
+        headers: { Accept: 'application/vnd.github+json' },
+        // Revalidate every hour so a fresh tag is picked up automatically
+        // without needing a manual website redeploy.
+        next: { revalidate: 3600 },
+      },
+    )
+    if (!res.ok) return FALLBACK_VERSION
+    const data = (await res.json()) as { tag_name?: string }
+    // GitHub returns tag like "v0.1.6"; strip the leading v.
+    return data.tag_name?.replace(/^v/, '') ?? FALLBACK_VERSION
+  } catch {
+    return FALLBACK_VERSION
+  }
+}
+
+export default async function Page() {
+  const version = await fetchLatestVersion()
+  const dmgUrl = `${REPO_URL}/releases/download/v${version}/Jarvis-${version}.dmg`
   return (
     <main className="relative">
       {/* ===================== NAV ===================== */}
@@ -17,7 +45,7 @@ export default function Page() {
             <span className="font-mono font-bold tracking-[0.25em] text-jarvis-cyan glow-text">
               J.A.R.V.I.S
             </span>
-            <span className="label-mono">v0.1.4</span>
+            <span className="label-mono">v{version}</span>
           </div>
           <div className="flex items-center gap-3">
             <a
@@ -58,7 +86,7 @@ export default function Page() {
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <a href={DMG_URL} className="jarvis-btn-primary">
+              <a href={dmgUrl} className="jarvis-btn-primary">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M12 3v12" />
                   <path d="m6 9 6 6 6-6" />
@@ -110,7 +138,7 @@ export default function Page() {
 
         {/* Decorative grid corners */}
         <span className="pointer-events-none absolute top-20 left-4 label-mono text-jarvis-cyan/30">▸ J.A.R.V.I.S.//SYS</span>
-        <span className="pointer-events-none absolute top-20 right-4 label-mono text-jarvis-cyan/30">v0.1.4 // STABLE</span>
+        <span className="pointer-events-none absolute top-20 right-4 label-mono text-jarvis-cyan/30">v{version} // STABLE</span>
         <span className="pointer-events-none absolute bottom-4 left-4 label-mono text-jarvis-cyan/30">⏚ APPLE SILICON ONLY</span>
         <span className="pointer-events-none absolute bottom-4 right-4 label-mono text-jarvis-cyan/30 animate-pulse-soft">◉ READY</span>
       </section>
@@ -189,7 +217,7 @@ export default function Page() {
                 The DMG ships at ~356 MB. On first launch the daemon fetches ~2.4 GB of model weights to <code className="text-jarvis-cyan">~/.cache/huggingface/</code> — about 5–10 min on home internet. After that, fully offline.
               </p>
             </div>
-            <a href={DMG_URL} className="jarvis-btn-primary">
+            <a href={dmgUrl} className="jarvis-btn-primary">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M12 3v12" />
                 <path d="m6 9 6 6 6-6" />
