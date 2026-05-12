@@ -153,7 +153,15 @@ jobs:
       # ------------------------------------------------------------------
       # Code Signing & Notarization
       # ------------------------------------------------------------------
+      # The four Developer ID signing + notarization steps below all skip
+      # when APPLE_CERTIFICATE isn't configured as a repo secret. In that
+      # case the ad-hoc signature applied by post-build.sh remains in place
+      # and the DMG ships unnotarized (users will need to right-click → Open
+      # the first time, exactly as v0.1.0–v0.1.2 did). When the cert IS set,
+      # the workflow re-signs the bundle with Developer ID, hardens the
+      # runtime, and submits to notarytool for a stapled release.
       - name: Import Apple Developer ID certificate
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -185,6 +193,7 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain
 
       - name: Codesign Jarvis.app (Developer ID, hardened runtime)
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
         timeout-minutes: 10
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -222,6 +231,7 @@ jobs:
             build/bin/Jarvis.app
 
       - name: Codesign DMG
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
@@ -232,6 +242,7 @@ jobs:
             "Jarvis-${VERSION}.dmg"
 
       - name: Notarize DMG
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
         timeout-minutes: 30
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
