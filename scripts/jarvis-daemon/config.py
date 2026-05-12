@@ -34,6 +34,20 @@ _VALID_STT_MODELS: Final[frozenset[str]] = frozenset(
     {"whisper-small.en", "whisper-tiny.en", "faster-whisper"}
 )
 
+# v0.1.5 LLM picker — the four options exposed in the Connections panel
+# dropdown. Empty string means "preserve key-driven detection" (the legacy
+# behaviour every v0.1.0--v0.1.4 user already gets). Anything outside this
+# set logs a warning and falls back to the legacy chain — never crash on
+# bad config (this is voice software).
+VALID_LLM_MODELS: Final[frozenset[str]] = frozenset(
+    {
+        "google/gemini-2.5-flash",
+        "anthropic/claude-haiku-4-5",
+        "openai/gpt-4o-mini",
+        "ollama:qwen3:4b",
+    }
+)
+
 # Per-provider default voice preset. Returned only when the user has NOT set
 # ``voicePreset`` in config (so the daemon keeps its legacy hardcoded voices).
 _VOICE_PRESET_DEFAULTS: Final[dict[str, str]] = {
@@ -301,6 +315,42 @@ def get_anthropic_api_key(config: dict[str, Any] | None = None) -> str:
     if config is None:
         config = load_config()
     return str(config.get("anthropicAPIKey") or "").strip()
+
+
+def get_llm_model(config: dict[str, Any] | None = None) -> str | None:
+    """Return the user's explicit LLM model pick, or ``None`` to defer.
+
+    The v0.1.5 Connections panel exposes a four-option dropdown bound to
+    ``llmModel`` in config:
+
+    * ``"google/gemini-2.5-flash"``     -- Google Generative AI (OpenAI-compat)
+    * ``"anthropic/claude-haiku-4-5"``  -- Anthropic SDK direct
+    * ``"openai/gpt-4o-mini"``          -- OpenRouter
+    * ``"ollama:qwen3:4b"``             -- local Ollama
+
+    Contract:
+    * Returns the validated value when it matches one of ``VALID_LLM_MODELS``.
+    * Returns ``None`` when the key is missing, blank, or holds a value
+      outside ``VALID_LLM_MODELS``. Callers must fall back to legacy
+      key-driven detection in that case (never crash on bad config).
+    * Unknown values emit a single WARNING-level log so daemon.log makes
+      the misconfiguration obvious without surfacing a UI error.
+    """
+    if config is None:
+        config = load_config()
+    raw = config.get("llmModel")
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if value not in VALID_LLM_MODELS:
+        logger.warning(
+            "Unknown llmModel=%r, falling back to key-driven LLM detection",
+            raw,
+        )
+        return None
+    return value
 
 
 def get_cartesia_api_key(config: dict[str, Any] | None = None) -> str:

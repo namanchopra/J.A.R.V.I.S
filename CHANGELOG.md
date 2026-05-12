@@ -15,6 +15,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.1.5] - 2026-05-13
+
+### Added
+- **LLM model dropdown now actually persists.** The "LLM Model" picker in Settings → Connections was stored in `useState` and dropped on every app restart — same class of bug we fixed for TTS/STT in v0.1.2 but missed for the LLM. New `LlmModel` field on the Go `Config` struct, included in `daemonRestartNeeded`, so swapping models in the dropdown now triggers the amber "DAEMON RESTART REQUIRED" banner and applies on restart.
+- New daemon module `scripts/jarvis-daemon/llm_picker.py` that parses the dropdown's prefix-style values (`google/...`, `anthropic/...`, `openai/...`, `ollama:...`) and instantiates the right Pipecat service against the right base URL with the right credentials. Missing creds → warning log + graceful fallback to legacy key-driven detection. 14 new pytest cases.
+- Daemon logs the resolved LLM choice at INFO on startup: `LLM (user-pick): anthropic → claude-haiku-4-5-20251001 | source: cfg.llmModel`.
+- **Live pipeline status on the HUD and in Diagnostics.** The 4 floating labels around the orb used to lie (hardcoded `STT::WHISPER-SMALL.EN` etc. regardless of config). Now they show the resolved choices: top-left `LLM::<model> ◆` (the diamond appears when the user picked the model explicitly vs key-detected), top-right `STT::<MODEL>`, bottom-left `TTS::<PROVIDER>`, bottom-right `SESSIONS::<n>`. Empty-dash fallback before any event arrives.
+- New `pipeline_status` daemon event emitted once per pipeline build and on demand via inbound `request_pipeline_status` message. Payload includes resolved provider/model for LLM (with `source: user-pick | key-detected`), STT model, TTS provider + voice id, and wake-word enabled/sensitivity. Allowlisted in the Go WS passthrough.
+- Settings → Diagnostics now has a **Voice Pipeline** row mirroring the orb labels with a "last updated Xs ago" stamp + a "Request now" button for late-mounting clients. Includes 17 daemon + 31 HUD pytest/vitest cases.
+- New React hook `usePipelineStatus()` (`frontend/src/lib/use-pipeline-status.ts`) — wraps `EventsOn('jarvis')` with a runtime type guard and exposes `{ status, receivedAt, refresh }`. Both the HUD orb labels and the Diagnostics row consume it.
+
+### Fixed
+- **OpenRouter key set in Settings was silently ignored.** The daemon's LLM selector read `config.get("dexAPIKey")` directly at three call sites in `main.py`. The frontend writes to `jarvisAPIKey` (the current key name), and the `dexAPIKey` legacy key is never updated — so a fresh key set in Settings never reached the daemon. Patched all three call sites to use the existing `get_api_key()` helper which prefers `jarvisAPIKey` and falls back to `dexAPIKey` for pre-rename configs.
+
+### Changed
+- Go WS passthrough at `internal/api/handlers_jarvis_ws.go` now also forwards `pipeline_status` events from the daemon to the React HUD (previously the type-routed switch dropped them on the floor).
+
 ## [0.1.2] - 2026-05-12
 
 ### Added

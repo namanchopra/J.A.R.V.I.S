@@ -103,7 +103,13 @@ except ImportError:
 # Existing daemon modules (kept as-is)
 # ---------------------------------------------------------------------------
 
-from config import get_auth_token, get_ws_url, load_config
+from config import get_api_key, get_auth_token, get_llm_model, get_ws_url, load_config
+from llm_picker import build_user_picked_llm
+from pipeline_status import (
+    build_pipeline_status,
+    resolve_chain_provider_label,
+    resolve_user_pick_llm,
+)
 from monitor import BackgroundMonitor
 from tools import ToolExecutor
 from memory import ConversationMemory
@@ -234,6 +240,17 @@ _research_agent: Any = None
 _briefing_system: Any = None
 _event_store: Any = None
 
+# v0.1.5 pipeline-status cache. ``create_pipeline_components`` populates
+# this with the last payload it shipped over the WS so a late-mounting
+# HUD client can request a fresh copy via ``request_pipeline_status``
+# without forcing a daemon restart. ``None`` means the pipeline hasn't
+# been built yet this session.
+_last_pipeline_status: dict[str, Any] | None = None
+
+# The active WS connection used to re-emit ``pipeline_status`` on request.
+# Populated by ``create_pipeline_components`` and cleared on disconnect.
+_pipeline_status_ws: ClientConnection | None = None
+
 
 def _handle_context(data: dict[str, Any]) -> None:
     """Handle a context update from Go (sessions, costs, approvals)."""
@@ -307,12 +324,41 @@ def _handle_retry_model_download(data: dict[str, Any]) -> None:
     )
 
 
+def _handle_request_pipeline_status(data: dict[str, Any]) -> None:
+    """Handle a HUD ``request_pipeline_status`` message.
+
+    The HUD sends this on every WS reconnect so a late-mounting client
+    gets the current pipeline indicator state without needing a daemon
+    restart. We replay the cached payload from the most recent
+    ``create_pipeline_components`` build. If the cache is empty (pipeline
+    hasn't been built yet) we skip silently — the post-build emit will
+    catch the HUD up shortly. ``data`` is currently ignored; reserved for
+    future filter / version params.
+    """
+    del data  # Reserved; currently no fields.
+    payload = _last_pipeline_status
+    ws = _pipeline_status_ws
+    if payload is None or ws is None:
+        logger.debug(
+            "request_pipeline_status received before pipeline build; "
+            "deferring (cache=%s, ws=%s)",
+            payload is not None,
+            ws is not None,
+        )
+        return
+    asyncio.create_task(
+        ws.send(json.dumps(payload)),
+        name="resend-pipeline-status",
+    )
+
+
 _MESSAGE_HANDLERS: dict[str, Any] = {
     "context": _handle_context,
     "tool_result": _handle_tool_result,
     "command": _handle_command,
     "mobile_audio": _handle_mobile_audio,
     "retry_model_download": _handle_retry_model_download,
+    "request_pipeline_status": _handle_request_pipeline_status,
 }
 
 
@@ -924,13 +970,17 @@ def _resolve_llm_provider(config: dict[str, Any]) -> str:
     """Determine which LLM provider to use based on config keys.
 
     Returns one of: "nvidia", "google", "openrouter", "anthropic", "ollama".
-    Priority: nvidiaAPIKey > googleAPIKey > dexAPIKey (sk-or-) > dexAPIKey (sk-ant-) > ollama.
+    Priority: nvidiaAPIKey > googleAPIKey > jarvisAPIKey (sk-or-) > jarvisAPIKey (sk-ant-) > ollama.
+
+    Reads the user-facing `jarvisAPIKey` (with `dexAPIKey` legacy fallback)
+    via `get_api_key`, so a fresh OpenRouter / Anthropic key set in the
+    Connections panel is honoured on the next daemon restart.
     """
     if config.get("nvidiaAPIKey"):
         return "nvidia"
     if config.get("googleAPIKey"):
         return "google"
-    api_key = config.get("dexAPIKey", "")
+    api_key = get_api_key(config)
     if api_key.startswith("sk-or-"):
         return "openrouter"
     if api_key.startswith("sk-ant-") or api_key.startswith("sk-"):
@@ -952,12 +1002,16 @@ def _build_llm_provider_chain(config: dict[str, Any]) -> list[dict[str, str]]:
     this chain because the Anthropic SDK is not OpenAI-compatible.
     """
     chain: list[dict[str, str]] = []
-    dex_key = (config.get("dexAPIKey") or "").strip()
-    if dex_key.startswith("sk-or-"):
+    # `jarvis_key` reads `jarvisAPIKey` first (current key name), falling
+    # back to `dexAPIKey` for pre-rename configs via the `get_api_key` helper.
+    # Reading `dexAPIKey` directly here was the bug that made a fresh
+    # OpenRouter key set in Settings appear to do nothing.
+    jarvis_key = get_api_key(config).strip()
+    if jarvis_key.startswith("sk-or-"):
         chain.append({
             "name": "OpenRouter",
             "base_url": "https://openrouter.ai/api/v1",
-            "api_key": dex_key,
+            "api_key": jarvis_key,
             "model": config.get("dexModel") or "google/gemini-2.5-flash",
         })
     google_key = (config.get("googleAPIKey") or "").strip()
@@ -1367,25 +1421,64 @@ def create_pipeline_components(
     # --- TTS service (v0.1.2: honor ttsProvider from config) ---
     tts, tts_choice, voice_choice = _build_tts_service(config)
 
+    # --- v0.1.5: explicit user pick from the Connections panel LLM dropdown ---
+    # If ``cfg.llmModel`` is set to one of the four supported values, that is
+    # the source of truth and we skip the legacy key-driven detection below.
+    # Anything unsupported / missing returns None and we fall through to the
+    # legacy chain (preserving v0.1.0--v0.1.4 behaviour for users who haven't
+    # touched the dropdown).
+    user_picked_llm = build_user_picked_llm(
+        config,
+        system_instruction=JARVIS_SYSTEM_FULL,
+        anthropic_service_cls=AnthropicLLMService,
+        chain_state=_llm_chain_state,
+    )
+
     # --- LLM provider chain: OpenRouter → Google AI Studio → Ollama (with runtime failover) ---
     # Anthropic-direct (sk-ant-) takes a separate path because its SDK isn't OpenAI-compatible.
-    dex_key = (config.get("dexAPIKey") or "").strip()
+    # `jarvis_key` reads jarvisAPIKey first, dexAPIKey fallback; reading the
+    # legacy key directly was a bug — a fresh key set via Settings never
+    # reached the daemon's LLM selector.
+    jarvis_key = get_api_key(config).strip()
     google_key = (config.get("googleAPIKey") or "").strip()
     nvidia_key = (config.get("nvidiaAPIKey") or "").strip()
     use_anthropic_direct = (
-        dex_key.startswith("sk-ant-")
-        and not dex_key.startswith("sk-or-")
+        jarvis_key.startswith("sk-ant-")
+        and not jarvis_key.startswith("sk-or-")
         and not google_key
         and not nvidia_key
     )
 
-    if use_anthropic_direct:
+    # v0.1.5 pipeline-status: track the resolved provider / model / source
+    # for the HUD pipeline indicator. Every branch below populates these
+    # three locals before the post-build emit reads them.
+    llm_provider_label: str
+    llm_model_label: str
+    llm_source_label: str
+
+    if user_picked_llm is not None:
+        # The user's explicit dropdown choice short-circuits the chain.
+        # ``_build_user_picked_llm`` has already logged the chosen provider
+        # at INFO and reset ``_llm_chain_state``.
+        llm = user_picked_llm
+        # ``get_llm_model`` returned a validated pick (the picker would have
+        # returned None otherwise), so ``resolve_user_pick_llm`` is safe to
+        # unwrap. Fall back to ("unknown", pick) if a future prefix lands
+        # in VALID_LLM_MODELS before this resolver learns about it.
+        _pick_raw = get_llm_model(config) or ""
+        _resolved = resolve_user_pick_llm(_pick_raw)
+        if _resolved is not None:
+            llm_provider_label, llm_model_label = _resolved
+        else:
+            llm_provider_label, llm_model_label = "unknown", _pick_raw
+        llm_source_label = "user-pick"
+    elif use_anthropic_direct:
         from anthropic import AsyncAnthropic
         default_model = "claude-haiku-4-5-20251001"
         llm_model = config.get("dexModel") or default_model
         llm = AnthropicLLMService(
-            api_key=dex_key,
-            client=AsyncAnthropic(api_key=dex_key),
+            api_key=jarvis_key,
+            client=AsyncAnthropic(api_key=jarvis_key),
             settings=AnthropicLLMService.Settings(
                 model=llm_model,
                 system_instruction=JARVIS_SYSTEM_FULL,
@@ -1394,6 +1487,9 @@ def create_pipeline_components(
         logger.info("LLM: Anthropic direct (%s) — failover chain disabled (incompatible SDK)", llm_model)
         _llm_chain_state["providers"] = []
         _llm_chain_state["service"] = None
+        llm_provider_label = "anthropic"
+        llm_model_label = llm_model
+        llm_source_label = "key-detected"
     else:
         from pipecat.services.openai.llm import OpenAILLMService
         provider_chain = _build_llm_provider_chain(config)
@@ -1412,6 +1508,9 @@ def create_pipeline_components(
         _llm_chain_state["providers"] = provider_chain
         _llm_chain_state["active_idx"] = 0
         _llm_chain_state["service"] = llm
+        llm_provider_label = resolve_chain_provider_label(primary["name"])
+        llm_model_label = primary["model"]
+        llm_source_label = "key-detected"
 
     # --- Context aggregators (handles conversation history + VAD) ---
     from pipecat.turns.user_mute.always_user_mute_strategy import AlwaysUserMuteStrategy
@@ -1523,6 +1622,44 @@ def create_pipeline_components(
         voice_choice or "<provider default>",
         wake_enabled,
     )
+
+    # --- v0.1.5 pipeline-status: emit a single event so the HUD pipeline
+    # --- indicator can render the resolved TTS / STT / LLM choices without
+    # --- polling. The payload reflects POST-FALLBACK reality (e.g. user
+    # --- picked cartesia but the daemon fell back to vibevoice), so it can
+    # --- differ from the raw ``cfg.*`` values. We cache the payload + the
+    # --- ws ref so a late-mounting client can request a replay via
+    # --- ``request_pipeline_status`` without forcing a daemon restart.
+    global _last_pipeline_status, _pipeline_status_ws
+    wake_sensitivity = config.get("jarvisWakeSensitivity", 0.5)
+    try:
+        wake_sensitivity = float(wake_sensitivity)
+    except (TypeError, ValueError):
+        wake_sensitivity = 0.5
+    pipeline_status_payload = build_pipeline_status(
+        tts_provider=tts_choice,
+        tts_voice=voice_choice,
+        stt_model=stt_choice,
+        llm_provider=llm_provider_label,
+        llm_model=llm_model_label,
+        llm_source=llm_source_label,
+        wake_word_enabled=wake_enabled,
+        wake_word_sensitivity=wake_sensitivity,
+    )
+    _last_pipeline_status = pipeline_status_payload
+    _pipeline_status_ws = ws
+    try:
+        # The pattern for daemon -> Go events is ``await ws.send(json.dumps(...))``;
+        # see ``send_state`` / ``send_transcript`` / ``send_response`` upthread.
+        # We schedule the send instead of awaiting because callers of this
+        # function aren't all in the right phase to await (and the post-build
+        # ordering doesn't matter — the HUD just needs the payload eventually).
+        asyncio.create_task(
+            ws.send(json.dumps(pipeline_status_payload)),
+            name="emit-pipeline-status",
+        )
+    except Exception:
+        logger.warning("Failed to emit pipeline_status", exc_info=True)
 
     return pipeline, task, transport, ws_bridge, context, llm, stt, wake_gate, tts
 

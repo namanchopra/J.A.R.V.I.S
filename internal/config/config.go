@@ -132,6 +132,14 @@ type Config struct {
 
 	// CartesiaAPIKey for the Cartesia TTS service.
 	CartesiaAPIKey string `json:"cartesiaAPIKey,omitempty"`
+
+	// LlmModel selects the LLM the daemon routes chat through. Values are
+	// "<provider>/<model>" or "<provider>:<model>" strings that encode both
+	// provider and model (e.g. "google/gemini-2.5-flash",
+	// "anthropic/claude-haiku-4-5", "openai/gpt-4o-mini",
+	// "ollama:qwen3:4b"). Empty means use the daemon's legacy key-driven
+	// detection (pick whichever provider has credentials configured).
+	LlmModel string `json:"llmModel,omitempty"`
 }
 
 // UnmarshalJSON reads jarvis* keys preferentially. If a jarvis* key is absent

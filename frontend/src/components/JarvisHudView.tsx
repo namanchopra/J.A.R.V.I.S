@@ -13,6 +13,7 @@ import { FirstRunDownloadOverlay } from './hud/FirstRunDownloadOverlay'
 import '../lib/hud-theme'
 import { useFlash } from '../lib/hud-animations'
 import { sendJarvisCommand } from '../lib/jarvis-api'
+import { usePipelineStatus } from '../lib/use-pipeline-status'
 import { EventsOn, BrowserOpenURL } from '../../wailsjs/runtime/runtime'
 // `GetMicPermissionStatus` was added in TASK-025. Until `wails generate
 // module` ships the regenerated binding surface to wailsjs/, we ts-expect-error
@@ -529,6 +530,12 @@ export function JarvisHudView(): React.ReactElement {
   // -- Plan state (populated via Jarvis "plan" events) ----------------------
   const [plan, setPlan] = useState<{ goal: string; steps: PlanStep[] } | null>(null)
 
+  // -- Live pipeline status (v0.1.5) ----------------------------------------
+  // Live values for the 4 floating orb labels (LLM / STT / TTS / SESSIONS).
+  // The hook also fires `request_pipeline_status` on mount so a late-mounting
+  // HUD repopulates after a daemon restart.
+  const { status: pipelineStatus } = usePipelineStatus()
+
   // -- Mic permission state (TASK-026) ---------------------------------------
   // Polled every 4s so the red banner appears/disappears within ~5s of the
   // user toggling mic permission in System Settings.
@@ -936,6 +943,59 @@ export function JarvisHudView(): React.ReactElement {
 
           {/* Orb */}
           <JarvisOrb state={jarvisState} audioLevel={audioLevel} className="w-56 h-56" />
+
+          {/* ---- Floating pipeline-status labels (v0.1.5) ----
+              Four data readouts at the corners of the orb container.
+              Values come from the daemon's `pipeline_status` event via
+              usePipelineStatus(). Renders an em-dash placeholder until the
+              first event arrives so we never show stale hardcoded strings. */}
+          <span
+            className="animate-data-flicker pointer-events-none absolute select-none font-mono text-[10px] tracking-[0.18em] text-[#00e5ff]"
+            style={{
+              top: 8,
+              left: 8,
+              textShadow: '0 0 8px rgba(0,229,255,0.45)',
+            }}
+            aria-label="LLM model"
+          >
+            LLM::{pipelineStatus ? pipelineStatus.llm.model : '—'}
+            {pipelineStatus && pipelineStatus.llm.source === 'user-pick' && (
+              <span aria-hidden="true" style={{ marginLeft: 6 }}>◆</span>
+            )}
+          </span>
+          <span
+            className="animate-data-flicker pointer-events-none absolute select-none font-mono text-[10px] tracking-[0.18em] text-[#00e5ff]"
+            style={{
+              top: 8,
+              right: 8,
+              textShadow: '0 0 8px rgba(0,229,255,0.45)',
+            }}
+            aria-label="STT model"
+          >
+            STT::{pipelineStatus ? pipelineStatus.stt.model.toUpperCase() : '—'}
+          </span>
+          <span
+            className="animate-data-flicker pointer-events-none absolute select-none font-mono text-[10px] tracking-[0.18em] text-[#00e5ff]"
+            style={{
+              bottom: 8,
+              left: 8,
+              textShadow: '0 0 8px rgba(0,229,255,0.45)',
+            }}
+            aria-label="TTS provider"
+          >
+            TTS::{pipelineStatus ? pipelineStatus.tts.provider.toUpperCase() : '—'}
+          </span>
+          <span
+            className="animate-data-flicker pointer-events-none absolute select-none font-mono text-[10px] tracking-[0.18em] text-[#00e5ff]"
+            style={{
+              bottom: 8,
+              right: 8,
+              textShadow: '0 0 8px rgba(0,229,255,0.45)',
+            }}
+            aria-label="Active sessions count"
+          >
+            SESSIONS::{sessions.length}
+          </span>
         </div>
 
         {/* ---- LEFT COLUMN: Sessions + Activity ---- */}

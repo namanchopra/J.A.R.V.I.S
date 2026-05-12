@@ -212,6 +212,14 @@ export namespace config {
 	    livekitApiKey?: string;
 	    livekitApiSecret?: string;
 	    livekitRoomName?: string;
+	    ttsProvider?: string;
+	    sttModel?: string;
+	    voicePreset?: string;
+	    micInputDevice?: string;
+	    wakeWordEnabled?: boolean;
+	    googleAPIKey?: string;
+	    anthropicAPIKey?: string;
+	    cartesiaAPIKey?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -248,6 +256,26 @@ export namespace config {
 	        this.livekitApiKey = source["livekitApiKey"];
 	        this.livekitApiSecret = source["livekitApiSecret"];
 	        this.livekitRoomName = source["livekitRoomName"];
+	        this.ttsProvider = source["ttsProvider"];
+	        this.sttModel = source["sttModel"];
+	        this.voicePreset = source["voicePreset"];
+	        this.micInputDevice = source["micInputDevice"];
+	        this.wakeWordEnabled = source["wakeWordEnabled"];
+	        this.googleAPIKey = source["googleAPIKey"];
+	        this.anthropicAPIKey = source["anthropicAPIKey"];
+	        this.cartesiaAPIKey = source["cartesiaAPIKey"];
+	    }
+	}
+	export class SaveResult {
+	    daemonRestartNeeded: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.daemonRestartNeeded = source["daemonRestartNeeded"];
 	    }
 	}
 

@@ -29,13 +29,23 @@ import { ValidateAPIKey, IsOllamaRunning } from '../../../wailsjs/go/main/App'
 // ---------------------------------------------------------------------------
 
 // ConnectionsConfig — superset of the generated config.Config that knows
-// about the v0.1.2 fields. Once `wails generate module` runs against the
-// Go agent's PR, these become declared properties on config.Config itself
-// and this superset is redundant.
+// about the v0.1.2 fields plus v0.1.5's llmModel slot. Once
+// `wails generate module` runs against the Go agent's PR, these become
+// declared properties on config.Config itself and this superset is
+// redundant.
 type ConnectionsConfig = cfgModels.Config & {
   googleAPIKey?: string
   anthropicAPIKey?: string
   cartesiaAPIKey?: string
+  // v0.1.5: LLM model selection. The union here mirrors the LLM_OPTIONS
+  // values below; the empty string represents "not yet chosen" and falls
+  // back to LLM_OPTIONS[0]!.value at read time.
+  llmModel?:
+    | 'google/gemini-2.5-flash'
+    | 'anthropic/claude-haiku-4-5'
+    | 'openai/gpt-4o-mini'
+    | 'ollama:qwen3:4b'
+    | ''
 }
 
 export interface ConnectionsPanelProps extends SettingsPanelProps {
@@ -374,7 +384,18 @@ export function ConnectionsPanel({
     ccfg.cartesiaAPIKey,
   ])
 
-  const [selectedLLM, setSelectedLLM] = useState<string>(LLM_OPTIONS[0]!.value)
+  // v0.1.5: LLM model selection now persists via cfg.llmModel (same
+  // ConnectionsConfig superset cast pattern as the v0.1.2 key migration).
+  // The default when cfg.llmModel is empty/undefined stays at
+  // LLM_OPTIONS[0]!.value so today's behaviour is preserved for users who
+  // never touched the dropdown. The Go agent's parallel track adds
+  // LlmModel to internal/config/config.go.Config and flags it in
+  // daemonRestartNeeded so the existing amber banner triggers on save.
+  // `ccfg.llmModel` is `'<model>' | '' | undefined`; the falsy `&&` filters
+  // out both `''` and `undefined` so the result is a non-empty model string.
+  const selectedLLM: string = ccfg.llmModel
+    ? ccfg.llmModel
+    : LLM_OPTIONS[0]!.value
   const selectedAvailability = llmAvailability.find((a) => a.option.value === selectedLLM)
 
   return (
@@ -420,7 +441,12 @@ export function ConnectionsPanel({
         <div className="space-y-2">
           <select
             value={selectedLLM}
-            onChange={(e) => setSelectedLLM(e.target.value)}
+            onChange={(e) =>
+              setCfg({
+                ...(cfg as ConnectionsConfig),
+                llmModel: e.target.value as ConnectionsConfig['llmModel'],
+              } as cfgModels.Config)
+            }
             data-testid="llm-model-dropdown"
             aria-label="LLM model"
             className="sci-fi text-sm w-full"

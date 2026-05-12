@@ -165,6 +165,24 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* Data-flicker — subtle opacity flicker for HUD readouts (e.g. the   */
+/* live pipeline-status labels around the orb).                       */
+/* ------------------------------------------------------------------ */
+
+@keyframes data-flicker {
+  0%, 100% { opacity: 0.85; }
+  47%      { opacity: 0.85; }
+  48%      { opacity: 0.55; }
+  50%      { opacity: 0.95; }
+  52%      { opacity: 0.55; }
+  54%      { opacity: 0.9;  }
+}
+
+.animate-data-flicker {
+  animation: data-flicker 4.5s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------ */
 /* Form controls — Mission Control Diagnostic style                    */
 /* ------------------------------------------------------------------ */
 
