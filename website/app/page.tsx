@@ -4,7 +4,7 @@ import OrbClient from '@/components/OrbClient'
 
 const REPO_URL = 'https://github.com/namanchopra/J.A.R.V.I.S'
 const RELEASES_URL = `${REPO_URL}/releases/latest`
-const DMG_URL = `${REPO_URL}/releases/download/v0.1.0/Jarvis-0.1.0.dmg`
+const DMG_URL = `${REPO_URL}/releases/download/v0.1.3/Jarvis-0.1.3.dmg`
 
 export default function Page() {
   return (
@@ -17,7 +17,7 @@ export default function Page() {
             <span className="font-mono font-bold tracking-[0.25em] text-jarvis-cyan glow-text">
               J.A.R.V.I.S
             </span>
-            <span className="label-mono">v0.1.0</span>
+            <span className="label-mono">v0.1.3</span>
           </div>
           <div className="flex items-center gap-3">
             <a
@@ -110,7 +110,7 @@ export default function Page() {
 
         {/* Decorative grid corners */}
         <span className="pointer-events-none absolute top-20 left-4 label-mono text-jarvis-cyan/30">▸ J.A.R.V.I.S.//SYS</span>
-        <span className="pointer-events-none absolute top-20 right-4 label-mono text-jarvis-cyan/30">v0.1.0 // STABLE</span>
+        <span className="pointer-events-none absolute top-20 right-4 label-mono text-jarvis-cyan/30">v0.1.3 // STABLE</span>
         <span className="pointer-events-none absolute bottom-4 left-4 label-mono text-jarvis-cyan/30">⏚ APPLE SILICON ONLY</span>
         <span className="pointer-events-none absolute bottom-4 right-4 label-mono text-jarvis-cyan/30 animate-pulse-soft">◉ READY</span>
       </section>
