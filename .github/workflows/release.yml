@@ -46,6 +46,16 @@ jobs:
     # ~5 min codesign + DMG, plus headroom for runner cold starts.
     timeout-minutes: 75
 
+    # `secrets.X` can't be referenced in step-level `if:` directly (GHA
+    # security restriction), so we materialise the flag once at job level
+    # via env, then gate Developer ID + notarytool steps on `env.HAS_APPLE_CERT`.
+    # When unset, the workflow falls through to post-build.sh's ad-hoc
+    # signature and publishes an unnotarized DMG (right-click → Open
+    # workaround). When set, the same workflow upgrades to the full
+    # signed + notarized + stapled path.
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -161,7 +171,7 @@ jobs:
       # the workflow re-signs the bundle with Developer ID, hardens the
       # runtime, and submits to notarytool for a stapled release.
       - name: Import Apple Developer ID certificate
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -193,7 +203,7 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain
 
       - name: Codesign Jarvis.app (Developer ID, hardened runtime)
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         timeout-minutes: 10
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -231,7 +241,7 @@ jobs:
             build/bin/Jarvis.app
 
       - name: Codesign DMG
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
@@ -242,7 +252,7 @@ jobs:
             "Jarvis-${VERSION}.dmg"
 
       - name: Notarize DMG
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         timeout-minutes: 30
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
