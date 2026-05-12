@@ -83,13 +83,18 @@ interface KeyRowSpec {
   placeholder: string
 }
 
+// v0.1.6: surfaced API keys collapse from 6 fields to 2.
+//   - OpenRouter is the single cloud-LLM auth surface; one key unlocks every
+//     model in the dropdown (Gemini, Claude, GPT, etc.).
+//   - Cartesia stays as an optional row because the Cartesia TTS provider
+//     is still in the Voice dropdown and is the only paid voice option.
+// Removed from the UI: google + anthropic (dead since OpenRouter routing),
+// elevenlabs + picovoice (legacy from earlier designs — not wired to any
+// current code path). Their Config fields stay in the struct so old configs
+// load cleanly, they're just no longer surfaced.
 const KEY_ROWS: readonly KeyRowSpec[] = [
-  { provider: 'openrouter', label: 'OpenRouter API Key', hint: 'Used for gpt-4o-mini and other OpenRouter-routed models.', placeholder: 'sk-or-...' },
-  { provider: 'google',     label: 'Google AI Studio API Key', hint: 'Used for gemini-2.5-flash.', placeholder: 'AIza...' },
-  { provider: 'anthropic',  label: 'Anthropic API Key', hint: 'Used for claude-haiku-4-5 direct API access.', placeholder: 'sk-ant-...' },
-  { provider: 'cartesia',   label: 'Cartesia API Key', hint: 'Used for the Cartesia TTS provider.', placeholder: 'sk_car_...' },
-  { provider: 'elevenlabs', label: 'ElevenLabs API Key', hint: 'Used for ElevenLabs high-quality voice TTS.', placeholder: 'sk_el_...' },
-  { provider: 'picovoice',  label: 'Picovoice Access Key', hint: 'Used for the Porcupine "Hey Jarvis" wake word.', placeholder: 'pv-...' },
+  { provider: 'openrouter', label: 'OpenRouter API Key', hint: 'One key for every cloud LLM (Gemini, Claude, GPT, etc.). Paste, validate, done.', placeholder: 'sk-or-...' },
+  { provider: 'cartesia',   label: 'Cartesia API Key',  hint: 'Only needed if you pick Cartesia in the Voice tab. Skip if you stick with VibeVoice or Kokoro.', placeholder: 'sk_car_...' },
 ] as const
 
 // LLM dropdown options. Each option declares which provider key (if any)
@@ -409,9 +414,8 @@ export function ConnectionsPanel({
       hidden={activeTab !== 'connections'}
       className="space-y-6"
     >
-      {/* TASK-017: API key cluster. Six rows of input + eye-toggle + Validate
-          + pill. Each row also resets validation state on edit so a stale
-          green pill can't outlive its key. */}
+      {/* OpenRouter is the single cloud-LLM auth surface. Cartesia is the
+          one optional paid voice. Everything else runs locally. */}
       <section className="holo-panel p-4" data-testid="api-keys-section">
         <h2 className="text-sm font-semibold text-[#00e5ff] mb-1">API Keys</h2>
         <p className="text-xs text-[#8ba4b8] mb-3">
