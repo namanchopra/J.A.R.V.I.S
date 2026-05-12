@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Google-direct and Anthropic-direct branches in `llm_picker.py`. They were ~50 lines of provider-specific construction code that became dead weight once OpenRouter was the canonical path. The user-pick LLM construction collapsed from three branches to one (plus Ollama).
 - The `_ANTHROPIC_MODEL_DATE_SUFFIX` mapping is gone — OpenRouter resolves `anthropic/claude-haiku-4-5` to the current dated build server-side.
 
+### Fixed
+- **First-run download overlay was invisible to new users.** The daemon emitted its first `model_setup state=downloading` event ~1-2s before the React HUD's WS connection was established. The HUD missed that event and never mounted the FirstRunDownloadOverlay — fresh DMG users stared at the orb in silence for 5-10 min while VibeVoice + Whisper downloaded in the background. Fixed by caching the latest `model_setup` payload in `model_status.py` and adding a `request_model_setup` handler the HUD fires on mount, mirroring the `request_pipeline_status` pattern from v0.1.5.
+
 ### Notes
 - **Backward compatibility preserved.** Users on v0.1.5 with an `sk-ant-` direct key or a `googleAPIKey` continue to work via the legacy auto-detect chain (untouched) as long as they haven't set an explicit `cfg.llmModel` in Settings. The user-pick path (cfg.llmModel set) is now OpenRouter-only.
 - If you previously had `cfg.llmModel = "google/gemini-2.5-flash"` and only a `googleAPIKey` set: pick the model again with an `sk-or-` key in `jarvisAPIKey` and Apply, OR clear `cfg.llmModel` and let the legacy auto-detect path route to Google direct.

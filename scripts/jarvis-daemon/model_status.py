@@ -372,7 +372,46 @@ async def _emit_setup(pending: list[str]) -> None:
             for n in pending
         ],
     }
+    # Cache the latest payload so a late-mounting HUD client (the WS
+    # connection from the React side races daemon startup by ~1-2s and
+    # can miss the first model_setup emission) can re-pull it via
+    # `request_model_setup`. Without this cache, a fresh DMG install
+    # silently skipped the FirstRunDownloadOverlay because the
+    # downloading state arrived before the HUD had subscribed.
+    global _latest_setup_payload
+    _latest_setup_payload = payload
     await _emit(payload)
+
+
+# Module-level cache of the latest model_setup event. Populated by
+# `_emit_setup` on every state transition; consumed by
+# `handle_request_setup_message` when the HUD asks for a fresh copy.
+_latest_setup_payload: dict[str, Any] | None = None
+
+
+async def handle_request_setup_message(data: dict[str, Any]) -> None:
+    """Re-emit the cached ``model_setup`` event for a late-mounting HUD.
+
+    Mirrors the ``request_pipeline_status`` pattern from v0.1.5 so the
+    FirstRunDownloadOverlay can request the current download state on
+    mount instead of relying on having been subscribed at the moment
+    the daemon first emitted it. ``data`` is unused — kept in the
+    signature so the message dispatcher in ``main.py`` can route every
+    inbound message uniformly through ``handler(data)``.
+    """
+    del data  # explicitly unused — see docstring
+    if _latest_setup_payload is None:
+        # Prefetch hasn't started yet (daemon barely up) — emit a
+        # synthetic "ready" so the HUD doesn't sit with no state.
+        # `prefetch_models` will overwrite this within seconds with the
+        # real pending list if there's actually a download to do.
+        await _emit({
+            "type": "model_setup",
+            "state": "ready",
+            "models_pending": [],
+        })
+        return
+    await _emit(_latest_setup_payload)
 
 
 def _download_hf_snapshot(name: str) -> None:
