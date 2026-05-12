@@ -15,6 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.1.6] - 2026-05-13
+
+### Changed
+- **OpenRouter is now the source of truth for cloud LLM routing.** Picking any cloud model in the Connections panel dropdown (`google/gemini-2.5-flash`, `anthropic/claude-haiku-4-5`, `openai/gpt-4o-mini`) routes the request through OpenRouter's `https://openrouter.ai/api/v1` endpoint using `jarvisAPIKey` (must start with `sk-or-`). Previously each prefix routed to its respective vendor's direct API, requiring three separate keys.
+- The dropdown labels now suffix each cloud option with `(via OpenRouter)` so the routing is visible at a glance.
+- `LLM_OPTIONS` in ConnectionsPanel: all cloud options now declare `requiresProvider: 'openrouter'`, so the per-option availability indicator (`✓ available` / `⚠ needs openrouter key`) is uniform and accurate.
+
+### Removed
+- The Google-direct and Anthropic-direct branches in `llm_picker.py`. They were ~50 lines of provider-specific construction code that became dead weight once OpenRouter was the canonical path. The user-pick LLM construction collapsed from three branches to one (plus Ollama).
+- The `_ANTHROPIC_MODEL_DATE_SUFFIX` mapping is gone — OpenRouter resolves `anthropic/claude-haiku-4-5` to the current dated build server-side.
+
+### Notes
+- **Backward compatibility preserved.** Users on v0.1.5 with an `sk-ant-` direct key or a `googleAPIKey` continue to work via the legacy auto-detect chain (untouched) as long as they haven't set an explicit `cfg.llmModel` in Settings. The user-pick path (cfg.llmModel set) is now OpenRouter-only.
+- If you previously had `cfg.llmModel = "google/gemini-2.5-flash"` and only a `googleAPIKey` set: pick the model again with an `sk-or-` key in `jarvisAPIKey` and Apply, OR clear `cfg.llmModel` and let the legacy auto-detect path route to Google direct.
+
 ## [0.1.5] - 2026-05-13
 
 ### Added

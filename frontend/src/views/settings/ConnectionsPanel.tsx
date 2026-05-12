@@ -104,9 +104,12 @@ type LLMOption = {
   requiresOllama?: boolean
 }
 
+// v0.1.6: every cloud model is routed through OpenRouter (one key unlocks
+// every provider). Picking a cloud option only requires the OpenRouter key
+// set on `jarvisAPIKey` (must start with sk-or-). Local Ollama stays separate.
 const LLM_OPTIONS: readonly LLMOption[] = [
-  { value: 'google/gemini-2.5-flash',  label: 'google/gemini-2.5-flash',  requiresProvider: 'google' },
-  { value: 'anthropic/claude-haiku-4-5', label: 'anthropic/claude-haiku-4-5', requiresProvider: 'anthropic' },
+  { value: 'google/gemini-2.5-flash',  label: 'google/gemini-2.5-flash (via OpenRouter)',  requiresProvider: 'openrouter' },
+  { value: 'anthropic/claude-haiku-4-5', label: 'anthropic/claude-haiku-4-5 (via OpenRouter)', requiresProvider: 'openrouter' },
   { value: 'openai/gpt-4o-mini',       label: 'openai/gpt-4o-mini (via OpenRouter)', requiresProvider: 'openrouter' },
   { value: 'ollama:qwen3:4b',          label: 'qwen3:4b (Ollama, local)', requiresOllama: true },
 ] as const
