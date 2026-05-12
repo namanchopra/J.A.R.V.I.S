@@ -1,6 +1,7 @@
 package jarvis
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -217,6 +218,11 @@ func TestNewChatClient_EmptyAPIKey(t *testing.T) {
 
 func TestNewChatClient_AutoDetectsCLI(t *testing.T) {
 	t.Parallel()
+
+	// Skip if claude CLI is not in PATH (e.g. CI runners).
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skip("claude CLI not in PATH")
+	}
 
 	// When no API key is provided and claude is in PATH, should auto-select CLI.
 	client := NewChatClient("")
