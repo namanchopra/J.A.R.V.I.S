@@ -46,12 +46,6 @@ jobs:
           go install github.com/wailsapp/wails/v2/cmd/wails@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      - name: Go build
-        run: go build ./...
-
-      - name: Go test
-        run: go test ./...
-
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -59,6 +53,12 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+      - name: Go build
+        run: go build ./...
+
+      - name: Go test
+        run: go test ./...
 
       - name: Wails build (compile check)
         # No -platform flag — we just want to confirm the full app compiles.
