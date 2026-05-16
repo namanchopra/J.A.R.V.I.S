@@ -13,10 +13,13 @@ package main
 //   - This file does NOT write the setup-complete sentinel file or verify a
 //     requirements-sha; setup.IsSetupComplete (TASK-008) owns that. The
 //     binding below delegates to that package-level helper once it lands.
-//   - This file does NOT bridge the daemon's model_setup / model_download
-//     events into setup_progress events — that's TASK-007. A TODO marker is
-//     reserved at the right spot in RunSetup so TASK-007 can drop a single
-//     goroutine launch into place without re-arguing structure.
+//   - TASK-007 now lives here too: a daemon-event subscription bridges
+//     model_setup / model_download events (already forwarded to the
+//     `jarvis` Wails channel by internal/api/handlers_jarvis_ws.go) into
+//     the same `setup` channel + setupParser state machine, but ONLY
+//     while setupRunning == true. After setup completes the subscription
+//     is torn down and model events flow through to the FirstRunDownloadOverlay
+//     on the `jarvis` channel as before.
 //   - This file does NOT implement OpenSetupLog (TASK-016).
 //
 // State location note: ideally the runtime state below (setupMu, setupRunning,
@@ -39,6 +42,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/namanchopra/jarvis/internal/paths"
 	"github.com/namanchopra/jarvis/internal/setup"
@@ -111,6 +115,24 @@ type setupRuntime struct {
 	running      bool
 	currentState setup.SetupState
 	emitter      eventEmitter // nil → wailsEmitter via setupRuntime.emit
+
+	// bridgeCancel is the unsubscribe closure returned by the daemon-event
+	// subscriber when RunSetup starts. RunSetup's defer invokes it on exit
+	// so model events stop flowing to the `setup` channel once setup ends.
+	// nil when no subscription is active (tests that don't exercise the
+	// bridge, or production calls that fail before reaching the subscribe
+	// step).
+	bridgeCancel func()
+
+	// vibeVoiceDone / whisperDone latch true the first time the bridge sees
+	// a model_download {state:done} for the corresponding model. Used to
+	// trigger the sentinel write at the moment both phase-3 and phase-4
+	// downloads have completed (the daemon's own `model_setup state=ready`
+	// event also signals "all done" but we can't rely on its ordering vs.
+	// the per-model done events arriving). Reset when RunSetup begins a
+	// fresh run so re-installs work.
+	vibeVoiceDone bool
+	whisperDone   bool
 }
 
 // setupRuntimes holds one setupRuntime per *App. App is a Wails-bound
@@ -164,6 +186,100 @@ type wailsEmitter struct{}
 func (wailsEmitter) Emit(ctx context.Context, name string, args ...interface{}) {
 	runtime.EventsEmit(ctx, name, args...)
 }
+
+// ---------------------------------------------------------------------------
+// Daemon-event subscription seam (TASK-007 bridge)
+// ---------------------------------------------------------------------------
+//
+// In production we subscribe to the existing `jarvis` Wails channel via
+// runtime.EventsOn. That channel is populated by handlers_jarvis_ws.go
+// (every model_setup / model_download payload received from the daemon
+// is re-emitted verbatim there since v0.1.1). The subscriber returns an
+// unsubscribe closure that RunSetup invokes on exit.
+//
+// Tests cannot call runtime.EventsOn — it requires a fully-initialised
+// Wails ctx that the test harness doesn't construct — so we tunnel the
+// subscription behind a function variable. Tests replace the variable
+// with a no-op that returns a cancel-tracking closure and instead drive
+// events synthetically by calling handleDaemonModelEvent directly.
+
+// setupSubscribeFn is the indirection point for daemon-event subscription.
+// Production code (defaultSetupSubscriber) calls runtime.EventsOn against
+// the App's Wails ctx. Tests substitute a no-op that doesn't subscribe.
+//
+// The handler signature accepts a `map[string]interface{}` because that's
+// what the existing forwarder in handlers_jarvis_ws.go emits — every
+// model_setup / model_download payload is decoded into a generic map
+// before being passed to JarvisEventEmitter. Reusing the same shape keeps
+// the bridge's parser identical between production and test paths.
+//
+// Returns an unsubscribe closure; the closure must be idempotent so a
+// double-invoke (e.g. defer + explicit teardown on error) is safe.
+var setupSubscribeFn = defaultSetupSubscriber
+
+// defaultSetupSubscriber registers a handler on the production Wails
+// `jarvis` channel and returns the cancel closure from runtime.EventsOn.
+//
+// The wrapped callback type-asserts each event payload to
+// map[string]interface{} — the only shape handlers_jarvis_ws.go forwards
+// for model events. Anything else (state_change, transcript, tool_call,
+// etc.) is silently ignored: this bridge only cares about model phases.
+func defaultSetupSubscriber(a *App, handler func(map[string]interface{})) (cancel func()) {
+	// Default to a no-op cancel so the named return is always safe even
+	// if EventsOn panics before returning a real unsubscribe closure.
+	cancel = func() {}
+	if a == nil || a.ctx == nil {
+		// Defensive: a nil ctx means startup() hasn't run. There is
+		// nothing to subscribe to; return a no-op cancel so callers
+		// don't have to nil-check.
+		return cancel
+	}
+	// runtime.EventsOn panics with "invalid context" when called against
+	// a non-Wails context (e.g. context.Background() in tests). Recover
+	// so the bridge degrades to a no-op subscription in those scenarios
+	// rather than crashing RunSetup; tests that need to exercise the
+	// bridge replace setupSubscribeFn entirely.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("setup: runtime.EventsOn unavailable; bridge inactive", "recover", fmt.Sprintf("%v", r))
+			cancel = func() {}
+		}
+	}()
+	cancel = runtime.EventsOn(a.ctx, "jarvis", func(args ...interface{}) {
+		if len(args) == 0 {
+			return
+		}
+		payload, ok := args[0].(map[string]interface{})
+		if !ok {
+			// Non-map payloads come from other emitters on the jarvis
+			// channel (e.g. JarvisEvent structs from app_jarvis.go).
+			// They don't carry model_* events, so we drop silently.
+			return
+		}
+		handler(payload)
+	})
+	return cancel
+}
+
+// setupWriteSentinelFn is the seam for the end-of-phase-4 sentinel write.
+// Production code calls setup.WriteSentinel directly. Tests substitute a
+// recorder so they can assert "did the bridge attempt a write?" without
+// touching the real ~/.jarvis directory.
+//
+// Note: this seam is intentionally minimal — it does NOT cover the SHA-256
+// hashing of the bundled requirements.txt. The bridge writes a sentinel
+// with an empty requirements_sha256 because the production pipeline that
+// writes the *authoritative* sentinel lives elsewhere (TASK-009's daemon
+// boot path). The bridge's write is a best-effort "we got to whisper_done,
+// nothing else exploded" marker that the React layer uses to flip out of
+// the SetupScreen immediately, without waiting for the next launch's
+// IsSetupComplete-via-ReadSentinel verification.
+var setupWriteSentinelFn = setup.WriteSentinel
+
+// nowFn is the wall-clock indirection point. The bridge stamps every
+// sentinel write with nowFn().UTC(); tests that want to assert a stable
+// timestamp can override it. Defaults to time.Now.
+var nowFn = time.Now
 
 // ---------------------------------------------------------------------------
 // Path resolution indirection for the install script
@@ -564,13 +680,24 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 	rt.currentState = setup.SetupState{
 		SetupVersion: setup.SetupExpectedVersion,
 	}
+	// Reset the per-run model-phase latches so a re-install starts clean.
+	rt.vibeVoiceDone = false
+	rt.whisperDone = false
 	rt.mu.Unlock()
 
-	// Always clear the running flag on exit so a future retry can start.
+	// Always clear the running flag on exit AND tear down the daemon-event
+	// subscription so model events post-setup stop being re-emitted on the
+	// `setup` channel — they continue to flow on the `jarvis` channel to
+	// whoever else is listening (the FirstRunDownloadOverlay).
 	defer func() {
 		rt.mu.Lock()
 		rt.running = false
+		cancel := rt.bridgeCancel
+		rt.bridgeCancel = nil
 		rt.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
 	}()
 
 	args, err := resolveSetupSpawnArgs()
@@ -614,14 +741,18 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 		return a.snapshotSetupState(), wrapped
 	}
 
-	// TODO(TASK-007): hook model_setup → setup channel bridge here.
-	// Phases 3 and 4 come from the daemon over the jarvis-WS, not from this
-	// script's stderr. TASK-007 wires a goroutine that subscribes to the
-	// daemon WS conn's model_setup / model_download events and feeds them
-	// through the same setupParser instance (or a sibling instance sharing
-	// the same emitter + state). Until that lands, RunSetup only covers
-	// phases 1 and 2; phases 3 and 4 will arrive on the existing jarvis
-	// channel for the React side to render.
+	// Bridge: subscribe to the `jarvis` Wails channel so daemon-emitted
+	// model_setup / model_download events for phases 3 and 4 get re-emitted
+	// on the `setup` channel as setup_progress events. The subscription is
+	// torn down in the deferred cleanup above so it only runs for the
+	// duration of this RunSetup call. The handler itself is also gated on
+	// rt.running, providing defence in depth against a late event arriving
+	// after the unsubscribe (Wails dispatches synchronously today but the
+	// guarantee isn't documented).
+	bridgeCancel := setupSubscribeFn(a, a.handleDaemonModelEvent)
+	rt.mu.Lock()
+	rt.bridgeCancel = bridgeCancel
+	rt.mu.Unlock()
 
 	// Drain stderr in this goroutine (no need to background it — RunSetup
 	// is itself running on a goroutine spawned by the Wails frontend call).
@@ -782,6 +913,309 @@ func (a *App) handleRequestSetupState() {
 }
 
 // ---------------------------------------------------------------------------
+// Daemon model-event bridge (TASK-007)
+// ---------------------------------------------------------------------------
+//
+// handleDaemonModelEvent is the callback the `jarvis`-channel subscriber
+// invokes for every payload the daemon forwards (state_change, transcript,
+// model_setup, model_download, ...). The bridge only consumes model_setup
+// and model_download — everything else falls through silently.
+//
+// Gating: this handler is a no-op unless setupRunning == true. That gate
+// has two reasons:
+//  1. Subscription cleanup in RunSetup's defer is best-effort — Wails'
+//     EventsOff is documented to remove the listener but a race against
+//     an in-flight emit isn't ruled out, so we belt-and-brace by checking
+//     the flag.
+//  2. The same daemon channel feeds the FirstRunDownloadOverlay (mid-
+//     session model swaps via Settings). Those events must NOT double-
+//     render on the SetupScreen channel; the gate guarantees the
+//     SetupScreen receives bridge events only during the initial install.
+//
+// Mapping (daemon payload -> setup_progress on the `setup` channel):
+//
+//	model_setup {state:"downloading", models_pending:[{name},...]}
+//	  -> one setup_progress {state:started, phase:<mapped>} per pending model.
+//	     `ready` state is ignored — the per-model done events drive the
+//	     sentinel write because they're strictly more reliable.
+//	model_download {model, state:"started",   total_bytes}
+//	  -> setup_progress {state:started,  phase:<mapped>}
+//	model_download {model, state:"progress", pct, total_bytes,
+//	                downloaded_bytes, eta_seconds}
+//	  -> setup_progress {state:progress, phase:<mapped>, phaseProgress,
+//	                     bytesDone, bytesTotal, etaSeconds}
+//	model_download {model, state:"done"}
+//	  -> setup_progress {state:done,     phase:<mapped>}; advance
+//	     phaseDoneCount; if BOTH vibevoice and whisper have now reported
+//	     done, also write the sentinel + emit setup_state {complete:true}.
+//	model_download {model, state:"error",   error}
+//	  -> setup_progress {state:error,    phase:<mapped>, error}
+//
+// Model -> phase mapping:
+//
+//	"vibevoice" -> PhaseVibeVoice
+//	"whisper"   -> PhaseWhisper
+//	anything else (e.g. "kokoro" if added later) -> silently dropped, since
+//	  the SetupScreen only knows the four canonical phases.
+func (a *App) handleDaemonModelEvent(payload map[string]interface{}) {
+	if payload == nil {
+		return
+	}
+	rt := setupRuntimeFor(a)
+
+	// Gate on setupRunning. Capture emitter under the same lock so the
+	// "is setup running?" check and the choice of emitter are consistent
+	// with the snapshot tests assert against.
+	rt.mu.Lock()
+	if !rt.running {
+		rt.mu.Unlock()
+		return
+	}
+	em := rt.emitter
+	rt.mu.Unlock()
+	if em == nil {
+		em = wailsEmitter{}
+	}
+
+	evtType, _ := payload["type"].(string)
+	switch evtType {
+	case "model_setup":
+		a.bridgeHandleModelSetup(payload, em)
+	case "model_download":
+		a.bridgeHandleModelDownload(payload, em)
+	default:
+		// Not a setup-relevant event (state_change, transcript, ...).
+		// Drop silently — we only mirror the model phases.
+	}
+}
+
+// bridgeHandleModelSetup processes a `model_setup` event from the daemon.
+// State `downloading` with a non-empty models_pending list emits a
+// `started` setup_progress event for each pending model the bridge
+// recognises. State `ready` is a no-op here (the per-model `done` events
+// drive sentinel-write because they're strictly more reliable — they
+// don't depend on the daemon batching the final ready emit relative to
+// the last per-model done).
+func (a *App) bridgeHandleModelSetup(payload map[string]interface{}, em eventEmitter) {
+	state, _ := payload["state"].(string)
+	if state != "downloading" {
+		return
+	}
+	pendingRaw, _ := payload["models_pending"].([]interface{})
+	for _, entry := range pendingRaw {
+		obj, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := obj["name"].(string)
+		phase, ok := modelNameToPhase(name)
+		if !ok {
+			// Unknown model — silently skip. The SetupScreen only
+			// recognises the four canonical phases.
+			continue
+		}
+		// Update cached state under the lock so a concurrent
+		// GetSetupState sees the phase advance.
+		rt := setupRuntimeFor(a)
+		rt.mu.Lock()
+		rt.currentState.Phase = phase
+		rt.currentState.PhaseProgress = 0
+		rt.currentState.LastError = ""
+		rt.mu.Unlock()
+		em.Emit(a.ctx, "setup", setupProgressEvent{
+			Type:  "setup_progress",
+			Phase: phase,
+			State: stateStarted,
+		})
+	}
+}
+
+// bridgeHandleModelDownload processes a `model_download` event and emits
+// the corresponding setup_progress. See handleDaemonModelEvent's docstring
+// for the full mapping table.
+func (a *App) bridgeHandleModelDownload(payload map[string]interface{}, em eventEmitter) {
+	model, _ := payload["model"].(string)
+	phase, ok := modelNameToPhase(model)
+	if !ok {
+		// Unknown model — silently drop (kokoro, etc.).
+		return
+	}
+	state, _ := payload["state"].(string)
+
+	rt := setupRuntimeFor(a)
+
+	switch state {
+	case "started":
+		rt.mu.Lock()
+		rt.currentState.Phase = phase
+		rt.currentState.PhaseProgress = 0
+		rt.currentState.LastError = ""
+		rt.mu.Unlock()
+		em.Emit(a.ctx, "setup", setupProgressEvent{
+			Type:  "setup_progress",
+			Phase: phase,
+			State: stateStarted,
+		})
+
+	case "progress":
+		// pct is the daemon's already-clamped 0..100 percentage; mirror
+		// the stderr parser's clamp-and-warn behaviour for defence in
+		// depth in case a future daemon version slips a bad value.
+		pct := int(coerceNumber(payload["pct"]))
+		if pct < 0 {
+			slog.Warn("bridge: model_download pct < 0; clamped", "value", pct, "model", model)
+			pct = 0
+		}
+		if pct > 100 {
+			slog.Warn("bridge: model_download pct > 100; clamped", "value", pct, "model", model)
+			pct = 100
+		}
+		rt.mu.Lock()
+		rt.currentState.Phase = phase
+		rt.currentState.PhaseProgress = pct
+		rt.mu.Unlock()
+
+		pctCopy := pct
+		evt := setupProgressEvent{
+			Type:          "setup_progress",
+			Phase:         phase,
+			State:         stateProgress,
+			PhaseProgress: &pctCopy,
+		}
+		// bytes_done / bytes_total are emitted as a pair when both are
+		// present and non-negative, matching the stderr parser's
+		// behaviour.
+		if v, hasD := payload["downloaded_bytes"]; hasD {
+			if t, hasT := payload["total_bytes"]; hasT {
+				bd := int64(coerceNumber(v))
+				bt := int64(coerceNumber(t))
+				if bd >= 0 && bt >= 0 {
+					evt.BytesDone = &bd
+					evt.BytesTotal = &bt
+				}
+			}
+		}
+		if v, has := payload["eta_seconds"]; has {
+			eta := int(coerceNumber(v))
+			if eta >= 0 {
+				evt.EtaSeconds = &eta
+			}
+		}
+		em.Emit(a.ctx, "setup", evt)
+
+	case "done":
+		// Advance per-phase latch + counter, then emit. Sentinel-write
+		// happens after BOTH models have completed.
+		writeSentinel := false
+		rt.mu.Lock()
+		rt.currentState.Phase = phase
+		rt.currentState.PhaseProgress = 100
+		switch model {
+		case "vibevoice":
+			if !rt.vibeVoiceDone {
+				rt.vibeVoiceDone = true
+				rt.currentState.PhaseDoneCount++
+			}
+		case "whisper":
+			if !rt.whisperDone {
+				rt.whisperDone = true
+				rt.currentState.PhaseDoneCount++
+			}
+		}
+		if rt.vibeVoiceDone && rt.whisperDone {
+			writeSentinel = true
+		}
+		stateCopy := rt.currentState
+		rt.mu.Unlock()
+
+		em.Emit(a.ctx, "setup", setupProgressEvent{
+			Type:  "setup_progress",
+			Phase: phase,
+			State: stateDone,
+		})
+
+		if writeSentinel {
+			// Best-effort sentinel write. The bridge is the optimistic
+			// "we made it through phase 4 cleanly" sentinel; the next
+			// launch will still re-verify via setup.ReadSentinel against
+			// the bundled requirements.txt. A write failure is logged
+			// but does NOT block the setup_state emission — the React
+			// HUD still flips out of the SetupScreen based on the event.
+			data := setup.SentinelData{
+				Version:   setup.SetupExpectedVersion,
+				Timestamp: nowFn().UTC(),
+			}
+			if err := setupWriteSentinelFn(data); err != nil {
+				slog.Warn("bridge: WriteSentinel failed (HUD still flips via setup_state)", "err", err)
+			}
+			// Emit setup_state {complete:true} so the React HUD swaps
+			// out of the SetupScreen immediately, without waiting for
+			// the next launch's IsSetupComplete to fire.
+			em.Emit(a.ctx, "setup", setupStateEvent{
+				Type:           "setup_state",
+				Complete:       true,
+				Phase:          stateCopy.Phase,
+				PhaseDoneCount: stateCopy.PhaseDoneCount,
+				SetupVersion:   setup.SetupExpectedVersion,
+			})
+		}
+
+	case "error":
+		errMsg, _ := payload["error"].(string)
+		rt.mu.Lock()
+		rt.currentState.Phase = phase
+		rt.currentState.LastError = errMsg
+		rt.mu.Unlock()
+		em.Emit(a.ctx, "setup", setupProgressEvent{
+			Type:  "setup_progress",
+			Phase: phase,
+			State: stateError,
+			Error: errMsg,
+		})
+
+	default:
+		// Unknown / missing state — drop silently. The daemon's contract
+		// only defines started/progress/done/error so anything else is
+		// a future addition we should ignore for forward compatibility.
+	}
+}
+
+// modelNameToPhase maps the daemon's short model id (used in event payloads)
+// to the SetupPhase enum. Returns false for any name the SetupScreen has no
+// row for (e.g. "kokoro" if it ever appears in models_pending).
+func modelNameToPhase(name string) (setup.SetupPhase, bool) {
+	switch name {
+	case "vibevoice":
+		return setup.PhaseVibeVoice, true
+	case "whisper":
+		return setup.PhaseWhisper, true
+	}
+	return "", false
+}
+
+// coerceNumber accepts any JSON-decoded numeric value (float64 from
+// encoding/json, or the rare int when callers construct payloads
+// directly in tests) and returns a float64 for arithmetic. Returns 0 for
+// nil / non-numeric values so the caller can apply its own range checks
+// without nil-deref.
+func coerceNumber(v interface{}) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	default:
+		return 0
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -838,4 +1272,3 @@ func (a *App) emitErrorEvent(msg string) {
 		Error: msg,
 	})
 }
-

@@ -120,6 +120,13 @@ func fakeStderrSpawner(stderr string, waitErr error, spawnCount *int32) func(con
 // itself never runs (setupSpawnerFn is replaced); only its existence is
 // checked. Returns the absolute path to the project root that the test
 // should chdir into via t.Cleanup-protected os.Chdir.
+//
+// It also installs a no-op setupSubscribeFn for the duration of the test
+// so RunSetup's TASK-007 bridge subscription doesn't try to call
+// runtime.EventsOn against a non-Wails context (which log.Fatalfs and
+// would kill the test binary). Tests that exercise the bridge handler
+// directly should NOT use stubInstallScript — they don't go through
+// RunSetup so the seam doesn't matter.
 func stubInstallScript(t *testing.T, tmp string) {
 	t.Helper()
 	scriptDir := filepath.Join(tmp, "scripts", "setup")
@@ -141,6 +148,14 @@ func stubInstallScript(t *testing.T, tmp string) {
 		t.Fatalf("chdir: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	// Replace setupSubscribeFn with a no-op so RunSetup doesn't call
+	// runtime.EventsOn against a non-Wails context.
+	prevSub := setupSubscribeFn
+	setupSubscribeFn = func(_ *App, _ func(map[string]interface{})) func() {
+		return func() {}
+	}
+	t.Cleanup(func() { setupSubscribeFn = prevSub })
 }
 
 // findEventsByState filters the recorded events to setupProgressEvent values
@@ -807,5 +822,353 @@ func TestRunSetup_EmitsOnSetupChannel(t *testing.T) {
 		if ev.Channel != "setup" {
 			t.Errorf("event emitted on channel %q; want %q", ev.Channel, "setup")
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TASK-007 — daemon model-event bridge
+// ---------------------------------------------------------------------------
+//
+// The bridge translates daemon-emitted model_setup / model_download payloads
+// (forwarded onto the `jarvis` Wails channel by handlers_jarvis_ws.go) into
+// `setup_progress` / `setup_state` events on the `setup` channel. These
+// tests drive handleDaemonModelEvent directly with synthetic
+// map[string]interface{} payloads — matching the shape that the production
+// jarvis-channel emitter constructs — and assert the bridge's output.
+
+// markSetupRunning flips rt.running to true for the duration of t and
+// resets it on cleanup. The bridge is gated on setupRunning, so without
+// this helper every bridge test would emit nothing.
+func markSetupRunning(t *testing.T, a *App) {
+	t.Helper()
+	rt := setupRuntimeFor(a)
+	rt.mu.Lock()
+	rt.running = true
+	rt.mu.Unlock()
+	t.Cleanup(func() {
+		rt.mu.Lock()
+		rt.running = false
+		rt.mu.Unlock()
+	})
+}
+
+// TestBridge_ForwardsModelDownloadVibeVoiceAsSetupProgress feeds a
+// representative model_download progress payload (matching the shape that
+// model_status.py's _build_progress_payload emits) into the bridge and
+// asserts that the corresponding setup_progress event lands on the `setup`
+// channel with the correct phase and field translations.
+func TestBridge_ForwardsModelDownloadVibeVoiceAsSetupProgress(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+	markSetupRunning(t, a)
+
+	// model_download / progress at 45% with bytes + ETA. JSON-decoded
+	// numbers come through as float64, matching the production path
+	// where handlers_jarvis_ws.go decodes the daemon WS frame into a
+	// map[string]interface{} before calling the bridge.
+	payload := map[string]interface{}{
+		"type":             "model_download",
+		"model":            "vibevoice",
+		"state":            "progress",
+		"pct":              float64(45),
+		"total_bytes":      float64(1932735283),
+		"downloaded_bytes": float64(869730877),
+		"eta_seconds":      float64(31),
+	}
+	a.handleDaemonModelEvent(payload)
+
+	events := rec.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("emitted events = %d; want 1\nevents: %+v", len(events), events)
+	}
+	if events[0].Channel != "setup" {
+		t.Errorf("channel = %q; want %q", events[0].Channel, "setup")
+	}
+	evt, ok := events[0].Event.(setupProgressEvent)
+	if !ok {
+		t.Fatalf("event type = %T; want setupProgressEvent", events[0].Event)
+	}
+	if evt.Type != "setup_progress" {
+		t.Errorf("Type = %q; want %q", evt.Type, "setup_progress")
+	}
+	if evt.Phase != setup.PhaseVibeVoice {
+		t.Errorf("Phase = %q; want %q", evt.Phase, setup.PhaseVibeVoice)
+	}
+	if evt.State != stateProgress {
+		t.Errorf("State = %q; want %q", evt.State, stateProgress)
+	}
+	if evt.PhaseProgress == nil || *evt.PhaseProgress != 45 {
+		t.Errorf("PhaseProgress = %v; want 45", evt.PhaseProgress)
+	}
+	if evt.BytesDone == nil || *evt.BytesDone != 869730877 {
+		t.Errorf("BytesDone = %v; want 869730877", evt.BytesDone)
+	}
+	if evt.BytesTotal == nil || *evt.BytesTotal != 1932735283 {
+		t.Errorf("BytesTotal = %v; want 1932735283", evt.BytesTotal)
+	}
+	if evt.EtaSeconds == nil || *evt.EtaSeconds != 31 {
+		t.Errorf("EtaSeconds = %v; want 31", evt.EtaSeconds)
+	}
+}
+
+// TestBridge_OnlyForwardsWhileSetupRunning verifies the gate that protects
+// the FirstRunDownloadOverlay use-case: when setup has completed (running=
+// false), the bridge MUST NOT emit on the `setup` channel even if model
+// events keep flowing from the daemon (e.g. user swaps models from
+// Settings while the SetupScreen is unmounted).
+func TestBridge_OnlyForwardsWhileSetupRunning(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+	// Intentionally do NOT call markSetupRunning — running stays false.
+
+	payload := map[string]interface{}{
+		"type":             "model_download",
+		"model":            "vibevoice",
+		"state":            "progress",
+		"pct":              float64(45),
+		"total_bytes":      float64(1932735283),
+		"downloaded_bytes": float64(869730877),
+	}
+	a.handleDaemonModelEvent(payload)
+
+	// And a model_setup event, also while not running:
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_setup",
+		"state": "downloading",
+		"models_pending": []interface{}{
+			map[string]interface{}{"name": "vibevoice", "approx_size_bytes": float64(1932735283)},
+		},
+	})
+
+	events := rec.snapshot()
+	if len(events) != 0 {
+		t.Errorf("emitted events while !running = %d; want 0\nevents: %+v", len(events), events)
+	}
+}
+
+// TestBridge_AdvancesPhaseDoneCountOnModelDone verifies that
+// model_download {state:done} events advance the cached PhaseDoneCount
+// once per model: a vibevoice done bumps the counter by 1 (idempotent
+// on a second done), and a whisper done brings the counter to 4 (assuming
+// phases 1 + 2 were already done from the stderr parser).
+//
+// PhaseDoneCount is the React HUD's progress bar driver, so any drift
+// here would show stale progress on screen.
+func TestBridge_AdvancesPhaseDoneCountOnModelDone(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	_ = installRecorder(t, a)
+	markSetupRunning(t, a)
+
+	// Substitute setupWriteSentinelFn with a recorder so the whisper-done
+	// path doesn't touch the real ~/.jarvis directory. We don't need to
+	// assert anything against it here — the sentinel test below covers
+	// that — but we do need to keep it from no-oping or erroring.
+	prevWrite := setupWriteSentinelFn
+	setupWriteSentinelFn = func(_ setup.SentinelData) error { return nil }
+	t.Cleanup(func() { setupWriteSentinelFn = prevWrite })
+
+	// Seed the counter to 2 (phases 1 + 2 done) to match the production
+	// flow where phases 3 + 4 are the model downloads.
+	rt := setupRuntimeFor(a)
+	rt.mu.Lock()
+	rt.currentState.PhaseDoneCount = 2
+	rt.mu.Unlock()
+
+	// vibevoice done → counter = 3.
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_download",
+		"model": "vibevoice",
+		"state": "done",
+	})
+	state := a.GetSetupState()
+	if state.PhaseDoneCount != 3 {
+		t.Errorf("after vibevoice done: PhaseDoneCount = %d; want 3", state.PhaseDoneCount)
+	}
+
+	// Replaying vibevoice done is idempotent — counter stays at 3.
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_download",
+		"model": "vibevoice",
+		"state": "done",
+	})
+	state = a.GetSetupState()
+	if state.PhaseDoneCount != 3 {
+		t.Errorf("after duplicate vibevoice done: PhaseDoneCount = %d; want 3 (idempotent)", state.PhaseDoneCount)
+	}
+
+	// whisper done → counter = 4 (all phases complete).
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_download",
+		"model": "whisper",
+		"state": "done",
+	})
+	state = a.GetSetupState()
+	if state.PhaseDoneCount != 4 {
+		t.Errorf("after whisper done: PhaseDoneCount = %d; want 4", state.PhaseDoneCount)
+	}
+}
+
+// TestBridge_ErrorEventPropagatesToSetupProgress verifies that a daemon-
+// emitted model_download {state:error} payload produces a setup_progress
+// {state:error} event on the `setup` channel, with the error message
+// preserved verbatim and the cached LastError populated for subsequent
+// GetSetupState reads.
+func TestBridge_ErrorEventPropagatesToSetupProgress(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+	markSetupRunning(t, a)
+
+	wantMsg := "huggingface_hub returned 429 Too Many Requests"
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_download",
+		"model": "vibevoice",
+		"state": "error",
+		"error": wantMsg,
+	})
+
+	errs := findEventsByState(rec.snapshot(), stateError)
+	if len(errs) != 1 {
+		t.Fatalf("error events = %d; want 1", len(errs))
+	}
+	if errs[0].Phase != setup.PhaseVibeVoice {
+		t.Errorf("error phase = %q; want %q", errs[0].Phase, setup.PhaseVibeVoice)
+	}
+	if errs[0].Error != wantMsg {
+		t.Errorf("error message = %q; want %q", errs[0].Error, wantMsg)
+	}
+
+	state := a.GetSetupState()
+	if state.LastError != wantMsg {
+		t.Errorf("cached LastError = %q; want %q", state.LastError, wantMsg)
+	}
+}
+
+// TestBridge_WhisperCompletionWritesSentinel asserts the bridge's
+// end-of-phase-4 contract: when BOTH vibevoice and whisper have emitted
+// {state:done}, the bridge must invoke setupWriteSentinelFn exactly once
+// AND emit a setup_state {complete:true} event so the React HUD can flip
+// out of the SetupScreen without waiting for the next launch.
+//
+// The sentinel write itself is recorded via a substituted
+// setupWriteSentinelFn so the test doesn't touch ~/.jarvis. The write
+// must happen on the whisper done (vibevoice was first), not before,
+// to mirror the production ordering where the daemon downloads
+// vibevoice then whisper serially.
+func TestBridge_WhisperCompletionWritesSentinel(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+	markSetupRunning(t, a)
+
+	// Recorder for sentinel writes. Each invocation appends the data so
+	// we can assert the call count + payload at the end.
+	var sentinelCalls []setup.SentinelData
+	prevWrite := setupWriteSentinelFn
+	setupWriteSentinelFn = func(d setup.SentinelData) error {
+		sentinelCalls = append(sentinelCalls, d)
+		return nil
+	}
+	t.Cleanup(func() { setupWriteSentinelFn = prevWrite })
+
+	// Step 1: vibevoice done — sentinel must NOT be written yet (whisper
+	// hasn't finished).
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_download",
+		"model": "vibevoice",
+		"state": "done",
+	})
+	if got := len(sentinelCalls); got != 0 {
+		t.Errorf("after vibevoice done only: sentinel write count = %d; want 0", got)
+	}
+
+	// Step 2: whisper done — both models complete; sentinel is written
+	// AND a setup_state {complete:true} event is emitted.
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_download",
+		"model": "whisper",
+		"state": "done",
+	})
+	if got := len(sentinelCalls); got != 1 {
+		t.Fatalf("after whisper done: sentinel write count = %d; want 1", got)
+	}
+	if sentinelCalls[0].Version != setup.SetupExpectedVersion {
+		t.Errorf("sentinel Version = %q; want %q", sentinelCalls[0].Version, setup.SetupExpectedVersion)
+	}
+	if sentinelCalls[0].Timestamp.IsZero() {
+		t.Errorf("sentinel Timestamp is zero; want a real time")
+	}
+
+	// And a setup_state {complete:true} event should be in the recorder.
+	var completeEvt *setupStateEvent
+	for _, ev := range rec.snapshot() {
+		if se, ok := ev.Event.(setupStateEvent); ok && se.Complete {
+			seCopy := se
+			completeEvt = &seCopy
+			break
+		}
+	}
+	if completeEvt == nil {
+		t.Fatalf("no setup_state{complete:true} event emitted after whisper done")
+	}
+	if completeEvt.Type != "setup_state" {
+		t.Errorf("complete event Type = %q; want %q", completeEvt.Type, "setup_state")
+	}
+	if completeEvt.SetupVersion != setup.SetupExpectedVersion {
+		t.Errorf("complete event SetupVersion = %q; want %q", completeEvt.SetupVersion, setup.SetupExpectedVersion)
+	}
+}
+
+// TestBridge_ModelSetupStartedEmitsStartedPerPendingModel verifies the
+// model_setup {state:downloading, models_pending:[...]} entry point: each
+// pending model in the list produces one setup_progress {state:started}
+// event with the correct phase. Unknown models (e.g. "kokoro") are dropped
+// silently — they have no corresponding phase row on the SetupScreen.
+func TestBridge_ModelSetupStartedEmitsStartedPerPendingModel(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+	markSetupRunning(t, a)
+
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":  "model_setup",
+		"state": "downloading",
+		"models_pending": []interface{}{
+			map[string]interface{}{"name": "vibevoice", "approx_size_bytes": float64(1932735283)},
+			map[string]interface{}{"name": "whisper", "approx_size_bytes": float64(483183820)},
+			map[string]interface{}{"name": "kokoro", "approx_size_bytes": float64(123456789)}, // unknown — must drop
+		},
+	})
+
+	started := findEventsByState(rec.snapshot(), stateStarted)
+	if len(started) != 2 {
+		t.Errorf("started events = %d; want 2 (kokoro should be dropped)", len(started))
+	}
+	if len(started) >= 1 && started[0].Phase != setup.PhaseVibeVoice {
+		t.Errorf("started[0].Phase = %q; want %q", started[0].Phase, setup.PhaseVibeVoice)
+	}
+	if len(started) >= 2 && started[1].Phase != setup.PhaseWhisper {
+		t.Errorf("started[1].Phase = %q; want %q", started[1].Phase, setup.PhaseWhisper)
 	}
 }
