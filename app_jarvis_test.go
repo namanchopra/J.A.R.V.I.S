@@ -393,3 +393,132 @@ func TestRestartJarvisErrorWraps(t *testing.T) {
 		t.Errorf("error message = %q; want prefix %q", err.Error(), "RestartJarvis:")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// v0.2.0 TASK-001 — quarantine attribute strip in StartJarvis
+// ---------------------------------------------------------------------------
+
+// TestStartJarvis_StripsQuarantineWhenBundled asserts that when the process
+// appears to be running inside a .app bundle (i.e. BundledResourcesDir
+// returns a non-empty path), StartJarvis invokes the quarantine-strip
+// helper exactly once per call, passing the resolved Resources directory.
+//
+// In v0.2.0 the strip is what unblocks the daemon from launching on a fresh
+// DMG download: macOS stamps com.apple.quarantine on every nested binary,
+// and Gatekeeper silently refuses to exec them unless the attribute is
+// cleared. The test substitutes both indirection points
+// (bundledResourcesDirFn, stripQuarantineFn) so it does NOT require a real
+// .app layout on disk or a real `xattr` binary.
+//
+// StartJarvis is expected to return a non-nil error here because no bundled
+// Python interpreter exists in the test environment; the assertion is on
+// the side-effect (strip count + path), not the return value.
+func TestStartJarvis_StripsQuarantineWhenBundled(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Substitute the bundled-resources lookup so the strip block runs.
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	// Substitute the strip itself with a counter so the real `xattr` binary
+	// is never invoked. Recording the path argument lets us assert the
+	// production caller passes the value returned by bundledResourcesDirFn.
+	var stripCalls int
+	var stripPaths []string
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error {
+		stripCalls++
+		stripPaths = append(stripPaths, p)
+		return nil
+	}
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	a := &App{}
+	// StartJarvis will fail at the python-interpreter check below the strip
+	// block — that is expected and unrelated to TASK-001.
+	_ = a.StartJarvis()
+
+	if stripCalls != 1 {
+		t.Errorf("stripQuarantineFn invocation count = %d; want 1", stripCalls)
+	}
+	if len(stripPaths) != 1 || stripPaths[0] != fakeResources {
+		t.Errorf("stripQuarantineFn paths = %v; want [%q]", stripPaths, fakeResources)
+	}
+}
+
+// TestStartJarvis_SkipsStripInDevMode asserts that when BundledResourcesDir
+// returns "" (dev mode via `wails dev` or `go run`, or `go test`),
+// StartJarvis does NOT invoke the quarantine-strip helper at all. There is
+// no bundle to strip from, and running `xattr` against an empty / missing
+// path would just generate log noise.
+//
+// As with the bundled test, StartJarvis is expected to return a non-nil
+// error because no Python interpreter is available — the assertion is on
+// the strip counter staying at zero.
+func TestStartJarvis_SkipsStripInDevMode(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Simulate dev mode by forcing bundledResourcesDirFn to return "".
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return "" }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	var stripCalls int
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error {
+		stripCalls++
+		return nil
+	}
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	a := &App{}
+	_ = a.StartJarvis()
+
+	if stripCalls != 0 {
+		t.Errorf("stripQuarantineFn invocation count in dev mode = %d; want 0", stripCalls)
+	}
+}
+
+// TestStartJarvis_StripFailureDoesNotBlockLaunch verifies the "best effort"
+// contract: even when stripQuarantineFn returns a non-nil error (simulating
+// missing `xattr`, permission denied, or any other failure mode), the
+// outcome of StartJarvis is unchanged. The strip's failure must never be
+// the reason a user sees a launch error.
+//
+// In this test env StartJarvis still fails because no Python interpreter
+// exists; the assertion is that the error is the Python error, not anything
+// related to the strip. We assert on the error message containing
+// "could not find Python interpreter" — the exact string emitted by the
+// python-lookup branch immediately following the strip block.
+func TestStartJarvis_StripFailureDoesNotBlockLaunch(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error {
+		return os.ErrPermission
+	}
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	a := &App{}
+	err := a.StartJarvis()
+	if err == nil {
+		t.Fatalf("StartJarvis() with strip failure = nil; want python-interpreter error")
+	}
+	if !strings.Contains(err.Error(), "could not find Python interpreter") {
+		t.Errorf("StartJarvis() error = %q; want python-interpreter error (strip failure must not surface)", err.Error())
+	}
+	// And the wrapping must still use the StartJarvis: prefix.
+	if !strings.Contains(err.Error(), "StartJarvis:") {
+		t.Errorf("StartJarvis() error = %q; want %q prefix", err.Error(), "StartJarvis:")
+	}
+}

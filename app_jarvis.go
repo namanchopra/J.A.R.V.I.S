@@ -56,6 +56,26 @@ func (a *App) StartJarvis() error {
 	bundledPython := paths.BundledPython()
 	devPython := paths.DataPath("jarvis-daemon-env", "bin", "python3")
 
+	// v0.2.0 TASK-001: Best-effort strip of com.apple.quarantine from the
+	// bundle's Resources tree before exec'ing any bundled binary. When a
+	// fresh user downloads the DMG from GitHub, macOS stamps the quarantine
+	// xattr on the .app, and that attribute propagates to NESTED binaries
+	// (libportaudio.dylib, uv, install-daemon.sh, the Python interpreter).
+	// Gatekeeper then silently refuses to exec them and the daemon never
+	// starts. Stripping the attr here clears the path for every subsequent
+	// exec in this launch. In dev mode BundledResourcesDir() returns "" and
+	// we skip the strip entirely. Failure (xattr missing, permission denied,
+	// non-zero exit) is logged at Debug and never blocks launch.
+	if resDir := bundledResourcesDirFn(); resDir != "" {
+		if err := stripQuarantineFn(resDir); err != nil {
+			slog.Debug("StartJarvis: strip quarantine attempt failed (continuing)",
+				"path", resDir, "err", err)
+		} else {
+			slog.Debug("StartJarvis: stripped quarantine xattr from bundle resources",
+				"path", resDir)
+		}
+	}
+
 	pythonPath := bundledPython
 	if pythonPath == "" {
 		if _, err := os.Stat(devPython); err != nil {
@@ -209,6 +229,43 @@ func (a *App) monitorJarvisDaemon(cmd *exec.Cmd) {
 
 	slog.Error("jarvis daemon failed to restart after max attempts", "attempts", maxJarvisRestarts)
 }
+
+// ---------------------------------------------------------------------------
+// Quarantine attribute strip (v0.2.0 TASK-001)
+// ---------------------------------------------------------------------------
+
+// stripQuarantine runs `xattr -dr com.apple.quarantine <path>` to clear the
+// macOS quarantine attribute from `path` and everything underneath it. The
+// caller is expected to pass `paths.BundledResourcesDir()` so all bundled
+// binaries (libportaudio, uv, install-daemon.sh, the Python interpreter) are
+// covered in a single sweep.
+//
+// This is intentionally a thin shell-out rather than a Go reimplementation
+// of removexattr(2): `xattr` is part of macOS' default toolchain, handles
+// recursion natively, and matches what users would run manually if they hit
+// a Gatekeeper error. On non-Darwin or in environments where `xattr` is
+// missing the call returns an error, which the caller swallows + logs at
+// Debug. This function never panics and returns within a few ms even on
+// large trees.
+//
+// Returning the error (rather than swallowing it in here) lets tests assert
+// the strip is attempted at all; the production caller in StartJarvis
+// discards it deliberately.
+func stripQuarantine(path string) error {
+	return exec.Command("xattr", "-dr", "com.apple.quarantine", path).Run()
+}
+
+// stripQuarantineFn is the indirection StartJarvis calls so tests can
+// substitute a counter without invoking the real `xattr` binary. Production
+// code path is unchanged: this points at stripQuarantine by default.
+var stripQuarantineFn = stripQuarantine
+
+// bundledResourcesDirFn is the indirection StartJarvis calls so tests can
+// simulate either "running inside a .app bundle" (non-empty return) or
+// "dev mode" (empty return) without needing to reach into the unexported
+// override variable in internal/paths. Production code path is unchanged:
+// this points at paths.BundledResourcesDir by default.
+var bundledResourcesDirFn = paths.BundledResourcesDir
 
 // ---------------------------------------------------------------------------
 // Daemon script discovery
