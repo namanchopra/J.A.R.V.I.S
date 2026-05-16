@@ -2,10 +2,17 @@
 #
 # Wails post-build hook (darwin).
 #
-# After `wails build` produces build/bin/Jarvis.app, bundle the Python daemon
-# venv and source code into the .app under Contents/Resources/. The venv is
-# created by build/scripts/build-daemon-venv.sh (TASK-009) and the daemon
-# source lives in scripts/jarvis-daemon/.
+# After `wails build` produces build/bin/Jarvis.app, bundle:
+#   - the daemon source code (scripts/jarvis-daemon/) -> Resources/jarvis-daemon/
+#   - the pinned uv binary (build/uv/uv)              -> Resources/setup/uv
+#   - the first-launch setup orchestrator             -> Resources/setup/install-daemon.sh
+#   - libportaudio.2.dylib + install_name rewrite     -> Contents/Frameworks/
+#   - bundled models (build/models/)                  -> Resources/models/
+#
+# As of v0.2.0 (TASK-005) we no longer bundle the full CPython runtime
+# (Resources/python/) or the prebuilt daemon venv (Resources/python-venv/).
+# Both are now materialized on first launch by Resources/setup/install-daemon.sh
+# using the bundled uv binary. This shrinks the DMG by ~140MB.
 #
 # Wired in via wails.json -> postBuildHooks.darwin (TASK-010).
 set -euo pipefail
@@ -56,18 +63,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Copy daemon venv
+# Copy first-launch setup payload (uv + install-daemon.sh) -> Resources/setup/
+#
+# v0.2.0 (TASK-005): instead of bundling CPython + daemon venv (~150MB), we
+# bundle the pinned uv binary and the first-launch installer script. On first
+# launch the Go app spawns install-daemon.sh which uses uv to materialize the
+# Python interpreter + daemon venv into ~/Library/Application Support/Jarvis/.
 # ---------------------------------------------------------------------------
-if [[ -d "${REPO_ROOT}/build/daemon-venv" ]]; then
-    echo "post-build: copying daemon-venv -> Resources/python/"
-    rsync -a --delete \
-        --exclude='__pycache__/' \
-        --exclude='tests/' \
-        --exclude='*.pyc' \
-        --exclude='*.pyo' \
-        "${REPO_ROOT}/build/daemon-venv/" "${RESOURCES}/python/"
+SETUP_DIR="${RESOURCES}/setup"
+mkdir -p "${SETUP_DIR}"
+
+UV_SRC="${REPO_ROOT}/build/uv/uv"
+if [[ -x "${UV_SRC}" ]]; then
+    echo "post-build: copying build/uv/uv -> Resources/setup/uv"
+    cp "${UV_SRC}" "${SETUP_DIR}/uv"
+    chmod +x "${SETUP_DIR}/uv"
 else
-    echo "post-build: WARN: build/daemon-venv/ not found; run build/scripts/build-daemon-venv.sh first" >&2
+    echo "post-build: ERROR: build/uv/uv not found; run build/scripts/fetch-uv.sh first" >&2
+    exit 1
+fi
+
+INSTALL_DAEMON_SRC="${REPO_ROOT}/scripts/setup/install-daemon.sh"
+if [[ -f "${INSTALL_DAEMON_SRC}" ]]; then
+    echo "post-build: copying scripts/setup/install-daemon.sh -> Resources/setup/install-daemon.sh"
+    cp "${INSTALL_DAEMON_SRC}" "${SETUP_DIR}/install-daemon.sh"
+    chmod +x "${SETUP_DIR}/install-daemon.sh"
+else
+    echo "post-build: ERROR: scripts/setup/install-daemon.sh not found" >&2
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
