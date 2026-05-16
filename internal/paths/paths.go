@@ -90,6 +90,60 @@ func RecordingsDir() string {
 	return filepath.Join(JarvisHome(), "recordings")
 }
 
+// ---------------------------------------------------------------------------
+// v0.2.0 setup-on-launch paths
+// ---------------------------------------------------------------------------
+//
+// The helpers below point at the user-installed setup tree that
+// install-daemon.sh (TASK-004) populates on first launch. They are pure
+// string concatenation — none of them touch disk — so they are safe to call
+// before the directories exist (which is the whole point: they tell the
+// installer where to write).
+//
+// SetupSentinelPath takes the expected version as an argument rather than
+// importing setup.SetupExpectedVersion, which would introduce an import
+// cycle (setup may eventually want to use these helpers itself). Callers
+// pass `setup.SetupExpectedVersion`.
+
+// SetupSentinelPath returns the absolute path to the setup-version sentinel
+// file at ~/.jarvis/.setup-version-<version>. The file's existence + valid
+// contents are checked by setup.IsSetupComplete (TASK-008) to decide whether
+// to mount SetupScreen.
+//
+// Callers should pass setup.SetupExpectedVersion as `version`; the parameter
+// exists to avoid an import cycle between internal/paths and internal/setup.
+func SetupSentinelPath(version string) string {
+	return filepath.Join(JarvisHome(), ".setup-version-"+version)
+}
+
+// PythonInstallDir returns the absolute path to the user-installed portable
+// CPython tree: ~/.jarvis/python/. install-daemon.sh writes here in phase 1.
+func PythonInstallDir() string {
+	return filepath.Join(JarvisHome(), "python")
+}
+
+// DaemonVenvDir returns the absolute path to the user-installed daemon
+// virtualenv: ~/.jarvis/jarvis-daemon-env/. install-daemon.sh creates this
+// with `uv venv` in phase 2.
+func DaemonVenvDir() string {
+	return filepath.Join(JarvisHome(), "jarvis-daemon-env")
+}
+
+// DaemonSourceDir returns the absolute path where install-daemon.sh copies the
+// daemon's Python source from the .app bundle's Resources/jarvis-daemon/.
+// Lives at ~/.jarvis/jarvis-daemon/.
+func DaemonSourceDir() string {
+	return filepath.Join(JarvisHome(), "jarvis-daemon")
+}
+
+// SetupLogPath returns the path to the setup orchestrator log:
+// ~/.jarvis/logs/setup.log. install-daemon.sh tees its stderr here; the
+// SetupScreen footer's "View setup log" link opens it via the OpenSetupLog
+// Wails binding (TASK-016).
+func SetupLogPath() string {
+	return filepath.Join(JarvisHome(), "logs", "setup.log")
+}
+
 // resolveBundledResourcesDir walks up from the current executable to detect a
 // macOS .app bundle layout. Inside a bundle, the binary lives at
 // "<X>/Jarvis.app/Contents/MacOS/<binary>"; this helper returns
