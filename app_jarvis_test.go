@@ -122,6 +122,66 @@ func TestOpenDaemonLog_MissingFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// v0.2.0 TASK-016 — OpenSetupLog Wails binding
+// ---------------------------------------------------------------------------
+
+// TestOpenSetupLog_HappyPath mirrors TestOpenDaemonLog_HappyPath for the new
+// setup-log binding. When ~/.jarvis/logs/setup.log exists, OpenSetupLog must
+// return nil. We cannot verify that macOS' `open` actually dispatched to a
+// GUI editor under a headless test runner — `open <regular-file>` is a no-op
+// in that environment and exits 0. The assertion exercises the binding's
+// plumbing end-to-end: paths.SetupLogPath resolution, existence check, and
+// the `open` invocation.
+//
+// HOME redirection mirrors the daemon-log test: paths.JarvisHome consults
+// os.UserHomeDir which reads $HOME on darwin/linux, so pointing $HOME at the
+// test's TempDir makes paths.SetupLogPath resolve underneath it without
+// touching the real ~/.jarvis.
+func TestOpenSetupLog_HappyPath(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	logPath := paths.SetupLogPath()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir setup logs dir: %v", err)
+	}
+	if err := os.WriteFile(logPath, []byte("[install-daemon] setup line\n"), 0o644); err != nil {
+		t.Fatalf("write setup log: %v", err)
+	}
+
+	a := &App{}
+	if err := a.OpenSetupLog(); err != nil {
+		t.Fatalf("OpenSetupLog() = %v; want nil", err)
+	}
+}
+
+// TestOpenSetupLog_MissingFile mirrors TestOpenDaemonLog_MissingFile for the
+// new setup-log binding. When ~/.jarvis/logs/setup.log does not exist (e.g.
+// the user clicked "View setup log" before install-daemon.sh ever ran, or
+// the log was cleaned up out-of-band) OpenSetupLog must return a wrapped
+// error whose message contains "OpenSetupLog:" per the repo-wide error-
+// wrapping convention.
+//
+// React-side handling: SetupScreen guards the call with
+// `typeof window.go.main.App.OpenSetupLog === 'function'` (TASK-011) and
+// swallows the rejected promise — but the wrapped-error contract must still
+// hold so future callers can errors.Is / string-match against it.
+func TestOpenSetupLog_MissingFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	// Intentionally do NOT create the log file.
+
+	a := &App{}
+	err := a.OpenSetupLog()
+	if err == nil {
+		t.Fatalf("OpenSetupLog() with missing log = nil; want error")
+	}
+	if !strings.Contains(err.Error(), "OpenSetupLog:") {
+		t.Errorf("error message = %q; expected to contain %q", err.Error(), "OpenSetupLog:")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // v0.1.2 — RestartJarvis + DaemonRestartNeeded + SaveConfig restart flag
 // ---------------------------------------------------------------------------
 

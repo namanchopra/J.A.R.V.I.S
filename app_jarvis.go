@@ -436,6 +436,30 @@ func (a *App) OpenDaemonLog() error {
 	return nil
 }
 
+// OpenSetupLog opens the install-daemon.sh setup log file
+// (~/.jarvis/logs/setup.log) in the user's default text-editor via macOS'
+// Launch Services (`open` command). Used by the SetupScreen's "View setup
+// log" link when the user wants to see what install-daemon.sh is doing
+// during the first-run setup flow (v0.2.0 TASK-016).
+//
+// Mirrors OpenDaemonLog exactly: same existence check, same error-wrapping
+// convention, same slog observation. The path comes from paths.SetupLogPath
+// rather than paths.DataPath("logs", "daemon.log") — that is the only
+// production difference. Returns a wrapped error if the log file does not
+// exist (e.g. setup has never been launched on this machine) or if the
+// `open` command fails.
+func (a *App) OpenSetupLog() error {
+	path := paths.SetupLogPath()
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("OpenSetupLog: log file not found at %s: %w", path, err)
+	}
+	if err := exec.Command("open", path).Run(); err != nil {
+		return fmt.Errorf("OpenSetupLog: %w", err)
+	}
+	slog.Info("opened setup log", "path", path)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Tool dispatcher — routes daemon tool_call messages to App methods
 // ---------------------------------------------------------------------------
