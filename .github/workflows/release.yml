@@ -5,9 +5,15 @@
 #   - Jarvis-<version>.dmg             (drag-to-Applications installer, notarized)
 #   - GitHub Release with the DMG attached and CHANGELOG.md as release notes
 #
-# Heavy steps (python-build-standalone fetch, daemon venv build, HF model
-# download, Wails build, codesign, DMG creation) all run on a single macos-14
-# (Apple Silicon, arm64) runner so the produced binaries are native.
+# Heavy steps (uv fetch, HF voice-preset download, Wails build, codesign,
+# DMG creation) all run on a single macos-14 (Apple Silicon, arm64) runner so
+# the produced binaries are native.
+#
+# v0.2.0 (TASK-013): the daemon venv is no longer built in CI. Instead we
+# bundle the `uv` binary inside Jarvis.app via post-build.sh; the v0.2.0
+# setup orchestrator (`scripts/setup/install-daemon.sh`) materializes the
+# Python interpreter + venv into ~/Library/Application Support/Jarvis/ on
+# first launch. This trims ~140MB off the DMG and ~7min off cold CI.
 #
 # Secrets required (configure under Settings → Secrets and variables → Actions):
 #   APPLE_CERTIFICATE          - Base64-encoded .p12 Developer ID Application certificate
@@ -17,8 +23,7 @@
 #   APPLE_PASSWORD             - App-specific password for notarytool
 #   TEAM_ID                    - Apple Developer Team ID
 #   KEYCHAIN_PASSWORD          - Arbitrary password for the temporary CI keychain
-#   GH_PAT                     - GitHub PAT with repo scope for creating releases
-#   HF_TOKEN                   - Hugging Face read-scope token for model downloads
+#   HF_TOKEN                   - Hugging Face read-scope token for voice-preset download
 
 name: Release
 
@@ -41,10 +46,14 @@ jobs:
   build-dmg:
     name: Build and publish Jarvis DMG
     runs-on: macos-14  # Apple Silicon runner (arm64)
-    # 75 min covers a cold-cache run: ~10 min python-build-standalone +
-    # daemon venv, ~15 min HF model pulls (~2.5 GiB), ~10 min Wails build,
-    # ~5 min codesign + DMG, plus headroom for runner cold starts.
-    timeout-minutes: 75
+    # 45 min covers a cold-cache run after the v0.2.0 strip (TASK-013):
+    # ~30s uv fetch (~20MB tarball), ~3 min HF voice-preset pull, ~10 min
+    # Wails build, ~5 min codesign + DMG, ~30 min notarization wait, plus
+    # headroom for runner cold starts. Was 75 min before TASK-013 because
+    # python-build-standalone + daemon-venv build added ~7 min and the full
+    # ~2.5 GiB model pull added ~15 min — both now deferred to first-launch
+    # setup on the user's machine.
+    timeout-minutes: 45
 
     # `secrets.X` can't be referenced in step-level `if:` directly (GHA
     # security restriction), so we materialise the flag once at job level
@@ -81,28 +90,21 @@ jobs:
       # ------------------------------------------------------------------
       # Caches
       # ------------------------------------------------------------------
-      # python-build-standalone tarball is ~30 MiB but pinned by tag inside
-      # fetch-python.sh, so the script's content is a perfect cache key.
-      - name: Cache python-build-standalone tarball
+      # uv binary tarball is ~20 MiB but pinned by tag inside fetch-uv.sh,
+      # so the script's content is a perfect cache key. We cache the whole
+      # build/uv tree (extracted binary + .fetch-cache subdir with tarball
+      # and sha sidecar) so re-runs at the same uv tag are a no-op via
+      # fetch-uv.sh's idempotency stamp.
+      - name: Cache uv binary
         uses: actions/cache@v4
         with:
-          path: build/python/.fetch-cache
-          key: pbs-${{ runner.os }}-${{ hashFiles('build/scripts/fetch-python.sh') }}
+          path: build/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('build/scripts/fetch-uv.sh') }}
 
-      # uv/pip caches keyed on the daemon requirements file so a dependency
-      # bump invalidates the cache automatically.
-      - name: Cache Python tool caches (uv + pip)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-          key: pytools-${{ runner.os }}-${{ hashFiles('scripts/jarvis-daemon/requirements.txt') }}
-          restore-keys: |
-            pytools-${{ runner.os }}-
-
-      # Hugging Face models are ~2.5 GiB total. Keyed on the fetch script
-      # content so model/version bumps in that script bust the cache.
+      # Hugging Face voice preset is ~4 MiB on disk (LIGHT_BUNDLE=1 skips
+      # the ~2.4 GiB model weights, which the daemon fetches on first launch).
+      # Keyed on the fetch script content so preset/version bumps in that
+      # script bust the cache.
       - name: Cache bundled AI models
         uses: actions/cache@v4
         with:
@@ -112,19 +114,22 @@ jobs:
       # ------------------------------------------------------------------
       # Build pipeline
       # ------------------------------------------------------------------
-      - name: Fetch python-build-standalone (TASK-008)
-        timeout-minutes: 10
-        run: bash build/scripts/fetch-python.sh
-
       # pyaudio publishes no cp313 arm64 wheel on macOS, so pip falls back to
-      # compiling from source — which needs portaudio's headers. Pre-install
-      # the C library so `pip install pyaudio` finds <portaudio.h>.
+      # compiling from source on the user's machine during first-launch setup
+      # — which needs portaudio's headers + dylib. We still install portaudio
+      # here at build time because post-build.sh (TASK-005) bundles
+      # libportaudio.dylib into Jarvis.app/Contents/Resources/ so the
+      # bundled environment can build pyaudio without a host Homebrew install.
       - name: Install portaudio (pyaudio build dep)
         run: brew install portaudio
 
-      - name: Build relocatable daemon venv (TASK-009)
-        timeout-minutes: 20
-        run: bash build/scripts/build-daemon-venv.sh
+      # Fetches the pinned uv release (~20MB) to build/uv/uv. post-build.sh
+      # then copies that binary + scripts/setup/install-daemon.sh into
+      # Jarvis.app/Contents/Resources/ so the orchestrator can materialize
+      # the daemon venv on first launch (TASK-005).
+      - name: Fetch uv binary
+        timeout-minutes: 5
+        run: bash build/scripts/fetch-uv.sh
 
       # fetch-models.sh shells out to `huggingface-cli`. macos-14 runners
       # ship a PEP 668 "externally managed" system Python, so we can't use
@@ -153,10 +158,12 @@ jobs:
 
       # Wails v2's wails.json `postBuildHooks` field is silently ignored
       # (it's not part of the v2 schema, despite the docs implying so).
-      # Invoke post-build.sh explicitly so the daemon venv + bundled models
-      # actually end up inside Jarvis.app/Contents/Resources/ -- without this
-      # the DMG ships as a ~10MB empty shell with no Python runtime.
-      - name: Bundle daemon venv + models into Jarvis.app
+      # Invoke post-build.sh explicitly so the uv binary, setup orchestrator
+      # (install-daemon.sh), libportaudio.dylib, and bundled voice preset end
+      # up inside Jarvis.app/Contents/Resources/ -- without this the DMG
+      # ships as a ~10MB empty shell with no first-launch setup payload.
+      # (TASK-005 rewired this step from python+venv bundling to uv+setup.)
+      - name: Bundle setup payload (uv + install-daemon.sh + voice preset) into Jarvis.app
         timeout-minutes: 10
         run: bash build/scripts/post-build.sh
 
