@@ -1,14 +1,79 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/namanchopra/jarvis/internal/config"
 	"github.com/namanchopra/jarvis/internal/paths"
+	"github.com/namanchopra/jarvis/internal/setup"
 )
+
+// ---------------------------------------------------------------------------
+// Test helpers (v0.2.0 TASK-009 setup-gating)
+// ---------------------------------------------------------------------------
+
+// writeValidSentinel materialises a fixture requirements.txt under
+// fakeResources and writes a sentinel pinned to its SHA-256. Used by tests
+// that need to bypass the setup-gate to exercise the post-gate logic in
+// StartJarvis.
+//
+// fakeResources mirrors the .app's Contents/Resources layout — pass the same
+// directory that bundledResourcesDirFn returns for the test. HOME must
+// already be redirected (t.Setenv("HOME", tmp)) before calling this so the
+// sentinel lands under the test's temp directory.
+//
+// Returns the on-disk path of the requirements fixture in case the test
+// wants to mutate it (e.g. to simulate a sha drift).
+func writeValidSentinel(t *testing.T, fakeResources string) string {
+	t.Helper()
+	reqDir := filepath.Join(fakeResources, "jarvis-daemon")
+	if err := os.MkdirAll(reqDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake jarvis-daemon: %v", err)
+	}
+	reqPath := filepath.Join(reqDir, "requirements.txt")
+	if err := os.WriteFile(reqPath, []byte("pipecat-ai==0.1.0\nwhisper==1.0.0\n"), 0o644); err != nil {
+		t.Fatalf("write requirements fixture: %v", err)
+	}
+	sum, err := fileSHA256(reqPath)
+	if err != nil {
+		t.Fatalf("hash requirements fixture: %v", err)
+	}
+	if err := setup.WriteSentinel(setup.SentinelData{
+		Version:            setup.SetupExpectedVersion,
+		Timestamp:          time.Now().UTC(),
+		RequirementsSHA256: sum,
+		PythonPBSTag:       "test-tag",
+	}); err != nil {
+		t.Fatalf("WriteSentinel: %v", err)
+	}
+	return reqPath
+}
+
+// fileSHA256 computes the lowercase hex SHA-256 of the file at path. Mirrors
+// setup.hashFile (unexported in internal/setup) so tests in this package can
+// produce a sentinel whose RequirementsSHA256 matches what ReadSentinel will
+// compute on the same fixture.
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
 
 // TestOpenDaemonLog_HappyPath asserts that when ~/.jarvis/logs/daemon.log
 // exists, OpenDaemonLog returns nil. We can't actually verify that the
@@ -410,9 +475,12 @@ func TestRestartJarvisErrorWraps(t *testing.T) {
 // (bundledResourcesDirFn, stripQuarantineFn) so it does NOT require a real
 // .app layout on disk or a real `xattr` binary.
 //
-// StartJarvis is expected to return a non-nil error here because no bundled
-// Python interpreter exists in the test environment; the assertion is on
-// the side-effect (strip count + path), not the return value.
+// TASK-009 update: since the setup-gate now precedes the strip block, the
+// test writes a valid sentinel under HOME before invoking StartJarvis so
+// the strip code actually runs. StartJarvis is expected to return a
+// non-nil error here because no bundled Python interpreter exists in the
+// test environment; the assertion is on the side-effect (strip count +
+// path), not the return value.
 func TestStartJarvis_StripsQuarantineWhenBundled(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -422,6 +490,12 @@ func TestStartJarvis_StripsQuarantineWhenBundled(t *testing.T) {
 	prevDirFn := bundledResourcesDirFn
 	bundledResourcesDirFn = func() string { return fakeResources }
 	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	// TASK-009: pass the setup-gate by writing a valid sentinel + fixture
+	// requirements.txt under the fake bundle. Without this the new gate
+	// in StartJarvis would early-return setup.ErrSetupRequired before
+	// reaching the strip block.
+	writeValidSentinel(t, fakeResources)
 
 	// Substitute the strip itself with a counter so the real `xattr` binary
 	// is never invoked. Recording the path argument lets us assert the
@@ -489,11 +563,13 @@ func TestStartJarvis_SkipsStripInDevMode(t *testing.T) {
 // outcome of StartJarvis is unchanged. The strip's failure must never be
 // the reason a user sees a launch error.
 //
-// In this test env StartJarvis still fails because no Python interpreter
-// exists; the assertion is that the error is the Python error, not anything
-// related to the strip. We assert on the error message containing
-// "could not find Python interpreter" — the exact string emitted by the
-// python-lookup branch immediately following the strip block.
+// TASK-009 update: in the gated world, StartJarvis still fails after the
+// strip because no Python interpreter is installed; the failure mode
+// changed from "could not find Python interpreter" to
+// setup.ErrDaemonLaunchFailed. The assertion now checks the typed error
+// reaches the caller via errors.Is — which is both the new contract AND
+// stronger evidence that the strip's permission error did NOT short-
+// circuit StartJarvis with its own different error.
 func TestStartJarvis_StripFailureDoesNotBlockLaunch(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -502,6 +578,9 @@ func TestStartJarvis_StripFailureDoesNotBlockLaunch(t *testing.T) {
 	prevDirFn := bundledResourcesDirFn
 	bundledResourcesDirFn = func() string { return fakeResources }
 	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	// Pass the setup-gate (TASK-009) so we reach the strip block.
+	writeValidSentinel(t, fakeResources)
 
 	prevStripFn := stripQuarantineFn
 	stripQuarantineFn = func(p string) error {
@@ -512,13 +591,336 @@ func TestStartJarvis_StripFailureDoesNotBlockLaunch(t *testing.T) {
 	a := &App{}
 	err := a.StartJarvis()
 	if err == nil {
-		t.Fatalf("StartJarvis() with strip failure = nil; want python-interpreter error")
+		t.Fatalf("StartJarvis() with strip failure = nil; want daemon-launch-failed error")
 	}
-	if !strings.Contains(err.Error(), "could not find Python interpreter") {
-		t.Errorf("StartJarvis() error = %q; want python-interpreter error (strip failure must not surface)", err.Error())
+	// Strip failure must NOT surface — the error must be the typed
+	// ErrDaemonLaunchFailed from the python-lookup branch downstream.
+	if !errors.Is(err, setup.ErrDaemonLaunchFailed) {
+		t.Errorf("StartJarvis() error = %q; want errors.Is(err, ErrDaemonLaunchFailed) (strip failure must not surface)", err.Error())
 	}
-	// And the wrapping must still use the StartJarvis: prefix.
+	// The wrapping must still use the StartJarvis: prefix.
 	if !strings.Contains(err.Error(), "StartJarvis:") {
 		t.Errorf("StartJarvis() error = %q; want %q prefix", err.Error(), "StartJarvis:")
 	}
+	// And critically the error must NOT be ErrSetupRequired — that would
+	// indicate the sentinel-write helper failed to bypass the gate, which
+	// would make the strip assertion above vacuously true.
+	if errors.Is(err, setup.ErrSetupRequired) {
+		t.Errorf("StartJarvis() unexpectedly returned ErrSetupRequired = %q; sentinel fixture is broken", err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// v0.2.0 TASK-009 — StartJarvis setup gating
+// ---------------------------------------------------------------------------
+//
+// These tests verify the new contract added to StartJarvis: it must return
+// setup.ErrSetupRequired (typed, errors.Is-checkable) when the sentinel is
+// missing/invalid, and setup.ErrDaemonLaunchFailed (typed, errors.Is-
+// checkable) when sentinel is valid but the daemon binary can't be exec'd.
+// App.tsx (TASK-012) consumes these as the discriminator for SetupScreen
+// vs. amber "view daemon log" banner.
+
+// TestStartJarvis_ReturnsErrSetupRequired_WhenSentinelMissing verifies the
+// "first launch on a fresh machine" path: no sentinel exists under
+// ~/.jarvis/, StartJarvis must short-circuit with setup.ErrSetupRequired so
+// App.tsx can mount the SetupScreen.
+//
+// Dev-mode (bundledResourcesDirFn returns "") is the relevant scenario here:
+// in a real fresh install the .app's Resources tree exists but the user's
+// ~/.jarvis/.setup-version-0.2.0 sentinel does not, so the bundledRequirements
+// hash check happens against the bundle's requirements.txt. We simulate that
+// without a real bundle by pointing bundledResourcesDirFn at a temp dir that
+// HAS a requirements.txt but no sentinel.
+func TestStartJarvis_ReturnsErrSetupRequired_WhenSentinelMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Wire up a fake bundle so bundledRequirementsPath() points at a real
+	// file the hash check can read. This is the production scenario: the
+	// .app is installed but the user has never run setup.
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	reqDir := filepath.Join(fakeResources, "jarvis-daemon")
+	if err := os.MkdirAll(reqDir, 0o755); err != nil {
+		t.Fatalf("mkdir bundled requirements dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(reqDir, "requirements.txt"), []byte("pipecat-ai==0.1.0\n"), 0o644); err != nil {
+		t.Fatalf("write bundled requirements.txt: %v", err)
+	}
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	// Strip stub so the test doesn't shell out to xattr. The gate runs
+	// BEFORE the strip, so this is a defensive substitution against a
+	// future refactor that flips the order.
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error { return nil }
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	// Sanity: assert the sentinel really is absent before the call.
+	sentinel := paths.SetupSentinelPath(setup.SetupExpectedVersion)
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("test bug: sentinel %q exists in fresh tmp home: %v", sentinel, err)
+	}
+
+	a := &App{}
+	err := a.StartJarvis()
+	if err == nil {
+		t.Fatalf("StartJarvis() with no sentinel = nil; want ErrSetupRequired")
+	}
+	if !errors.Is(err, setup.ErrSetupRequired) {
+		t.Errorf("StartJarvis() error = %v; want errors.Is(err, ErrSetupRequired)", err)
+	}
+	// And critically: the error must NOT be ErrDaemonLaunchFailed. If both
+	// fired the React side wouldn't know whether to mount SetupScreen or
+	// HUD-with-banner. The two error types must be mutually exclusive.
+	if errors.Is(err, setup.ErrDaemonLaunchFailed) {
+		t.Errorf("StartJarvis() error = %v; unexpectedly also matches ErrDaemonLaunchFailed", err)
+	}
+}
+
+// TestStartJarvis_ReturnsErrDaemonLaunchFailed_WhenPythonMissing verifies the
+// "user completed setup but the install got corrupted" path: sentinel is
+// valid (passes IsSetupComplete) but no python binary exists at any of the
+// three lookup locations (installed, bundled, dev). StartJarvis must surface
+// setup.ErrDaemonLaunchFailed so App.tsx renders the amber banner instead
+// of the SetupScreen.
+func TestStartJarvis_ReturnsErrDaemonLaunchFailed_WhenPythonMissing(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	// Strip stub to keep tests hermetic.
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error { return nil }
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	// Pass the setup-gate by writing a valid sentinel.
+	writeValidSentinel(t, fakeResources)
+
+	// Intentionally do NOT create any python binary at:
+	//   - ~/.jarvis/python/bin/python3         (installed)
+	//   - <fakeResources>/python/bin/python3   (bundled)
+	//   - ~/.jarvis/jarvis-daemon-env/bin/python3  (dev)
+	// So all three pythonPath candidates resolve to "" and the
+	// downstream branch returns ErrDaemonLaunchFailed.
+
+	a := &App{}
+	err := a.StartJarvis()
+	if err == nil {
+		t.Fatalf("StartJarvis() with valid sentinel + no python = nil; want ErrDaemonLaunchFailed")
+	}
+	if !errors.Is(err, setup.ErrDaemonLaunchFailed) {
+		t.Errorf("StartJarvis() error = %v; want errors.Is(err, ErrDaemonLaunchFailed)", err)
+	}
+	// Mutually exclusive contract — must NOT also be ErrSetupRequired.
+	if errors.Is(err, setup.ErrSetupRequired) {
+		t.Errorf("StartJarvis() error = %v; unexpectedly also matches ErrSetupRequired", err)
+	}
+	if !strings.Contains(err.Error(), "StartJarvis:") {
+		t.Errorf("StartJarvis() error = %q; want %q prefix", err.Error(), "StartJarvis:")
+	}
+}
+
+// TestStartJarvis_PrefersInstalledPython_OverBundle verifies the path-
+// resolution order: when BOTH a user-installed python (at
+// ~/.jarvis/python/bin/python3) AND a bundled python (at
+// <Resources>/python/bin/python3) exist, the installed one wins.
+//
+// This is the v0.2.0 hand-off: legacy builds shipped the full python tree
+// inside the .app, but v0.2.0 + install-daemon.sh moves it to ~/.jarvis/.
+// Until the legacy bundle path is removed entirely, an old .app on a new
+// user's machine could expose both — the contract is that we always prefer
+// the user-installed one because it's the one keyed to the sentinel's
+// requirements.txt sha.
+//
+// We assert by inspecting cmd.Path captured via startJarvisCommandFn — the
+// real exec.Cmd never runs because the captured cmd is constructed with a
+// failing-exec stub (cmd.Path points at a regular file with the exec bit
+// set, but invocation is short-circuited by stubbing Start via a synthetic
+// failing command... actually simpler: we just capture cmd.Path and ignore
+// the eventual Start failure).
+func TestStartJarvis_PrefersInstalledPython_OverBundle(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	// Strip stub.
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error { return nil }
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	// Sentinel + bundle requirements (writeValidSentinel materialises both).
+	writeValidSentinel(t, fakeResources)
+
+	// Create a fake python at the INSTALLED path (~/.jarvis/python/bin/python3).
+	installedPy := filepath.Join(paths.PythonInstallDir(), "bin", "python3")
+	if err := os.MkdirAll(filepath.Dir(installedPy), 0o755); err != nil {
+		t.Fatalf("mkdir installed python dir: %v", err)
+	}
+	if err := os.WriteFile(installedPy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write installed python: %v", err)
+	}
+
+	// Also create a fake python at the BUNDLED path
+	// (<fakeResources>/python/bin/python3).
+	bundledPy := filepath.Join(fakeResources, "python", "bin", "python3")
+	if err := os.MkdirAll(filepath.Dir(bundledPy), 0o755); err != nil {
+		t.Fatalf("mkdir bundled python dir: %v", err)
+	}
+	if err := os.WriteFile(bundledPy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write bundled python: %v", err)
+	}
+
+	// And a fake daemon script at the installed location so we don't
+	// fail on script discovery before the cmd is constructed.
+	installedScript := filepath.Join(paths.DaemonSourceDir(), "main.py")
+	if err := os.MkdirAll(filepath.Dir(installedScript), 0o755); err != nil {
+		t.Fatalf("mkdir installed daemon dir: %v", err)
+	}
+	if err := os.WriteFile(installedScript, []byte("# main\n"), 0o644); err != nil {
+		t.Fatalf("write installed main.py: %v", err)
+	}
+
+	// Stub the exec.Cmd factory so we capture cmd.Path without actually
+	// exec'ing python. Construct the cmd pointing at /bin/false (which
+	// exists everywhere and exits 1 immediately) so .Start() succeeds and
+	// cmd.Wait() returns a non-zero exit — that's fine because monitorJarvisDaemon
+	// runs in a goroutine and doesn't affect the StartJarvis return value.
+	//
+	// We capture cmd.Path BEFORE overwriting it so the assertion below
+	// sees what StartJarvis would have invoked.
+	var capturedPath string
+	prevCmdFn := startJarvisCommandFn
+	startJarvisCommandFn = func(name string, arg ...string) *exec.Cmd {
+		capturedPath = name
+		// Return a cmd that exits immediately so Start() succeeds + Wait()
+		// returns fast. /bin/true is universally available on macOS + Linux.
+		c := exec.Command("/bin/true")
+		return c
+	}
+	t.Cleanup(func() { startJarvisCommandFn = prevCmdFn })
+
+	a := &App{}
+	// Don't care about the return — we're asserting on capturedPath.
+	_ = a.StartJarvis()
+	// Wait for the spawned /bin/true to be reaped by the monitor goroutine
+	// before t.Cleanup tears down the temp HOME (otherwise the goroutine
+	// can still be writing to ~/.jarvis/logs/daemon.log when the dir
+	// disappears). 100ms is plenty for /bin/true.
+	time.Sleep(100 * time.Millisecond)
+
+	if capturedPath == "" {
+		t.Fatalf("startJarvisCommandFn was never invoked; StartJarvis returned early")
+	}
+	if capturedPath != installedPy {
+		t.Errorf("StartJarvis preferred wrong python: got %q; want installed %q (bundled was %q)",
+			capturedPath, installedPy, bundledPy)
+	}
+}
+
+// TestPaths_InstalledPython_RespectsHomeOverride verifies the new
+// paths.InstalledPython helper added in TASK-009. The helper is a thin
+// "exists + is-file" check on ~/.jarvis/python/bin/python3.
+//
+// Cases covered:
+//   - happy: python3 file exists → helper returns the path
+//   - missing: nothing at the path → helper returns ""
+//   - directory: a dir at the path → helper returns ""
+func TestPaths_InstalledPython_RespectsHomeOverride(t *testing.T) {
+	t.Run("happy path returns absolute path when file exists", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+
+		py := filepath.Join(paths.PythonInstallDir(), "bin", "python3")
+		if err := os.MkdirAll(filepath.Dir(py), 0o755); err != nil {
+			t.Fatalf("mkdir python dir: %v", err)
+		}
+		if err := os.WriteFile(py, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("write python: %v", err)
+		}
+
+		got := paths.InstalledPython()
+		if got != py {
+			t.Errorf("InstalledPython() = %q; want %q", got, py)
+		}
+	})
+
+	t.Run("missing dir returns empty string", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		// Don't create ~/.jarvis/python/bin at all.
+		if got := paths.InstalledPython(); got != "" {
+			t.Errorf("InstalledPython() with missing dir = %q; want \"\"", got)
+		}
+	})
+
+	t.Run("directory at python3 path returns empty string", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+
+		// Create a DIRECTORY where the helper expects a regular file.
+		// Some corrupt installs land here.
+		py := filepath.Join(paths.PythonInstallDir(), "bin", "python3")
+		if err := os.MkdirAll(py, 0o755); err != nil {
+			t.Fatalf("mkdir python3 (as dir): %v", err)
+		}
+		if got := paths.InstalledPython(); got != "" {
+			t.Errorf("InstalledPython() with dir at python3 = %q; want \"\"", got)
+		}
+	})
+}
+
+// TestPaths_InstalledDaemonScript_RespectsHomeOverride mirrors the python
+// helper's coverage for the daemon-script helper. install-daemon.sh rsyncs
+// the daemon source to ~/.jarvis/jarvis-daemon/; main.py is the entry point.
+func TestPaths_InstalledDaemonScript_RespectsHomeOverride(t *testing.T) {
+	t.Run("happy path returns absolute path when main.py exists", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+
+		main := filepath.Join(paths.DaemonSourceDir(), "main.py")
+		if err := os.MkdirAll(filepath.Dir(main), 0o755); err != nil {
+			t.Fatalf("mkdir daemon dir: %v", err)
+		}
+		if err := os.WriteFile(main, []byte("# main\n"), 0o644); err != nil {
+			t.Fatalf("write main.py: %v", err)
+		}
+
+		got := paths.InstalledDaemonScript()
+		if got != main {
+			t.Errorf("InstalledDaemonScript() = %q; want %q", got, main)
+		}
+	})
+
+	t.Run("missing dir returns empty string", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		// Don't create the dir at all.
+		if got := paths.InstalledDaemonScript(); got != "" {
+			t.Errorf("InstalledDaemonScript() with missing dir = %q; want \"\"", got)
+		}
+	})
+
+	t.Run("directory at main.py path returns empty string", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+
+		main := filepath.Join(paths.DaemonSourceDir(), "main.py")
+		if err := os.MkdirAll(main, 0o755); err != nil {
+			t.Fatalf("mkdir main.py (as dir): %v", err)
+		}
+		if got := paths.InstalledDaemonScript(); got != "" {
+			t.Errorf("InstalledDaemonScript() with dir at main.py = %q; want \"\"", got)
+		}
+	})
 }
