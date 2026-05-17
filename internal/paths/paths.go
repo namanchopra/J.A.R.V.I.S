@@ -144,6 +144,43 @@ func SetupLogPath() string {
 	return filepath.Join(JarvisHome(), "logs", "setup.log")
 }
 
+// InstalledPython returns ~/.jarvis/python/bin/python3 if it exists and is a
+// regular file (not a directory), else "". The v0.2.0 setup script
+// (install-daemon.sh, TASK-004) extracts a portable CPython tree under
+// PythonInstallDir(); this helper is the read-side check used by StartJarvis
+// (TASK-009) to prefer the user-installed interpreter over the legacy bundled
+// one.
+//
+// We do NOT verify the execute bit here — install-daemon.sh writes the
+// interpreter with 0o755 and shells out to it during phase 2 to materialise
+// the venv, so by the time StartJarvis consults this helper, exec-ability has
+// already been smoke-tested by the installer itself. Returning the path on a
+// non-executable file would let StartJarvis surface the real exec error via
+// ErrDaemonLaunchFailed, which is exactly the diagnostic we want.
+func InstalledPython() string {
+	p := filepath.Join(PythonInstallDir(), "bin", "python3")
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return p
+}
+
+// InstalledDaemonScript returns ~/.jarvis/jarvis-daemon/main.py if it exists,
+// else "". The v0.2.0 setup script (install-daemon.sh, TASK-004) rsyncs the
+// daemon Python source from the .app bundle into DaemonSourceDir() so the
+// running app can edit / rotate the daemon source without re-signing the
+// bundle. StartJarvis (TASK-009) prefers this path over the legacy bundled
+// daemon script.
+func InstalledDaemonScript() string {
+	p := filepath.Join(DaemonSourceDir(), "main.py")
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return p
+}
+
 // resolveBundledResourcesDir walks up from the current executable to detect a
 // macOS .app bundle layout. Inside a bundle, the binary lives at
 // "<X>/Jarvis.app/Contents/MacOS/<binary>"; this helper returns
