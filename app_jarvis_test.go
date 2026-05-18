@@ -984,3 +984,213 @@ func TestPaths_InstalledDaemonScript_RespectsHomeOverride(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// TASK-015 — cross-layer integration tests
+// ---------------------------------------------------------------------------
+//
+// These exercise StartJarvis end-to-end across (app_jarvis.go gate logic) +
+// (internal/setup sentinel persistence) + (internal/paths binary discovery).
+// They use the t.TempDir / homeOverride pattern + the three production seams
+// (bundledResourcesDirFn, stripQuarantineFn, startJarvisCommandFn) so no real
+// .app bundle, xattr binary, or python interpreter is required.
+
+// TestIntegration_FullSetupHappyPath drives StartJarvis through the complete
+// happy path: a real sentinel written by setup.WriteSentinel that satisfies
+// setup.IsSetupComplete, with both an installed python (~/.jarvis/python/
+// bin/python3) AND a bundled python (<Resources>/python/bin/python3)
+// available. The contract verifies:
+//
+//  1. setup.IsSetupComplete returns true against the real sentinel.
+//  2. StartJarvis picks the InstalledPython() path (not bundled).
+//  3. StartJarvis returns nil — no ErrSetupRequired, no ErrDaemonLaunchFailed.
+//
+// Distinct from TestStartJarvis_PrefersInstalledPython_OverBundle (TASK-009),
+// which only asserts the path preference. This test also pins the round-trip
+// from setup.WriteSentinel → setup.IsSetupComplete → StartJarvis-returns-nil,
+// catching regressions where the sentinel format silently drifts away from
+// what IsSetupComplete accepts.
+//
+// Two packages exercised: main (StartJarvis) + internal/setup (sentinel) +
+// internal/paths (InstalledPython, BundledPython, DaemonSourceDir).
+func TestIntegration_FullSetupHappyPath(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Fake bundle layout. bundledResourcesDirFn returns this so the gate's
+	// bundledRequirementsPath() resolves under tmp.
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	// Strip stub so StartJarvis's quarantine-strip block doesn't shell out
+	// to /usr/bin/xattr in the test env.
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error { return nil }
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	// writeValidSentinel materialises the bundled requirements.txt AND a
+	// sentinel whose RequirementsSHA256 matches it — i.e. the exact state
+	// the installer leaves on disk at the end of a successful run.
+	reqPath := writeValidSentinel(t, fakeResources)
+
+	// Sanity: the same setup.IsSetupComplete that StartJarvis's gate calls
+	// must accept the sentinel before we attempt StartJarvis.
+	if !setup.IsSetupComplete(reqPath) {
+		t.Fatalf("test bug: setup.IsSetupComplete(%q) = false right after writeValidSentinel", reqPath)
+	}
+
+	// Materialise BOTH python candidates. The installed one must win.
+	installedPy := filepath.Join(paths.PythonInstallDir(), "bin", "python3")
+	if err := os.MkdirAll(filepath.Dir(installedPy), 0o755); err != nil {
+		t.Fatalf("mkdir installed python: %v", err)
+	}
+	if err := os.WriteFile(installedPy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write installed python: %v", err)
+	}
+	bundledPy := filepath.Join(fakeResources, "python", "bin", "python3")
+	if err := os.MkdirAll(filepath.Dir(bundledPy), 0o755); err != nil {
+		t.Fatalf("mkdir bundled python: %v", err)
+	}
+	if err := os.WriteFile(bundledPy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write bundled python: %v", err)
+	}
+
+	// Daemon entry script at the installed location so StartJarvis finds
+	// it without falling back to the source-tree.
+	installedScript := filepath.Join(paths.DaemonSourceDir(), "main.py")
+	if err := os.MkdirAll(filepath.Dir(installedScript), 0o755); err != nil {
+		t.Fatalf("mkdir installed daemon dir: %v", err)
+	}
+	if err := os.WriteFile(installedScript, []byte("# main\n"), 0o644); err != nil {
+		t.Fatalf("write installed main.py: %v", err)
+	}
+
+	// Capture cmd.Path via startJarvisCommandFn. The returned exec.Cmd
+	// runs /usr/bin/true so cmd.Start() succeeds + cmd.Wait() returns fast;
+	// the daemon monitor goroutine then exits without restarting (the
+	// fuse stays at 0 in a clean test env). NOTE: /bin/true does not exist
+	// on macOS — the binary lives at /usr/bin/true. The contrast with the
+	// existing TestStartJarvis_PrefersInstalledPython_OverBundle (which
+	// uses /bin/true but ignores StartJarvis's return) is intentional:
+	// this test asserts err == nil and therefore needs a real binary.
+	var capturedPath string
+	prevCmdFn := startJarvisCommandFn
+	startJarvisCommandFn = func(name string, arg ...string) *exec.Cmd {
+		capturedPath = name
+		return exec.Command("/usr/bin/true")
+	}
+	t.Cleanup(func() { startJarvisCommandFn = prevCmdFn })
+
+	a := &App{}
+	if err := a.StartJarvis(); err != nil {
+		// In the happy path StartJarvis must return nil — both the
+		// setup-gate and the python-lookup branches should be satisfied.
+		t.Fatalf("StartJarvis() = %v; want nil", err)
+	}
+	// Let the monitor goroutine reap /bin/true before t.Cleanup tears
+	// down the temp HOME (otherwise the goroutine writes to
+	// ~/.jarvis/logs/daemon.log against a missing dir).
+	time.Sleep(100 * time.Millisecond)
+
+	if capturedPath == "" {
+		t.Fatalf("startJarvisCommandFn was never invoked; StartJarvis returned early")
+	}
+	if capturedPath != installedPy {
+		t.Errorf("StartJarvis picked %q; want installed %q (bundled was %q)",
+			capturedPath, installedPy, bundledPy)
+	}
+}
+
+// TestIntegration_StartJarvisAfterSuccessfulSetup verifies the cross-layer
+// continuity: a sentinel written via the REAL setup.WriteSentinel (TASK-008)
+// must satisfy StartJarvis's setup-gate (TASK-009) on the next launch. This
+// is the "you completed setup, now relaunch the app" scenario.
+//
+// Distinct from TestIntegration_FullSetupHappyPath above by what it asserts:
+// that test verifies the full launch flow + python preference; THIS test
+// narrows in on the gate behaviour — given a freshly-written sentinel,
+// StartJarvis must NOT short-circuit with ErrSetupRequired even when no
+// python interpreter exists (the failure mode becomes ErrDaemonLaunchFailed
+// instead, which is the React-facing discriminator between SetupScreen and
+// amber banner).
+//
+// Two packages exercised: main (StartJarvis gate) + internal/setup
+// (WriteSentinel + IsSetupComplete).
+func TestIntegration_StartJarvisAfterSuccessfulSetup(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error { return nil }
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	// Pre-condition: sentinel absent → StartJarvis returns ErrSetupRequired.
+	// This pins the contrast: the SAME App, same env, would have failed
+	// with the wrong error code if we hadn't written the sentinel.
+	if _, err := os.Stat(paths.SetupSentinelPath(setup.SetupExpectedVersion)); !os.IsNotExist(err) {
+		t.Fatalf("test bug: sentinel exists in fresh tmp home: %v", err)
+	}
+	// Materialise the bundled requirements.txt (needed before we can write
+	// a hash-matching sentinel) — but NOT the sentinel itself yet.
+	reqDir := filepath.Join(fakeResources, "jarvis-daemon")
+	if err := os.MkdirAll(reqDir, 0o755); err != nil {
+		t.Fatalf("mkdir bundled requirements dir: %v", err)
+	}
+	reqPath := filepath.Join(reqDir, "requirements.txt")
+	if err := os.WriteFile(reqPath, []byte("pipecat-ai==0.1.0\n"), 0o644); err != nil {
+		t.Fatalf("write bundled requirements.txt: %v", err)
+	}
+
+	preApp := &App{}
+	preErr := preApp.StartJarvis()
+	if preErr == nil {
+		t.Fatalf("pre-condition: StartJarvis() with no sentinel = nil; want ErrSetupRequired")
+	}
+	if !errors.Is(preErr, setup.ErrSetupRequired) {
+		t.Fatalf("pre-condition: StartJarvis() err = %v; want errors.Is(err, ErrSetupRequired)", preErr)
+	}
+
+	// Now write a valid sentinel via the REAL setup.WriteSentinel path.
+	// This is the "user just finished setup" handoff.
+	sum, err := fileSHA256(reqPath)
+	if err != nil {
+		t.Fatalf("hash bundled requirements: %v", err)
+	}
+	if err := setup.WriteSentinel(setup.SentinelData{
+		Version:            setup.SetupExpectedVersion,
+		Timestamp:          time.Now().UTC(),
+		RequirementsSHA256: sum,
+		PythonPBSTag:       "integration-test",
+	}); err != nil {
+		t.Fatalf("setup.WriteSentinel: %v", err)
+	}
+
+	// Cross-check: the gate's helper must now accept it.
+	if !setup.IsSetupComplete(reqPath) {
+		t.Fatalf("setup.IsSetupComplete(%q) = false right after WriteSentinel; gate would still reject", reqPath)
+	}
+
+	// StartJarvis with the sentinel present must NOT return ErrSetupRequired.
+	// It WILL return ErrDaemonLaunchFailed because no python interpreter
+	// exists in the test env — that's the new failure mode, and the very
+	// discriminator the React side uses to choose between SetupScreen
+	// (ErrSetupRequired) and the amber banner (ErrDaemonLaunchFailed).
+	a := &App{}
+	err = a.StartJarvis()
+	if err == nil {
+		t.Fatalf("StartJarvis() with sentinel + no python = nil; want ErrDaemonLaunchFailed")
+	}
+	if errors.Is(err, setup.ErrSetupRequired) {
+		t.Errorf("StartJarvis() after successful setup unexpectedly returned ErrSetupRequired: %v", err)
+	}
+	if !errors.Is(err, setup.ErrDaemonLaunchFailed) {
+		t.Errorf("StartJarvis() err = %v; want errors.Is(err, ErrDaemonLaunchFailed) (gate passed, python missing)", err)
+	}
+}
