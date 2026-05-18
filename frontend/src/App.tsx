@@ -1,21 +1,127 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { SettingsView } from './views/SettingsView'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { JarvisHudView } from './components/JarvisHudView'
 import { Onboarding } from './components/Onboarding'
+import { SetupScreen } from './components/setup/SetupScreen'
+import { isSetupStateEvent } from './lib/use-setup-state'
 import { IsFirstRun } from '../wailsjs/go/main/App'
+import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime'
+
+// v0.2.0: IsSetupComplete is a Wails binding added by TASK-006. `wails
+// generate module` hasn't run in this sandbox, so the TS declaration in
+// wailsjs/go/main/App.d.ts doesn't include it yet. Resolve at call time
+// via window.go.main.App, matching the pattern OpenDaemonLog uses for the
+// same not-yet-regenerated case in JarvisHudView.tsx + DiagnosticsPanel.
+interface SetupBindings {
+  IsSetupComplete?: () => Promise<boolean>
+  OpenDaemonLog?: () => Promise<void>
+}
+
+function setupBindings(): SetupBindings | null {
+  const w = window as unknown as {
+    go?: { main?: { App?: SetupBindings } }
+  }
+  return w.go?.main?.App ?? null
+}
+
+// Amber banner shown when the daemon fails to launch AFTER setup is complete
+// (covers the v0.2.0 founder-review failure mode "sentinel write succeeds but
+// daemon then fails to launch"). The user gets a clear next action via the
+// "View daemon log" link.
+function DaemonFailedBanner({ onViewLog }: { onViewLog: () => void }): React.ReactElement {
+  return (
+    <div
+      role="alert"
+      className="relative flex items-center justify-between gap-3 px-4 py-2 flex-shrink-0"
+      style={{
+        zIndex: 95,
+        background: 'rgba(255, 184, 0, 0.18)',
+        borderBottom: '1px solid rgb(255, 184, 0)',
+        color: 'rgb(255, 215, 80)',
+      }}
+    >
+      <span
+        className="text-sm"
+        style={{
+          fontFamily: "'SF Mono', 'Menlo', monospace",
+          fontWeight: 500,
+          letterSpacing: '0.02em',
+        }}
+      >
+        ▸ Daemon failed to launch — view the daemon log for details.
+      </span>
+      <button
+        type="button"
+        onClick={onViewLog}
+        className="text-xs px-3 py-1 rounded text-black"
+        style={{
+          background: 'rgb(255, 184, 0)',
+          fontFamily: "'SF Mono', 'Menlo', monospace",
+          fontWeight: 600,
+          letterSpacing: '0.05em',
+        }}
+      >
+        View daemon log
+      </button>
+    </div>
+  )
+}
 
 function App(): React.ReactElement {
+  // v0.2.0 setup gate. null while we're waiting on IsSetupComplete to resolve;
+  // false means mount <SetupScreen> instead of the orb HUD; true means
+  // proceed to the existing Onboarding + HUD flow.
+  const [isSetupComplete, setIsSetupComplete] = useState<boolean | null>(null)
+  const [daemonLaunchFailed, setDaemonLaunchFailed] = useState<boolean>(false)
   const [firstRun, setFirstRun] = useState<boolean | null>(null)
   const [showSettings, setShowSettings] = useState(false)
 
+  // Initial setup check on mount. If the binding isn't generated yet (dev
+  // mode pre-wails-build), default to true so we don't trap the maintainer
+  // behind a SetupScreen they don't need.
   useEffect(() => {
+    const bindings = setupBindings()
+    if (typeof bindings?.IsSetupComplete !== 'function') {
+      setIsSetupComplete(true)
+      return
+    }
+    bindings
+      .IsSetupComplete()
+      .then((v: boolean) => setIsSetupComplete(Boolean(v)))
+      .catch(() => setIsSetupComplete(true))
+  }, [])
+
+  // Subscribe to 'setup' channel — when setup completes mid-session (user
+  // clicks Apply Now or installs finish), flip the gate without page reload.
+  useEffect(() => {
+    const cancel = EventsOn('setup', (event: unknown) => {
+      try {
+        if (isSetupStateEvent(event) && event.complete) {
+          setIsSetupComplete(true)
+        }
+      } catch (err) {
+        // Edge case: malformed setup_state event payload — drop silently
+        // so the gate doesn't crash. isSetupComplete stays at its current
+        // value; the next valid event resyncs it.
+        console.warn('App: rejected malformed setup_state event', event, err)
+      }
+    })
+    return () => {
+      cancel()
+    }
+  }, [])
+
+  // First-run flag check runs AFTER setup is complete, so Onboarding never
+  // mounts in front of an unfinished install.
+  useEffect(() => {
+    if (isSetupComplete !== true) return
     IsFirstRun()
       .then((v: boolean) => setFirstRun(Boolean(v)))
       .catch(() => setFirstRun(false))
-  }, [])
+  }, [isSetupComplete])
 
-  // Cmd/Ctrl + , -- conventional shortcut for opening preferences.
+  // Cmd/Ctrl + , — open/close Settings overlay (existing behavior).
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
       if ((e.metaKey || e.ctrlKey) && e.key === ',') {
@@ -29,6 +135,33 @@ function App(): React.ReactElement {
     return () => window.removeEventListener('keydown', handler)
   }, [showSettings])
 
+  const handleViewDaemonLog = useCallback((): void => {
+    const bindings = setupBindings()
+    if (typeof bindings?.OpenDaemonLog === 'function') {
+      void bindings.OpenDaemonLog()
+      return
+    }
+    // Fallback when the binding isn't available — open the file path in the
+    // user's default file viewer. Won't render the contents but at least
+    // lets them know where to look.
+    BrowserOpenURL('file:///' + '~/.jarvis/logs/daemon.log')
+  }, [])
+
+  // ------------------------------------------------------------------
+  // Render
+  // ------------------------------------------------------------------
+
+  // Brief splash while we resolve IsSetupComplete.
+  if (isSetupComplete === null) {
+    return <div className="flex h-screen bg-app text-primary" />
+  }
+
+  // v0.2.0 setup hasn't run yet — block the HUD behind the install UI.
+  if (isSetupComplete === false) {
+    return <SetupScreen />
+  }
+
+  // Setup is complete; check first-run.
   if (firstRun === null) {
     return <div className="flex h-screen bg-app text-primary" />
   }
@@ -39,6 +172,7 @@ function App(): React.ReactElement {
   return (
     <div className="flex h-screen bg-app text-primary">
       <main className="flex-1 flex flex-col min-w-0 min-h-0 relative">
+        {daemonLaunchFailed && <DaemonFailedBanner onViewLog={handleViewDaemonLog} />}
         <ErrorBoundary>
           <JarvisHudView />
         </ErrorBoundary>
