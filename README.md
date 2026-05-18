@@ -11,9 +11,9 @@ Jarvis is a desktop voice assistant that drives your AI coding agents the way yo
 
 ## Download
 
-➜ **[Get the latest DMG](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)** · Apple Silicon Macs (M1 / M2 / M3 / M4) · macOS 12+ · ~1.7 GB DMG (bundles a portable Python runtime + the VibeVoice voice preset)
+➜ **[Get the latest DMG](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)** · Apple Silicon Macs (M1 / M2 / M3 / M4) · macOS 12+ · ~80 MB DMG
 
-**First launch** downloads ~2.4 GB of model weights (VibeVoice + Whisper) to `~/.cache/huggingface/` — about 5–10 min on home internet. After that, Jarvis runs fully offline.
+**First launch** runs a one-time setup (~10–15 min) that installs a portable Python runtime + daemon venv into `~/.jarvis/` and downloads the VibeVoice + Whisper model weights to `~/.cache/huggingface/`. A full-screen progress UI tracks all four phases. After setup, Jarvis runs fully offline except for your chosen cloud LLM.
 
 After downloading, see **[Install](#install)** below — the first launch needs a one-time Gatekeeper workaround because the build is ad-hoc signed.
 
@@ -26,29 +26,24 @@ After downloading, see **[Install](#install)** below — the first launch needs 
 
 > Apple Silicon (M1 or later) running macOS 12 or newer.
 
-1. **Download** the latest `Jarvis-vX.Y.Z.dmg` from the [Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases) page. The DMG is about 1.7 GB and bundles a portable Python runtime plus the VibeVoice voice preset. On first launch Jarvis fetches the ~2.4 GB of VibeVoice + Whisper model weights to `~/.cache/huggingface/` (one-time, ~5–10 min on home internet); after that it runs fully offline.
-2. **Mount and install.** Open the DMG and drag **Jarvis.app** into `/Applications`.
-3. **Get past Gatekeeper.** The first launch will be blocked with a *"developer cannot be verified"* warning. This is expected — the v0.1 build is ad-hoc signed because there is no Apple Developer ID attached yet, and Apple's notarization service requires one. To get past it:
-   - Open `/Applications` in Finder.
-   - **Right-click** Jarvis.app and choose **Open** (this is the magic that double-clicking will *not* do).
-   - In the dialog that appears, click **Open** again.
-   - macOS now remembers your choice; future launches work normally from Spotlight, Launchpad, or Dock.
-4. **Grant mic access.** On first run Jarvis will prompt for **microphone permission**. Grant it — the wake-word listener and voice loop are dead without it. If you miss the prompt, re-enable it under **System Settings -> Privacy & Security -> Microphone -> Jarvis**.
-5. **Onboarding.** On first launch you'll be walked through a short onboarding flow: pick an LLM provider, paste an API key (or confirm Ollama is running locally at `http://localhost:11434`), preview a voice, and you're ready to talk. Say "Hey Jarvis" to begin.
+1. **Download** the latest `Jarvis-vX.Y.Z.dmg` from the [Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases) page. The DMG is ~80 MB.
+2. **Mount and install.** Open the DMG, drag **Jarvis.app** into `/Applications`.
+3. **Get past Gatekeeper.** The v0.2.0 build is ad-hoc signed. First launch is blocked with "developer cannot be verified". To bypass: right-click Jarvis.app in `/Applications` → **Open** → **Open** in the confirmation dialog. macOS remembers; future launches work normally.
+4. **Setup runs automatically on first launch** (~10–15 min, one-time). A full-screen progress UI shows four install phases — Installing Python runtime, Installing voice pipeline, Downloading VibeVoice (~1.9 GB), Downloading Whisper (~460 MB). You can keep using your Mac while it runs. The whole install lives in `~/.jarvis/` plus `~/.cache/huggingface/`; nothing else on the system is touched.
+5. **Grant microphone permission** when prompted.
+6. **Onboarding modal** walks you through picking an LLM provider and pasting an API key (or confirming Ollama is running locally), then previews a voice. Say "Hey Jarvis" to begin.
 
-If macOS refuses to launch the app at all (rare; usually means the download tool stamped a stubborn quarantine attribute), strip the quarantine flag from a terminal:
+If macOS refuses to launch the app at all, strip the quarantine flag from a terminal:
 
 ```bash
-xattr -d com.apple.quarantine /Applications/Jarvis.app
+xattr -dr com.apple.quarantine /Applications/Jarvis.app
 ```
-
-Then go back to step 3.
 
 ## System Requirements
 
 - **CPU**: Apple Silicon — M1, M2, M3, M4 (Intel Macs are not supported in v0.1).
 - **OS**: macOS 12 Monterey or later.
-- **Disk**: ~3.5 GB for the installed `.app` (bundled Python runtime + VibeVoice TTS + Whisper STT models).
+- **Disk**: ~80 MB for the installed `.app`, plus **4 GB free for the first-launch install** (Python venv + VibeVoice + Whisper model weights) staged into `~/.jarvis/` and `~/.cache/huggingface/`.
 - **RAM**: 16 GB recommended. The bundled voice models fit happily in 8 GB, but you'll want headroom for running multiple agent sessions.
 - **Microphone**: any built-in or external input device.
 

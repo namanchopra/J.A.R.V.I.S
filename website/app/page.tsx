@@ -212,9 +212,9 @@ export default async function Page() {
 
           <div className="mt-10 flex flex-wrap items-center justify-between gap-4 border-t border-jarvis-cyan-dark/40 pt-8">
             <div>
-              <p className="label-mono text-jarvis-cyan/45 mb-2">FIRST-LAUNCH DOWNLOAD</p>
+              <p className="label-mono text-jarvis-cyan/45 mb-2">FIRST-LAUNCH SETUP</p>
               <p className="font-mono text-sm text-jarvis-cyan/65 max-w-md">
-                The DMG ships at ~356 MB. On first launch the daemon fetches ~2.4 GB of model weights to <code className="text-jarvis-cyan">~/.cache/huggingface/</code> — about 5–10 min on home internet. After that, fully offline.
+                The DMG ships at ~80 MB. On first launch a full-screen progress UI installs a portable Python runtime + daemon venv into <code className="text-jarvis-cyan">~/.jarvis/</code> and fetches ~2.4 GB of VibeVoice + Whisper weights to <code className="text-jarvis-cyan">~/.cache/huggingface/</code> — ~10–15 min, one time. After first launch, Jarvis runs fully offline except your chosen cloud LLM.
               </p>
             </div>
             <a href={dmgUrl} className="jarvis-btn-primary">
@@ -313,7 +313,7 @@ function FeatureCard({ glyph, title, body }: Feature) {
 const INSTALL_STEPS = [
   {
     title: 'Download the DMG.',
-    body: 'About 356 MB. Apple Silicon Macs (M1 / M2 / M3 / M4) on macOS 12 or newer.',
+    body: 'About 80 MB. Apple Silicon Macs (M1 / M2 / M3 / M4) on macOS 12 or newer.',
   },
   {
     title: 'Mount, drag Jarvis.app to /Applications.',
@@ -324,7 +324,11 @@ const INSTALL_STEPS = [
     body: 'The build is ad-hoc signed. Double-clicking shows "developer cannot be verified". Right-clicking and choosing Open bypasses the prompt; macOS remembers the choice forever after.',
   },
   {
+    title: 'First-launch setup runs automatically.',
+    body: 'A full-screen progress UI walks through four phases — Python runtime, voice pipeline venv, VibeVoice (~1.9 GB), Whisper (~460 MB). ~10–15 min first-launch setup (Python + venv + ~2.4 GB of voice + speech models). You can keep using your Mac while it runs. After first launch, Jarvis runs fully offline except your chosen cloud LLM.',
+  },
+  {
     title: 'Grant microphone permission and finish onboarding.',
-    body: 'A short modal walks you through choosing an LLM provider (or local Ollama), pasting an API key if applicable, and previewing a voice. The first time you say "Hey Jarvis" the daemon fetches the model weights — that takes 5–10 minutes once.',
+    body: 'A short modal walks you through choosing an LLM provider (or local Ollama), pasting an API key if applicable, and previewing a voice. Say "Hey Jarvis" to begin.',
   },
 ]
