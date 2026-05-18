@@ -15,6 +15,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.0] - 2026-05-18
+
+### Changed
+- **Setup-on-launch architecture.** The DMG no longer bundles the portable Python interpreter or daemon venv — both install into `~/.jarvis/` on first launch, behind a full-screen progress UI. DMG shrinks from ~356 MB to ~80 MB; CI build time drops from ~10 min to ~3 min. Fresh installs work without Gatekeeper-quarantine cascade issues that broke v0.1.6 on colleague machines.
+- StartJarvis (TASK-001) routes around a bundled Python entirely: on launch it looks up `~/.jarvis/python/bin/python3` + `~/.jarvis/venv/bin/python` and only spawns the daemon when both are present and the sentinel verifies. If anything is missing/stale, it triggers the install flow before the orb mounts.
+- Quarantine self-heal (TASK-001) now runs as a startup pass over `~/.jarvis/` rather than only over `Contents/Resources/` — keeps the runtime usable even if a future asset gets quarantined by a download tool.
+- HuggingFace download events from the daemon are re-emitted on the new `setup` Wails channel during the install flow (TASK-007), so VibeVoice + Whisper download progress renders inside the same SetupScreen UI as Python install and venv install — no separate first-run overlay handoff.
+- Daemon prefetch sequencing reordered (TASK-009) — VibeVoice + Whisper downloads now run synchronously before the Pipecat pipeline initializes, so the SetupScreen reports completion only when the daemon is genuinely ready to take a `Hey Jarvis`.
+- `App.tsx` (TASK-012) is now a setup gate. It calls `IsSetupComplete()` on mount, renders `<SetupScreen>` until completion, then swaps to the HUD without page reload thanks to a live `EventsOn('setup')` listener on the gate.
+- Settings → Diagnostics gains a "Setup" row (TASK-015) showing sentinel version + last-verified timestamp + a "Re-run setup" button that deletes `~/.jarvis/.setup-version-*` and relaunches the app to force a fresh install.
+- `daemon_supervisor.go` (TASK-006) waits for the setup sentinel to be present before its first daemon spawn — previous startup-race fixes that polled for `python-venv` are obsolete and removed.
+- `model_status.py` (TASK-007) gained a `--emit-channel=setup` mode used only during the install bootstrap; in normal daemon operation it continues to emit on the existing `jarvis` channel.
+- `release.yml` builds the DMG without the bundled Python + venv steps (TASK-013) — the DMG produced by the workflow is now ~80 MB on every release. Older `LIGHT_BUNDLE` plumbing kept in tree but unused (still gates the voice preset).
+- README + website + smoke test docs (TASK-018) rewritten for the new install flow.
+
+### Added
+- New `<SetupScreen>` full-viewport component (TASK-011) — corner-bracketed panel with four phase rows (Installing Python runtime / Installing voice pipeline / Downloading VibeVoice / Downloading Whisper), each with progress bar + ETA + state glyph (◌ / ◉ / ✕ / ◯). Borrowed visual vocabulary from v0.1.x's FirstRunDownloadOverlay.
+- `useSetupState` React hook (TASK-010) subscribing to the new `'setup'` Wails channel.
+- Go-side `setup` package (TASK-002, TASK-008) with `SentinelData` + atomic `WriteSentinel` + `ReadSentinel` with version + sha verification.
+- `scripts/setup/install-daemon.sh` orchestrator (TASK-004) — runs phases 1+2 with structured stderr (`PHASE:` / `PHASE_PROGRESS:` / `PHASE_BYTES:` / `PHASE_ETA:` / `PHASE_DONE:` / `PHASE_ERROR:`) the Go side parses.
+- `model_setup → setup` channel bridge (TASK-007) — daemon's existing HF download events for VibeVoice + Whisper are re-emitted on the setup channel during the install flow, so SetupScreen renders all 4 phases uniformly.
+- `App.tsx` setup gate (TASK-012) with `EventsOn('setup')` listener — mid-session setup completion flips the gate without page reload.
+- `OpenSetupLog()` Wails binding (TASK-016) for the SetupScreen's "View setup log" footer link.
+- Quarantine strip in StartJarvis (TASK-001) — even with the lean v0.2.0 DMG, any nested bundled binary that gets quarantined by Gatekeeper is self-healed before exec.
+- New `install-smoke.yml` CI workflow (TASK-017) — runs the install script standalone on a clean macos-14 runner on every PR that touches setup scripts.
+- Setup events schema contract (TASK-003) at `docs/setup-events.md` — canonical reference for Go, Python, and React consumers.
+
+### Removed
+- Bundled `~/.app/Contents/Resources/python/` (the portable CPython tree)
+- Bundled `~/.app/Contents/Resources/python-venv/` (the daemon venv)
+- CI workflow's "Fetch python-build-standalone" and "Build relocatable daemon venv" steps (TASK-013)
+
+### Notes
+- **First-launch time**: ~10–15 min on home internet (Python install ~30s + venv install ~1 min + VibeVoice download ~5–7 min + Whisper download ~2–3 min). One-time. After that, fully offline except chosen LLM provider.
+- **Sentinel file**: `~/.jarvis/.setup-version-0.2.0`. If a future v0.2.1 changes the install flow, the sentinel version bumps and existing users re-run the setup automatically.
+- **Resumability**: per-phase sentinels make every install resumable. Quit mid-VibeVoice-download → next launch resumes from where it stopped.
+- **Migration from v0.1.6**: existing users with `~/.cache/huggingface/` populated (from v0.1.1+'s prefetch) skip the model download phases. New users go through the full install. `~/.jarvis/config.json` is preserved across the upgrade — no API keys or settings are lost.
+
 ## [0.1.6] - 2026-05-13
 
 ### Changed

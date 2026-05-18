@@ -15,6 +15,7 @@ import (
 	"github.com/namanchopra/jarvis/internal/jarvis"
 	"github.com/namanchopra/jarvis/internal/paths"
 	"github.com/namanchopra/jarvis/internal/permissions"
+	"github.com/namanchopra/jarvis/internal/setup"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -31,11 +32,19 @@ const maxJarvisRestarts = 3
 // handles all voice I/O (STT, TTS, wake-word, tool calls) and connects
 // back to AWM via the mobile API WebSocket.
 //
-// Path resolution order (TASK-011):
-//  1. Bundled (`<.app>/Contents/Resources/python/bin/python3` +
-//     `<Resources>/jarvis-daemon/main.py`) when running from a built .app
-//  2. Dev venv (`~/.jarvis/jarvis-daemon-env/bin/python3`) + source-tree script
+// Path resolution order (v0.2.0 TASK-009):
+//  1. User-installed (`~/.jarvis/python/bin/python3` +
+//     `~/.jarvis/jarvis-daemon/main.py`) populated by install-daemon.sh on
+//     first launch — this is the canonical v0.2.0 install location
+//  2. Bundled (`<.app>/Contents/Resources/python/bin/python3` +
+//     `<Resources>/jarvis-daemon/main.py`) — legacy path for builds that
+//     still ship the full Python tree inside the .app
+//  3. Dev venv (`~/.jarvis/jarvis-daemon-env/bin/python3`) + source-tree script
 //     when running via `wails dev`
+//
+// Returns typed errors that App.tsx checks via errors.Is:
+//   - setup.ErrSetupRequired   → mount SetupScreen instead of HUD
+//   - setup.ErrDaemonLaunchFailed → mount HUD with amber "view daemon log" banner
 func (a *App) StartJarvis() error {
 	a.jarvisMu.Lock()
 	defer a.jarvisMu.Unlock()
@@ -44,36 +53,86 @@ func (a *App) StartJarvis() error {
 		return fmt.Errorf("StartJarvis: already running")
 	}
 
+	// v0.2.0 TASK-009: gate on setup completion. If the sentinel file is
+	// missing or invalid (version skew, sha mismatch, etc.) return the
+	// typed ErrSetupRequired so App.tsx can mount the SetupScreen instead
+	// of crashing through to the daemon-launch path that would inevitably
+	// fail. setup.IsSetupComplete handles all the validity edge cases —
+	// see internal/setup/setup.go.
+	if !setup.IsSetupComplete(bundledRequirementsPath()) {
+		slog.Info("StartJarvis: setup not complete — signalling SetupScreen")
+		return setup.ErrSetupRequired
+	}
+
 	// Ensure mic permission is requested before starting the voice pipeline.
 	// On first launch this triggers the OS prompt; on subsequent launches it's a no-op.
 	if permissions.MicStatus() == "not_determined" {
 		permissions.RequestMic()
 	}
 
-	// Locate the Python binary. Prefer the bundled interpreter inside the
-	// .app when present (paths.BundledPython already verifies existence +
-	// execute bit); fall back to the dev venv for `wails dev` runs.
-	bundledPython := paths.BundledPython()
-	devPython := paths.DataPath("jarvis-daemon-env", "bin", "python3")
-
-	pythonPath := bundledPython
-	if pythonPath == "" {
-		if _, err := os.Stat(devPython); err != nil {
-			return fmt.Errorf("StartJarvis: could not find Python interpreter; tried bundled %q and dev %q: %w",
-				filepath.Join("<bundle>", "Contents", "Resources", "python", "bin", "python3"), devPython, err)
+	// v0.2.0 TASK-001: Best-effort strip of com.apple.quarantine from the
+	// bundle's Resources tree before exec'ing any bundled binary. When a
+	// fresh user downloads the DMG from GitHub, macOS stamps the quarantine
+	// xattr on the .app, and that attribute propagates to NESTED binaries
+	// (libportaudio.dylib, uv, install-daemon.sh, the Python interpreter).
+	// Gatekeeper then silently refuses to exec them and the daemon never
+	// starts. Stripping the attr here clears the path for every subsequent
+	// exec in this launch. In dev mode BundledResourcesDir() returns "" and
+	// we skip the strip entirely. Failure (xattr missing, permission denied,
+	// non-zero exit) is logged at Debug and never blocks launch.
+	if resDir := bundledResourcesDirFn(); resDir != "" {
+		if err := stripQuarantineFn(resDir); err != nil {
+			slog.Debug("StartJarvis: strip quarantine attempt failed (continuing)",
+				"path", resDir, "err", err)
+		} else {
+			slog.Debug("StartJarvis: stripped quarantine xattr from bundle resources",
+				"path", resDir)
 		}
-		pythonPath = devPython
 	}
 
-	// Locate the daemon entry point script. findJarvisDaemonScript already
-	// prefers the bundled path when available.
-	scriptPath := findJarvisDaemonScript()
+	// Resolve Python interpreter: user-installed → bundled → dev venv.
+	// install-daemon.sh writes the portable CPython tree to
+	// paths.PythonInstallDir() on first launch, so for any user who has
+	// completed setup the InstalledPython() branch wins. The bundled +
+	// dev fallbacks preserve compatibility for legacy builds and
+	// `wails dev` respectively.
+	pythonPath := paths.InstalledPython()
+	bundledPython := paths.BundledPython()
+	if pythonPath == "" {
+		pythonPath = bundledPython
+	}
+	if pythonPath == "" {
+		devPython := paths.DataPath("jarvis-daemon-env", "bin", "python3")
+		if _, err := os.Stat(devPython); err == nil {
+			pythonPath = devPython
+		}
+	}
+	if pythonPath == "" {
+		// Sentinel said setup completed but no python binary anywhere. The
+		// install must be corrupt — signal ErrDaemonLaunchFailed so App.tsx
+		// surfaces the amber banner with the daemon log link rather than
+		// the SetupScreen.
+		return fmt.Errorf("StartJarvis: %w: no Python interpreter found (tried installed, bundled, dev)",
+			setup.ErrDaemonLaunchFailed)
+	}
+	if _, err := os.Stat(pythonPath); err != nil {
+		return fmt.Errorf("StartJarvis: %w: stat python %q: %v",
+			setup.ErrDaemonLaunchFailed, pythonPath, err)
+	}
+
+	// Resolve daemon entry script: user-installed → bundled → source-tree.
+	// findJarvisDaemonScript already covers bundled + source-tree; the
+	// InstalledDaemonScript() prefix is the v0.2.0 addition.
+	scriptPath := paths.InstalledDaemonScript()
 	if scriptPath == "" {
-		return fmt.Errorf("StartJarvis: could not find daemon script; tried bundled %q and source-tree fallbacks",
-			filepath.Join("<bundle>", "Contents", "Resources", "jarvis-daemon", "main.py"))
+		scriptPath = findJarvisDaemonScript()
+	}
+	if scriptPath == "" {
+		return fmt.Errorf("StartJarvis: %w: daemon script not found (tried installed, bundled, source-tree)",
+			setup.ErrDaemonLaunchFailed)
 	}
 
-	cmd := exec.Command(pythonPath, scriptPath)
+	cmd := startJarvisCommandFn(pythonPath, scriptPath)
 	// Tee daemon stderr+stdout to ~/.jarvis/logs/daemon.log so it survives
 	// across Jarvis restarts and is readable without keeping a terminal open.
 	logWriter := newJarvisLogWriter()
@@ -91,7 +150,7 @@ func (a *App) StartJarvis() error {
 	}
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("StartJarvis: %w", err)
+		return fmt.Errorf("StartJarvis: %w: %v", setup.ErrDaemonLaunchFailed, err)
 	}
 
 	a.jarvisProcess = cmd.Process
@@ -104,9 +163,37 @@ func (a *App) StartJarvis() error {
 		"pid", cmd.Process.Pid,
 		"python", pythonPath,
 		"script", scriptPath,
+		"installedPython", paths.InstalledPython() != "",
 		"bundled", bundledPython != "",
 	)
 	return nil
+}
+
+// bundledRequirementsPath returns the path to the bundled requirements.txt
+// used to compute the sentinel's RequirementsSHA256. In production this lives
+// under the .app's Resources tree; in dev mode (`wails dev`, `go test`) it
+// resolves to the source-tree path so setup gating works during development.
+//
+// Pulled out into a named function so tests can override via the existing
+// bundledResourcesDirFn seam without needing yet another indirection point.
+func bundledRequirementsPath() string {
+	if dir := bundledResourcesDirFn(); dir != "" {
+		return filepath.Join(dir, "jarvis-daemon", "requirements.txt")
+	}
+	// Dev / test mode — point at source-tree requirements.txt.
+	return "scripts/jarvis-daemon/requirements.txt"
+}
+
+// startJarvisCommandFn is the indirection StartJarvis uses to construct the
+// exec.Cmd for the daemon. Production code returns a real exec.Command that
+// runs python. Tests substitute a stub that captures cmd.Path / cmd.Args
+// without actually exec'ing python (which doesn't exist in the test env).
+//
+// Matches the bundledResourcesDirFn / stripQuarantineFn pattern from
+// TASK-001 — a package-level var that points at the real constructor by
+// default and is swapped out by t.Cleanup-bound test setup.
+var startJarvisCommandFn = func(name string, arg ...string) *exec.Cmd {
+	return exec.Command(name, arg...)
 }
 
 // StopJarvis sends SIGINT to the Python daemon and waits briefly for a
@@ -211,6 +298,43 @@ func (a *App) monitorJarvisDaemon(cmd *exec.Cmd) {
 }
 
 // ---------------------------------------------------------------------------
+// Quarantine attribute strip (v0.2.0 TASK-001)
+// ---------------------------------------------------------------------------
+
+// stripQuarantine runs `xattr -dr com.apple.quarantine <path>` to clear the
+// macOS quarantine attribute from `path` and everything underneath it. The
+// caller is expected to pass `paths.BundledResourcesDir()` so all bundled
+// binaries (libportaudio, uv, install-daemon.sh, the Python interpreter) are
+// covered in a single sweep.
+//
+// This is intentionally a thin shell-out rather than a Go reimplementation
+// of removexattr(2): `xattr` is part of macOS' default toolchain, handles
+// recursion natively, and matches what users would run manually if they hit
+// a Gatekeeper error. On non-Darwin or in environments where `xattr` is
+// missing the call returns an error, which the caller swallows + logs at
+// Debug. This function never panics and returns within a few ms even on
+// large trees.
+//
+// Returning the error (rather than swallowing it in here) lets tests assert
+// the strip is attempted at all; the production caller in StartJarvis
+// discards it deliberately.
+func stripQuarantine(path string) error {
+	return exec.Command("xattr", "-dr", "com.apple.quarantine", path).Run()
+}
+
+// stripQuarantineFn is the indirection StartJarvis calls so tests can
+// substitute a counter without invoking the real `xattr` binary. Production
+// code path is unchanged: this points at stripQuarantine by default.
+var stripQuarantineFn = stripQuarantine
+
+// bundledResourcesDirFn is the indirection StartJarvis calls so tests can
+// simulate either "running inside a .app bundle" (non-empty return) or
+// "dev mode" (empty return) without needing to reach into the unexported
+// override variable in internal/paths. Production code path is unchanged:
+// this points at paths.BundledResourcesDir by default.
+var bundledResourcesDirFn = paths.BundledResourcesDir
+
+// ---------------------------------------------------------------------------
 // Daemon script discovery
 // ---------------------------------------------------------------------------
 
@@ -309,6 +433,30 @@ func (a *App) OpenDaemonLog() error {
 		return fmt.Errorf("OpenDaemonLog: %w", err)
 	}
 	slog.Info("opened daemon log", "path", path)
+	return nil
+}
+
+// OpenSetupLog opens the install-daemon.sh setup log file
+// (~/.jarvis/logs/setup.log) in the user's default text-editor via macOS'
+// Launch Services (`open` command). Used by the SetupScreen's "View setup
+// log" link when the user wants to see what install-daemon.sh is doing
+// during the first-run setup flow (v0.2.0 TASK-016).
+//
+// Mirrors OpenDaemonLog exactly: same existence check, same error-wrapping
+// convention, same slog observation. The path comes from paths.SetupLogPath
+// rather than paths.DataPath("logs", "daemon.log") — that is the only
+// production difference. Returns a wrapped error if the log file does not
+// exist (e.g. setup has never been launched on this machine) or if the
+// `open` command fails.
+func (a *App) OpenSetupLog() error {
+	path := paths.SetupLogPath()
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("OpenSetupLog: log file not found at %s: %w", path, err)
+	}
+	if err := exec.Command("open", path).Run(); err != nil {
+		return fmt.Errorf("OpenSetupLog: %w", err)
+	}
+	slog.Info("opened setup log", "path", path)
 	return nil
 }
 
