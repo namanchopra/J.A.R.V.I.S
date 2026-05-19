@@ -9,7 +9,7 @@ const RELEASES_URL = `${REPO_URL}/releases/latest`
 // site never serves a 404 even if the GitHub API call below fails at
 // build time (e.g. rate-limited or offline). Bump this whenever a new
 // tag ships; `fetchLatestVersion` will override it on every cache miss.
-const FALLBACK_VERSION = '0.1.6'
+const FALLBACK_VERSION = '0.2.1'
 
 /** Latest release tag (e.g. "0.1.6"), fetched once per hour at build time. */
 async function fetchLatestVersion(): Promise<string> {
@@ -313,15 +313,11 @@ function FeatureCard({ glyph, title, body }: Feature) {
 const INSTALL_STEPS = [
   {
     title: 'Download the DMG.',
-    body: 'About 80 MB. Apple Silicon Macs (M1 / M2 / M3 / M4) on macOS 12 or newer.',
+    body: 'About 35 MB. Apple Silicon Macs (M1 / M2 / M3 / M4) on macOS 12 or newer. Signed with a Developer ID and notarized by Apple — no Gatekeeper warnings.',
   },
   {
-    title: 'Mount, drag Jarvis.app to /Applications.',
-    body: 'Standard macOS install.',
-  },
-  {
-    title: 'Right-click → Open the first time.',
-    body: 'The build is ad-hoc signed. Double-clicking shows "developer cannot be verified". Right-clicking and choosing Open bypasses the prompt; macOS remembers the choice forever after.',
+    title: 'Drag Jarvis to Applications.',
+    body: 'Double-click the DMG, then drag the Jarvis icon onto the Applications folder shortcut.',
   },
   {
     title: 'First-launch setup runs automatically.',

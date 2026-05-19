@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.1] - 2026-05-19
+
+### Added
+- **Signed + notarized DMG.** v0.2.1 ships with a Developer ID signature on every Mach-O binary (Jarvis itself + bundled `uv`), hardened runtime, secure timestamps, and a stapled Apple notarization ticket. Double-clicking the DMG no longer triggers Gatekeeper warnings.
+- **Drag-to-Applications DMG layout.** Mounting the DMG now shows the Jarvis icon on the left and an Applications folder shortcut on the right — the standard macOS install gesture. Set via `create-dmg --app-drop-link` flags.
+
+### Changed
+- Website install steps (`website/app/page.tsx`) dropped the obsolete "right-click → Open" workaround now that the DMG is notarized; install flow is now 4 steps instead of 5.
+
+### Fixed
+- Codesign step in `release.yml` re-signs every Mach-O executable under `Resources/` (not just `*.dylib`/`*.so`), so the bundled `uv` binary inherits our team's Developer ID + hardened runtime + secure timestamp. Without this, Apple notarization rejected v0.2.0's first DMG with `4000: Archive contains critical validation errors`.
+- Notarize step in `release.yml` now captures the submission ID, polls to completion, and unconditionally fetches `notarytool log <id>` — on rejection the workflow output now contains Apple's per-binary failure reasons instead of dying with a bare exit code.
+
 ## [0.2.0] - 2026-05-18
 
 ### Changed

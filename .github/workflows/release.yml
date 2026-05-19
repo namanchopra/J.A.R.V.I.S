@@ -257,10 +257,18 @@ jobs:
         timeout-minutes: 10
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # Standard drag-to-install layout: Jarvis icon on the left, an
+          # Applications symlink on the right with an arrow between them
+          # (the layout users expect from polished mac apps). The flags
+          # below ALL come from create-dmg(1) -- nothing custom.
           create-dmg \
             --volname "Jarvis" \
             --window-size 600 400 \
-            --icon-size 100 \
+            --icon-size 128 \
+            --icon "Jarvis.app" 150 200 \
+            --app-drop-link 450 200 \
+            --hide-extension "Jarvis.app" \
+            --no-internet-enable \
             "Jarvis-${VERSION}.dmg" \
             build/bin/Jarvis.app
 
