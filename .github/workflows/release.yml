@@ -266,15 +266,47 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           TEAM_ID: ${{ secrets.TEAM_ID }}
         run: |
+          set -o pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           DMG_PATH="Jarvis-${VERSION}.dmg"
 
-          # Submit for notarization and wait for completion
-          xcrun notarytool submit "$DMG_PATH" \
+          # Submit for notarization (no --wait so we own the submission ID).
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_PASSWORD" \
             --team-id "$TEAM_ID" \
-            --wait
+            --output-format json)
+          echo "$SUBMIT_OUTPUT"
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          echo "Submission ID: $SUBMISSION_ID"
+
+          # Poll status until Accepted or Invalid.
+          xcrun notarytool wait "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID"
+
+          # ALWAYS fetch and print the full Apple log -- on Invalid this is the
+          # only way to see why notarization failed.
+          echo "::group::Notarization log"
+          xcrun notarytool log "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID"
+          echo "::endgroup::"
+
+          # Re-fetch info and gate on Accepted status.
+          INFO=$(xcrun notarytool info "$SUBMISSION_ID" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$TEAM_ID" \
+            --output-format json)
+          STATUS=$(echo "$INFO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+          echo "Final status: $STATUS"
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization failed with status: $STATUS"
+            exit 1
+          fi
 
           # Staple the notarization ticket to the DMG
           xcrun stapler staple "$DMG_PATH"
