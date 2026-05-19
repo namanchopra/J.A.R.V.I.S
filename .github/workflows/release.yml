@@ -222,6 +222,23 @@ jobs:
               --sign "$APPLE_SIGNING_IDENTITY" \
               --timestamp {} \;
 
+          # Sign extensionless Mach-O binaries bundled into Resources/.
+          # The uv binary (TASK-005) is signed by astral-sh with their own
+          # Developer ID, which fails notarization for our team -- we have
+          # to re-sign it under our identity with hardened runtime + a
+          # secure timestamp. Iterate over every Mach-O under Resources/
+          # so future bundled binaries are covered without another patch.
+          while IFS= read -r BIN; do
+            if file "$BIN" | grep -q 'Mach-O.*executable'; then
+              echo "Re-signing Mach-O: $BIN"
+              codesign --force --options runtime \
+                --entitlements build/darwin/entitlements.plist \
+                --sign "$APPLE_SIGNING_IDENTITY" \
+                --timestamp \
+                "$BIN"
+            fi
+          done < <(find build/bin/Jarvis.app/Contents/Resources -type f ! -name "*.dylib" ! -name "*.so")
+
           # Sign the main bundle
           codesign --force --deep \
             --options runtime \
