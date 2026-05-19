@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.3] - 2026-05-20
+
+### Added
+- **Watchdog + auto-retry on the setup runner.** `RunSetup` now wraps each `install-daemon.sh` invocation in a watchdog goroutine that monitors a heartbeat atomic the parser bumps on every stderr line. If the script goes silent for >120 seconds the watchdog cancels the attempt's ctx (sending SIGKILL via `exec.CommandContext`) and the retry loop spawns a fresh attempt. The script is fully resumable thanks to per-phase sentinels (`.fetch-complete`, `.venv-complete`, `.requirements-sha256`), so retries no-op completed phases and resume from the next. Up to 3 in-process attempts.
+- **Terminal.app escape hatch.** When all in-process attempts time out, RunSetup automatically opens Terminal.app via `osascript` and runs install-daemon.sh in a real shell context — the GUI-only hang doesn't reproduce in Terminal, so this always works. The window stays open after success so the user can see "✓ Setup complete." A background goroutine polls the sentinel and emits `setup_state{complete:true}` on the `setup` channel when it appears, so the SetupScreen swaps to the HUD without the user needing to quit + relaunch Jarvis.
+- **`setup_retry` and `setup_terminal_handoff` events** on the `setup` channel so the SetupScreen can surface "Auto-retrying…" and "Installer launched in Terminal" copy to the user instead of showing a frozen progress bar.
+
+### Changed
+- `setupAttemptWatchdogSilence` / `setupWatchdogPollInterval` / `setupMaxAttempts` are now `var` (not `const`) so tests can tune them to ms-range without slowing CI to 6 minutes per assertion.
+
 ## [0.2.2] - 2026-05-20
 
 ### Fixed

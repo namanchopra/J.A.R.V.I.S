@@ -32,6 +32,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,6 +43,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/namanchopra/jarvis/internal/paths"
@@ -133,7 +135,35 @@ type setupRuntime struct {
 	// fresh run so re-installs work.
 	vibeVoiceDone bool
 	whisperDone   bool
+
+	// heartbeat is the watchdog's last-seen-event nanosecond timestamp
+	// (set by runSetupParseLoop on every stderr line, recognised or not).
+	// nil between attempts and outside RunSetup. The watchdog goroutine
+	// compares time.Now() to *heartbeat and cancels the attempt's ctx if
+	// the silence exceeds setupAttemptWatchdogSilence.
+	heartbeat *atomic.Int64
 }
+
+// Setup watchdog tuning. A single PHASE_PROGRESS or log line is sufficient
+// to reset the silence counter, so the threshold need only cover the
+// slowest legitimate gap between events. Empirically the worst case is the
+// curl download of python-build-standalone (~90 MB) -- it emits no events
+// between PHASE_PROGRESS: 0 and PHASE_PROGRESS: 100, so the threshold must
+// be greater than (90 MB / slowest-tolerable-link). At 1 MB/s that's 90 s;
+// pick 120 s as a safety margin.
+//
+// `var` (not `const`) so tests can override the silence threshold to
+// keep watchdog assertions fast; production callers never mutate them.
+var (
+	setupAttemptWatchdogSilence = 120 * time.Second
+	setupWatchdogPollInterval   = 5 * time.Second
+	setupMaxAttempts            = 3
+)
+
+// errSetupWatchdogTimeout is returned by runSetupAttempt when the watchdog
+// canceled the attempt due to silence. RunSetup uses errors.Is on this
+// sentinel to decide whether to retry vs. surface a PHASE_ERROR untouched.
+var errSetupWatchdogTimeout = errors.New("setup attempt timed out (no PHASE_* event in watchdog window)")
 
 // setupRuntimes holds one setupRuntime per *App. App is a Wails-bound
 // singleton in production but tests construct multiple App{} values, so we
@@ -730,63 +760,260 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 		}
 	}()
 
-	ctx := a.ctx
-	if ctx == nil {
+	parentCtx := a.ctx
+	if parentCtx == nil {
 		// Tests construct App{} directly without going through startup(),
 		// so a.ctx may be nil. Fall back to Background so exec.CommandContext
 		// + the parser goroutine still work.
-		ctx = context.Background()
+		parentCtx = context.Background()
 	}
+
+	// Bridge: subscribe to the `jarvis` Wails channel so daemon-emitted
+	// model_setup / model_download events for phases 3 and 4 get re-emitted
+	// on the `setup` channel as setup_progress events. The subscription
+	// spans ALL attempts (model events are only relevant once the daemon
+	// boots after phase 2 completes, which happens at most once across
+	// retries). Torn down in the deferred cleanup at the top of RunSetup.
+	bridgeCancel := setupSubscribeFn(a, a.handleDaemonModelEvent)
+	rt.mu.Lock()
+	rt.bridgeCancel = bridgeCancel
+	rt.mu.Unlock()
+
+	// Retry loop: a watchdog inside runSetupAttempt cancels the spawn ctx
+	// if the script goes silent for >setupAttemptWatchdogSilence. The
+	// install-daemon.sh script is fully resumable -- each phase has its own
+	// .fetch-complete / .venv-complete sentinel + a requirements-sha guard
+	// -- so retrying after a hang transparently no-ops any phase that was
+	// already completed and resumes from the next.
+	var lastAttemptErr error
+	for attempt := 1; attempt <= setupMaxAttempts; attempt++ {
+		if attempt > 1 {
+			slog.Warn("RunSetup: retry triggered (watchdog timeout on previous attempt)",
+				"attempt", attempt, "maxAttempts", setupMaxAttempts)
+			// Surface the retry to the UI so the user sees auto-recovery
+			// instead of a frozen progress bar.
+			rt.emit(parentCtx, "setup", map[string]interface{}{
+				"type":        "setup_retry",
+				"attempt":     attempt,
+				"maxAttempts": setupMaxAttempts,
+				"reason":      "watchdog timeout — restarting installer",
+			})
+		}
+		attemptErr := a.runSetupAttempt(parentCtx, args, logFile)
+		if attemptErr == nil {
+			return a.snapshotSetupState(), nil
+		}
+		lastAttemptErr = attemptErr
+
+		// Only retry on watchdog timeouts. A PHASE_ERROR from the script
+		// (insufficient disk, SHA mismatch, etc.) is the user's problem
+		// and re-running won't help.
+		if !errors.Is(attemptErr, errSetupWatchdogTimeout) {
+			msg := fmt.Sprintf("install-daemon.sh exited with error: %v", attemptErr)
+			current := a.snapshotSetupState()
+			if current.LastError == "" {
+				a.setSetupError(msg)
+				a.emitErrorEvent(msg)
+			}
+			return a.snapshotSetupState(), fmt.Errorf("RunSetup: %w", attemptErr)
+		}
+	}
+	// Exhausted retries on watchdog timeouts. Escape hatch: hand off to a
+	// real Terminal.app so the install runs in a real shell context (which
+	// we've verified works -- the GUI-context hang is the unknown). The
+	// user does not have to do anything except let the Terminal window
+	// finish; on completion we detect the sentinel and emit a
+	// setup_state{complete:true} so the SetupScreen swaps to the HUD.
+	slog.Warn("RunSetup: exhausted in-process retries; handing off to Terminal.app",
+		"attempts", setupMaxAttempts)
+	if launchErr := launchTerminalInstallerFn(args); launchErr != nil {
+		// Couldn't even open Terminal -- surface the original error so the
+		// React side can render the retry banner.
+		finalMsg := fmt.Sprintf("setup did not progress after %d attempts and Terminal hand-off failed: %v", setupMaxAttempts, launchErr)
+		a.setSetupError(finalMsg)
+		a.emitErrorEvent(finalMsg)
+		return a.snapshotSetupState(), fmt.Errorf("RunSetup: %w", lastAttemptErr)
+	}
+	// Let the SetupScreen explain what just happened.
+	rt.emit(parentCtx, "setup", map[string]interface{}{
+		"type":   "setup_terminal_handoff",
+		"reason": "in-process installer stalled; running install from a Terminal window",
+	})
+	// Poll the sentinel in the background. When the user's Terminal install
+	// finishes, the sentinel file appears -- at which point we emit
+	// setup_state{complete:true} on the `setup` channel so App.tsx flips
+	// to the HUD without a relaunch.
+	go a.pollForSentinelAfterTerminalHandoff(parentCtx)
+	return a.snapshotSetupState(), nil
+}
+
+// launchTerminalInstallerFn is the test seam for the Terminal.app escape
+// hatch. Production code calls launchTerminalInstaller; tests substitute
+// a no-op (or a fake that records the args) so unit tests don't pop a
+// real Terminal window on the developer's machine.
+var launchTerminalInstallerFn = launchTerminalInstaller
+
+// launchTerminalInstaller opens Terminal.app and runs install-daemon.sh
+// in a real shell context. The hang we're working around only happens
+// under the Wails GUI process tree; the same script in Terminal completes
+// in well under a minute (verified manually).
+//
+// The Terminal window stays open after the script exits so the user can
+// see the success/failure message. No auto-close: if the script fails
+// for a non-watchdog reason (network, disk space) we want the user to
+// see why.
+func launchTerminalInstaller(args setupSpawnArgs) error {
+	// Wrap the install-daemon.sh invocation in a small announcer + footer
+	// so the Terminal window is self-explanatory to a non-technical user.
+	// We use single quotes around each path so spaces / parens in
+	// $RUNNER_TEMP-like paths don't break the AppleScript boundary.
+	bashCmd := fmt.Sprintf(
+		"clear; "+
+			"printf '\\033[1;36m▸ Jarvis setup installer\\033[0m\\n'; "+
+			"printf '\\033[2mThe in-app installer stalled, so we are running it from this Terminal window instead.\\n'; "+
+			"printf 'This window will stay open after setup completes -- you can close it manually.\\033[0m\\n\\n'; "+
+			"bash %q %q %q && "+
+			"printf '\\n\\033[1;32m✓ Setup complete. You can now close this window and return to Jarvis.\\033[0m\\n' || "+
+			"printf '\\n\\033[1;31m✗ Setup failed. See ~/.jarvis/logs/setup.log for details.\\033[0m\\n'",
+		args.ScriptPath, args.UvPath, args.DaemonSourcePath,
+	)
+	// AppleScript: launch Terminal.app and `do script` the bash command.
+	// `activate` brings the window to the foreground so the user sees it.
+	appleScript := fmt.Sprintf(
+		`tell application "Terminal" to activate
+tell application "Terminal" to do script %s`,
+		appleScriptQuote(bashCmd),
+	)
+	return exec.Command("osascript", "-e", appleScript).Run()
+}
+
+// appleScriptQuote wraps s in AppleScript double-quoted form, escaping
+// embedded backslashes and quotes. AppleScript string literals don't
+// recognise C-style \n / \t escapes, but our bash command embeds them
+// through `printf '\\033[...]'` so they survive the quoting.
+func appleScriptQuote(s string) string {
+	escaped := strings.ReplaceAll(s, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return `"` + escaped + `"`
+}
+
+// pollForSentinelAfterTerminalHandoff watches for ~/.jarvis/.setup-version-X
+// to appear after launchTerminalInstaller fires. Once present, emits a
+// setup_state{complete:true} so the React SetupScreen swaps to the HUD
+// without requiring the user to relaunch Jarvis.
+//
+// Bounded by a 30-minute deadline. If the user closes the Terminal
+// window without completing setup, the goroutine exits silently and the
+// SetupScreen stays on the "Running install from a Terminal window"
+// banner -- the user can re-trigger setup from the Settings retry button
+// once they've sorted out whatever blocked the install (disk space, etc.).
+func (a *App) pollForSentinelAfterTerminalHandoff(ctx context.Context) {
+	rt := setupRuntimeFor(a)
+	deadline := time.Now().Add(30 * time.Minute)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				slog.Warn("setup terminal handoff: sentinel never appeared within 30m; giving up the poll")
+				return
+			}
+			if a.IsSetupComplete() {
+				slog.Info("setup terminal handoff: sentinel detected; emitting setup_state{complete:true}")
+				rt.emit(ctx, "setup", setupStateEvent{
+					Type:         "setup_state",
+					Complete:     true,
+					SetupVersion: setup.SetupExpectedVersion,
+				})
+				return
+			}
+		}
+	}
+}
+
+// runSetupAttempt runs install-daemon.sh once with a watchdog. The watchdog
+// monitors a heartbeat atomic that the parse loop bumps on every stderr
+// line; if the silence exceeds setupAttemptWatchdogSilence the watchdog
+// cancels the attempt's ctx (which sends SIGKILL via exec.CommandContext
+// to the script's process group) and returns errSetupWatchdogTimeout.
+//
+// Returns nil on clean exit (sentinel written). The caller may retry on
+// errSetupWatchdogTimeout. Any other error is non-recoverable.
+func (a *App) runSetupAttempt(parentCtx context.Context, args setupSpawnArgs, logFile io.Writer) error {
+	rt := setupRuntimeFor(a)
+
+	// Per-attempt ctx so the watchdog can cancel without affecting parent.
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
 
 	spawn, spawnErr := setupSpawnerFn(ctx, args)
 	if spawnErr != nil {
 		wrapped := fmt.Errorf("RunSetup: spawn: %w", spawnErr)
 		a.setSetupError(wrapped.Error())
 		a.emitErrorEvent(wrapped.Error())
-		return a.snapshotSetupState(), wrapped
+		return wrapped
 	}
 
-	// Bridge: subscribe to the `jarvis` Wails channel so daemon-emitted
-	// model_setup / model_download events for phases 3 and 4 get re-emitted
-	// on the `setup` channel as setup_progress events. The subscription is
-	// torn down in the deferred cleanup above so it only runs for the
-	// duration of this RunSetup call. The handler itself is also gated on
-	// rt.running, providing defence in depth against a late event arriving
-	// after the unsubscribe (Wails dispatches synchronously today but the
-	// guarantee isn't documented).
-	bridgeCancel := setupSubscribeFn(a, a.handleDaemonModelEvent)
+	// Heartbeat: parser bumps this on every stderr line; watchdog reads it.
+	heartbeat := &atomic.Int64{}
+	heartbeat.Store(time.Now().UnixNano())
 	rt.mu.Lock()
-	rt.bridgeCancel = bridgeCancel
+	rt.heartbeat = heartbeat
 	rt.mu.Unlock()
+	defer func() {
+		rt.mu.Lock()
+		rt.heartbeat = nil
+		rt.mu.Unlock()
+	}()
 
-	// Drain stderr in this goroutine (no need to background it — RunSetup
-	// is itself running on a goroutine spawned by the Wails frontend call).
+	// Watchdog goroutine. Runs until ctx is canceled (either by clean
+	// completion via the defer above, or by the watchdog itself on timeout).
+	var watchdogTimedOut atomic.Bool
+	watchdogDone := make(chan struct{})
+	go func() {
+		defer close(watchdogDone)
+		ticker := time.NewTicker(setupWatchdogPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				silence := time.Duration(time.Now().UnixNano() - heartbeat.Load())
+				if silence > setupAttemptWatchdogSilence {
+					slog.Warn("setup watchdog: script silent past threshold; canceling attempt",
+						"silence", silence.String(),
+						"threshold", setupAttemptWatchdogSilence.String())
+					watchdogTimedOut.Store(true)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+
+	// Drain stderr in this goroutine.
 	if drainErr := a.runSetupParseLoop(spawn.Stderr, logFile); drainErr != nil {
 		slog.Warn("RunSetup: stderr drain ended with error", "err", drainErr)
 	}
-	// Always close stderr so the subprocess' write end can finalise.
 	_ = spawn.Stderr.Close()
 
-	// Wait for the subprocess to fully exit so we can surface its exit code.
+	// Wait for the subprocess to fully exit. If the watchdog canceled, this
+	// returns a signal-killed error (or the exec context's "context canceled").
 	waitErr := spawn.Wait()
-	if waitErr != nil {
-		msg := fmt.Sprintf("install-daemon.sh exited with error: %v", waitErr)
-		// Only emit a synthetic error event if no PHASE_ERROR was already
-		// emitted by the script itself (which would have populated
-		// rt.currentState.LastError before we got here). If the script
-		// crashed before emitting PHASE_ERROR (signal kill, hard segfault),
-		// we surface our synthetic message; otherwise the script's own
-		// PHASE_ERROR takes precedence and we leave the cached LastError
-		// alone so the React side sees the original phase-specific text.
-		current := a.snapshotSetupState()
-		if current.LastError == "" {
-			a.setSetupError(msg)
-			a.emitErrorEvent(msg)
-		}
-		return a.snapshotSetupState(), fmt.Errorf("RunSetup: %w", waitErr)
-	}
+	cancel()       // stop the watchdog if it's still waiting on ticker
+	<-watchdogDone // ensure no goroutine leak
 
-	return a.snapshotSetupState(), nil
+	if watchdogTimedOut.Load() {
+		return errSetupWatchdogTimeout
+	}
+	if waitErr != nil {
+		return fmt.Errorf("install-daemon.sh: %w", waitErr)
+	}
+	return nil
 }
 
 // runSetupParseLoop drains stderr line by line, dispatching to the parser
@@ -836,6 +1063,13 @@ func (a *App) runSetupParseLoop(stderr io.Reader, logFile io.Writer) error {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
 
+	// Heartbeat ptr is set by the calling attempt before it spawns the
+	// watchdog. Outside the watchdog path it stays nil; the bump below is a
+	// no-op in that case so the parser stays useful as a unit-testable seam.
+	rt.mu.Lock()
+	heartbeat := rt.heartbeat
+	rt.mu.Unlock()
+
 	for scanner.Scan() {
 		raw := scanner.Bytes()
 		// Tee the raw bytes (with a trailing newline restored) to setup.log
@@ -844,6 +1078,14 @@ func (a *App) runSetupParseLoop(stderr io.Reader, logFile io.Writer) error {
 		if logFile != nil {
 			_, _ = logFile.Write(raw)
 			_, _ = logFile.Write([]byte{'\n'})
+		}
+		// Bump the watchdog clock on every line read. Even free-form log
+		// lines (the bash log() function's `[install-daemon] ...`) count
+		// as proof that the script is alive -- the watchdog only cares
+		// about silence, not about whether a line matched the PHASE_*
+		// grammar.
+		if heartbeat != nil {
+			heartbeat.Store(time.Now().UnixNano())
 		}
 		line := strings.TrimRight(string(raw), " \t")
 		if line == "" {

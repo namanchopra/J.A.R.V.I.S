@@ -14,6 +14,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -500,6 +501,189 @@ func TestRunSetup_DeduplicatesConcurrentCalls(t *testing.T) {
 	if got := atomic.LoadInt32(&spawnCount); got != 1 {
 		t.Errorf("setupSpawnerFn invocations = %d; want 1 (dedup failed)", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Watchdog → auto-retry path (v0.2.3)
+// ---------------------------------------------------------------------------
+
+// TestRunSetup_WatchdogRetriesAfterSilence verifies the v0.2.3 hang-recovery
+// path: attempts 1..N-1 stall (the spawner returns a stderr that never
+// yields any data), the watchdog kicks in after setupAttemptWatchdogSilence,
+// the ctx gets canceled, and RunSetup retries up to setupMaxAttempts. The
+// last attempt succeeds, so RunSetup returns nil.
+//
+// This is what "flawless install for everyone" hinges on -- if the script
+// hangs for whatever reason on the user's machine (network stall, App Nap,
+// XProtect rescan), the watchdog must recover transparently.
+func TestRunSetup_WatchdogRetriesAfterSilence(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	stubInstallScript(t, tmp)
+
+	// Tighten the watchdog so the test runs in ~1s instead of 6 minutes.
+	prevSilence := setupAttemptWatchdogSilence
+	prevPoll := setupWatchdogPollInterval
+	prevAttempts := setupMaxAttempts
+	setupAttemptWatchdogSilence = 80 * time.Millisecond
+	setupWatchdogPollInterval = 10 * time.Millisecond
+	setupMaxAttempts = 3
+	t.Cleanup(func() {
+		setupAttemptWatchdogSilence = prevSilence
+		setupWatchdogPollInterval = prevPoll
+		setupMaxAttempts = prevAttempts
+	})
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+
+	var spawnCount int32
+	prev := setupSpawnerFn
+	setupSpawnerFn = func(ctx context.Context, _ setupSpawnArgs) (*setupSpawnResult, error) {
+		n := atomic.AddInt32(&spawnCount, 1)
+		// Attempts 1 and 2 stall -- stderr never yields data; only the
+		// ctx-cancel from the watchdog unblocks the parser's Read.
+		if n < int32(setupMaxAttempts) {
+			pr, _ := io.Pipe()
+			// Closer that's actually triggered by ctx so the parser's
+			// blocking Read unblocks when the watchdog cancels.
+			go func() {
+				<-ctx.Done()
+				_ = pr.Close()
+			}()
+			return &setupSpawnResult{
+				Stderr: pr,
+				Wait: func() error {
+					<-ctx.Done()
+					return ctx.Err()
+				},
+			}, nil
+		}
+		// Final attempt: yield a clean phase-done sequence so RunSetup
+		// returns success.
+		stderr := "PHASE: python_install\nPHASE_PROGRESS: 100\nPHASE_DONE: python_install\nPHASE: venv_install\nPHASE_PROGRESS: 100\nPHASE_DONE: venv_install\n"
+		return &setupSpawnResult{
+			Stderr: io.NopCloser(strings.NewReader(stderr)),
+			Wait:   func() error { return nil },
+		}, nil
+	}
+	t.Cleanup(func() { setupSpawnerFn = prev })
+
+	_, err := a.RunSetup()
+	if err != nil {
+		t.Fatalf("RunSetup after %d-attempt watchdog recovery = %v; want nil", setupMaxAttempts, err)
+	}
+	if got := atomic.LoadInt32(&spawnCount); got != int32(setupMaxAttempts) {
+		t.Errorf("setupSpawnerFn invocations = %d; want %d (one per attempt)", got, setupMaxAttempts)
+	}
+
+	// Verify the SetupScreen got setup_retry events for attempts 2 and 3.
+	retries := 0
+	for _, ev := range rec.snapshot() {
+		if m, ok := ev.Event.(map[string]interface{}); ok {
+			if t, _ := m["type"].(string); t == "setup_retry" {
+				retries++
+			}
+		}
+	}
+	if retries != setupMaxAttempts-1 {
+		t.Errorf("setup_retry events = %d; want %d (one per retry)", retries, setupMaxAttempts-1)
+	}
+}
+
+// TestRunSetup_WatchdogExhaustsRetries_HandsOffToTerminal verifies the
+// unhappy path: when EVERY in-process attempt times out, RunSetup falls
+// back to launching install-daemon.sh in Terminal.app rather than
+// surfacing an error. The user gets a working install via the
+// terminal-context path even when the GUI-context path is broken.
+//
+// This regression-pins the v0.2.3 escape hatch -- if a future refactor
+// drops the Terminal hand-off, this test will fail and the change author
+// has to explicitly delete it (signaling the regression).
+func TestRunSetup_WatchdogExhaustsRetries_HandsOffToTerminal(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	stubInstallScript(t, tmp)
+
+	prevSilence := setupAttemptWatchdogSilence
+	prevPoll := setupWatchdogPollInterval
+	prevAttempts := setupMaxAttempts
+	setupAttemptWatchdogSilence = 80 * time.Millisecond
+	setupWatchdogPollInterval = 10 * time.Millisecond
+	setupMaxAttempts = 2
+	t.Cleanup(func() {
+		setupAttemptWatchdogSilence = prevSilence
+		setupWatchdogPollInterval = prevPoll
+		setupMaxAttempts = prevAttempts
+	})
+
+	// Stub the Terminal launcher so we don't actually pop a Terminal
+	// window during the test. Capture the args so we can assert the
+	// hand-off received the same script/uv/daemon paths the in-process
+	// attempts would have used.
+	var terminalCalls int32
+	var lastArgs setupSpawnArgs
+	prevLauncher := launchTerminalInstallerFn
+	launchTerminalInstallerFn = func(args setupSpawnArgs) error {
+		atomic.AddInt32(&terminalCalls, 1)
+		lastArgs = args
+		return nil
+	}
+	t.Cleanup(func() { launchTerminalInstallerFn = prevLauncher })
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+
+	var spawnCount int32
+	prev := setupSpawnerFn
+	setupSpawnerFn = func(ctx context.Context, _ setupSpawnArgs) (*setupSpawnResult, error) {
+		atomic.AddInt32(&spawnCount, 1)
+		pr, _ := io.Pipe()
+		go func() {
+			<-ctx.Done()
+			_ = pr.Close()
+		}()
+		return &setupSpawnResult{
+			Stderr: pr,
+			Wait: func() error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}, nil
+	}
+	t.Cleanup(func() { setupSpawnerFn = prev })
+
+	_, err := a.RunSetup()
+	if err != nil {
+		t.Fatalf("RunSetup after Terminal hand-off = %v; want nil (hand-off should succeed quietly)", err)
+	}
+	if got := atomic.LoadInt32(&spawnCount); got != int32(setupMaxAttempts) {
+		t.Errorf("setupSpawnerFn invocations = %d; want %d", got, setupMaxAttempts)
+	}
+	if got := atomic.LoadInt32(&terminalCalls); got != 1 {
+		t.Errorf("launchTerminalInstallerFn invocations = %d; want 1 (single hand-off)", got)
+	}
+	if lastArgs.ScriptPath == "" {
+		t.Errorf("Terminal hand-off received empty ScriptPath; want a real path")
+	}
+
+	// SetupScreen should have received a setup_terminal_handoff event so
+	// the React side can show "auto-launched Terminal installer" copy.
+	gotHandoff := false
+	for _, ev := range rec.snapshot() {
+		if m, ok := ev.Event.(map[string]interface{}); ok {
+			if t, _ := m["type"].(string); t == "setup_terminal_handoff" {
+				gotHandoff = true
+				break
+			}
+		}
+	}
+	if !gotHandoff {
+		t.Errorf("setup_terminal_handoff event was never emitted; SetupScreen has no way to explain the hand-off to the user")
+	}
+	_ = errors.Is // keep the import live without forcing the failure path
 }
 
 // ---------------------------------------------------------------------------
