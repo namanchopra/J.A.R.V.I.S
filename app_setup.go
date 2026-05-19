@@ -334,6 +334,11 @@ func defaultSetupSpawner(ctx context.Context, args setupSpawnArgs) (*setupSpawnR
 	if err != nil {
 		return nil, fmt.Errorf("StderrPipe: %w", err)
 	}
+	// Discard stdout explicitly. Wails GUI launches inherit nil stdout
+	// which exec.Cmd routes to /dev/null already, but uv/pip versions
+	// have shipped that buffer thousands of progress lines and we don't
+	// want any future runner-shell to risk filling a pipe nobody reads.
+	cmd.Stdout = io.Discard
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start: %w", err)
 	}

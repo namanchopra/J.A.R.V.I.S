@@ -888,6 +888,80 @@ func TestStartJarvis_PrefersInstalledPython_OverBundle(t *testing.T) {
 	}
 }
 
+// TestStartJarvis_PrefersDaemonVenv_OverBaseInstalled regression-pins the
+// v0.2.2 fix for "jarvis won't pick up my voice after setup". Before the fix
+// StartJarvis preferred paths.InstalledPython() -- the BASE CPython tree
+// extracted by install-daemon.sh phase 1 -- which has no site-packages, so
+// the daemon crashed instantly with `ModuleNotFoundError: No module named
+// 'pipecat'`. The correct interpreter is the uv-managed venv created in
+// phase 2 at ~/.jarvis/jarvis-daemon-env/bin/python, which has pipecat +
+// every other dep on its sys.path.
+//
+// This test creates BOTH binaries on disk and asserts StartJarvis picks
+// the venv one.
+func TestStartJarvis_PrefersDaemonVenv_OverBaseInstalled(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error { return nil }
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	writeValidSentinel(t, fakeResources)
+
+	// Base CPython (the WRONG choice for daemon launches).
+	basePy := filepath.Join(paths.PythonInstallDir(), "bin", "python3")
+	if err := os.MkdirAll(filepath.Dir(basePy), 0o755); err != nil {
+		t.Fatalf("mkdir base python dir: %v", err)
+	}
+	if err := os.WriteFile(basePy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write base python: %v", err)
+	}
+
+	// Daemon venv python (the CORRECT choice).
+	venvPy := filepath.Join(paths.DaemonVenvDir(), "bin", "python")
+	if err := os.MkdirAll(filepath.Dir(venvPy), 0o755); err != nil {
+		t.Fatalf("mkdir venv python dir: %v", err)
+	}
+	if err := os.WriteFile(venvPy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write venv python: %v", err)
+	}
+
+	// Installed daemon script so StartJarvis doesn't bail before constructing cmd.
+	installedScript := filepath.Join(paths.DaemonSourceDir(), "main.py")
+	if err := os.MkdirAll(filepath.Dir(installedScript), 0o755); err != nil {
+		t.Fatalf("mkdir installed daemon dir: %v", err)
+	}
+	if err := os.WriteFile(installedScript, []byte("# main\n"), 0o644); err != nil {
+		t.Fatalf("write installed main.py: %v", err)
+	}
+
+	var capturedPath string
+	prevCmdFn := startJarvisCommandFn
+	startJarvisCommandFn = func(name string, arg ...string) *exec.Cmd {
+		capturedPath = name
+		return exec.Command("/bin/true")
+	}
+	t.Cleanup(func() { startJarvisCommandFn = prevCmdFn })
+
+	a := &App{}
+	_ = a.StartJarvis()
+	time.Sleep(100 * time.Millisecond)
+
+	if capturedPath == "" {
+		t.Fatalf("startJarvisCommandFn was never invoked; StartJarvis returned early")
+	}
+	if capturedPath != venvPy {
+		t.Errorf("StartJarvis used wrong python: got %q; want venv %q (base was %q)",
+			capturedPath, venvPy, basePy)
+	}
+}
+
 // TestPaths_InstalledPython_RespectsHomeOverride verifies the new
 // paths.InstalledPython helper added in TASK-009. The helper is a thin
 // "exists + is-file" check on ~/.jarvis/python/bin/python3.

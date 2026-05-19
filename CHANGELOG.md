@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.2] - 2026-05-20
+
+### Fixed
+- **Daemon now boots after first-launch setup.** `StartJarvis` was launching the daemon with the BASE CPython interpreter at `~/.jarvis/python/bin/python3` instead of the uv-managed venv at `~/.jarvis/jarvis-daemon-env/bin/python` — the base interpreter has no site-packages, so the daemon crashed instantly with `ModuleNotFoundError: No module named 'pipecat'` and Jarvis couldn't pick up the user's voice. Resolution order is now venv → base → bundled → dev, with the venv winning whenever it exists. Added `paths.InstalledDaemonVenvPython()` + a regression test (`TestStartJarvis_PrefersDaemonVenv_OverBaseInstalled`) so this can't silently regress.
+- **SetupScreen shows phase 1 progress immediately.** `install-daemon.sh` now emits `PHASE: python_install` + `PHASE_PROGRESS: 0` at the top of preflight, so the UI shows "Python — in progress" the moment setup starts instead of all four phases sitting in "pending" while preflight runs. Without this the install felt frozen.
+- **Granular preflight diagnostics.** Each preflight step (arch, Xcode CLT, disk space, PATH tools, uv binary, daemon source) now writes a per-check log line to `~/.jarvis/logs/setup.log` before running. A future hang during preflight will be diagnosable from the log without re-running the installer.
+- **Defensive stdout drain in the spawn step.** `defaultSetupSpawner` now sets `cmd.Stdout = io.Discard` explicitly. Wails GUI launches inherit nil stdout (routed to `/dev/null` by exec.Cmd) so no observable change in production, but pinning it removes a class of pipe-fill hangs that would have shown up if any future runner shell pre-attached an unread pipe to stdout.
+
 ## [0.2.1] - 2026-05-19
 
 ### Added

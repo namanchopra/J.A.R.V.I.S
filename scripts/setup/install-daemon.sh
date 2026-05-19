@@ -179,55 +179,60 @@ preflight() {
     ensure_log_dir
     log "preflight: starting"
 
+    # Emit phase 1 immediately so the SetupScreen shows "python_install:
+    # in-progress" during preflight instead of all-pending rows. Without
+    # this every silent ms of preflight feels like a hang to the user.
+    emit_phase "python_install"
+    emit_progress 0
+
     # Arch must be arm64 — python-build-standalone asset is arm64-only.
+    log "preflight: checking arch"
     local arch
     arch="$(uname -m)"
     if [[ "${arch}" != "arm64" ]]; then
-        emit_phase "python_install"
         emit_error "Jarvis requires Apple Silicon (arm64); detected ${arch}"
         exit 1
     fi
 
     # Xcode CLI tools required by some wheels that fall back to source builds.
+    log "preflight: checking xcode CLT"
     if ! xcode-select -p >/dev/null 2>&1; then
-        emit_phase "python_install"
         emit_error "Xcode Command Line Tools are not installed; run 'xcode-select --install' and retry setup"
         exit 1
     fi
 
     # Disk free in $HOME — `df -k` returns 1K blocks, NR==2 col $4 is "Available".
+    log "preflight: checking disk space"
     local free_kb
     free_kb="$(df -k "${HOME}" | awk 'NR==2 {print $4}' 2>/dev/null || echo 0)"
     if [[ -z "${free_kb}" || "${free_kb}" -lt "${MIN_FREE_DISK_KB}" ]]; then
-        emit_phase "python_install"
         emit_error "insufficient disk space in ${HOME}: need 4 GB free, have $((free_kb / 1024)) MB"
         exit 1
     fi
 
     # Required external tools.
+    log "preflight: checking PATH tools"
     for tool in curl shasum tar awk df mkdir mv rm rsync stat; do
         if ! command -v "${tool}" >/dev/null 2>&1; then
-            emit_phase "python_install"
             emit_error "required tool not found in PATH: ${tool}"
             exit 1
         fi
     done
 
     # uv binary must exist and be executable.
+    log "preflight: checking uv binary at ${UV_BIN}"
     if [[ ! -x "${UV_BIN}" ]]; then
-        emit_phase "venv_install"
         emit_error "uv binary not found or not executable at ${UV_BIN}"
         exit 1
     fi
 
     # Bundled daemon source must be a directory containing requirements.txt.
+    log "preflight: checking bundled daemon source at ${BUNDLED_DAEMON_SRC}"
     if [[ ! -d "${BUNDLED_DAEMON_SRC}" ]]; then
-        emit_phase "venv_install"
         emit_error "bundled daemon source not found at ${BUNDLED_DAEMON_SRC}"
         exit 1
     fi
     if [[ ! -f "${BUNDLED_DAEMON_SRC}/requirements.txt" ]]; then
-        emit_phase "venv_install"
         emit_error "bundled daemon source missing requirements.txt at ${BUNDLED_DAEMON_SRC}/requirements.txt"
         exit 1
     fi

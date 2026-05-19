@@ -90,13 +90,22 @@ func (a *App) StartJarvis() error {
 		}
 	}
 
-	// Resolve Python interpreter: user-installed → bundled → dev venv.
-	// install-daemon.sh writes the portable CPython tree to
-	// paths.PythonInstallDir() on first launch, so for any user who has
-	// completed setup the InstalledPython() branch wins. The bundled +
-	// dev fallbacks preserve compatibility for legacy builds and
-	// `wails dev` respectively.
-	pythonPath := paths.InstalledPython()
+	// Resolve Python interpreter (in preference order):
+	//   1. user-installed daemon venv (~/.jarvis/jarvis-daemon-env/bin/python)
+	//   2. user-installed base interpreter (~/.jarvis/python/bin/python3)
+	//      — only as a diagnostic last resort; missing pipecat will crash
+	//      the daemon, but at least the failure shows up in daemon.log
+	//   3. legacy bundled python (pre-v0.2.0 builds)
+	//   4. dev-mode venv (`wails dev` against a source-tree daemon-env)
+	//
+	// (1) is the correct production path: install-daemon.sh phase 2 puts
+	// pipecat + every other daemon dep into the venv. Booting the daemon
+	// from (2) instead -- as v0.2.0 and v0.2.1 did -- guaranteed a crash
+	// loop with `ModuleNotFoundError: No module named 'pipecat'`.
+	pythonPath := paths.InstalledDaemonVenvPython()
+	if pythonPath == "" {
+		pythonPath = paths.InstalledPython()
+	}
 	bundledPython := paths.BundledPython()
 	if pythonPath == "" {
 		pythonPath = bundledPython
@@ -112,7 +121,7 @@ func (a *App) StartJarvis() error {
 		// install must be corrupt — signal ErrDaemonLaunchFailed so App.tsx
 		// surfaces the amber banner with the daemon log link rather than
 		// the SetupScreen.
-		return fmt.Errorf("StartJarvis: %w: no Python interpreter found (tried installed, bundled, dev)",
+		return fmt.Errorf("StartJarvis: %w: no Python interpreter found (tried daemon-venv, installed, bundled, dev)",
 			setup.ErrDaemonLaunchFailed)
 	}
 	if _, err := os.Stat(pythonPath); err != nil {
@@ -163,6 +172,7 @@ func (a *App) StartJarvis() error {
 		"pid", cmd.Process.Pid,
 		"python", pythonPath,
 		"script", scriptPath,
+		"daemonVenv", paths.InstalledDaemonVenvPython() != "",
 		"installedPython", paths.InstalledPython() != "",
 		"bundled", bundledPython != "",
 	)

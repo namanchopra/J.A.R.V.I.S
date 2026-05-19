@@ -151,6 +151,12 @@ func SetupLogPath() string {
 // (TASK-009) to prefer the user-installed interpreter over the legacy bundled
 // one.
 //
+// IMPORTANT: this is the BASE interpreter only -- it has no site-packages.
+// To launch the daemon you almost always want InstalledDaemonVenvPython()
+// instead, which resolves to the uv-managed venv that has pipecat + every
+// other runtime dep on its sys.path. See app_jarvis.go's launch resolver
+// for the correct preference order.
+//
 // We do NOT verify the execute bit here — install-daemon.sh writes the
 // interpreter with 0o755 and shells out to it during phase 2 to materialise
 // the venv, so by the time StartJarvis consults this helper, exec-ability has
@@ -159,6 +165,23 @@ func SetupLogPath() string {
 // ErrDaemonLaunchFailed, which is exactly the diagnostic we want.
 func InstalledPython() string {
 	p := filepath.Join(PythonInstallDir(), "bin", "python3")
+	info, err := os.Stat(p)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	return p
+}
+
+// InstalledDaemonVenvPython returns ~/.jarvis/jarvis-daemon-env/bin/python
+// if it exists and is a regular file, else "". install-daemon.sh phase 2
+// (TASK-004) creates this venv via `uv venv` against the InstalledPython
+// interpreter and runs `uv pip install -r requirements.txt` into it -- so
+// this binary is the ONLY Python that has pipecat, mlx-whisper, vibevoice,
+// etc. on its sys.path. StartJarvis MUST prefer this over InstalledPython
+// for daemon launches; using the base interpreter triggers a `No module
+// named 'pipecat'` crash loop the moment the daemon starts importing.
+func InstalledDaemonVenvPython() string {
+	p := filepath.Join(DaemonVenvDir(), "bin", "python")
 	info, err := os.Stat(p)
 	if err != nil || info.IsDir() {
 		return ""
