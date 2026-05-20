@@ -13,6 +13,7 @@ import {impact} from '../models';
 import {jarvis} from '../models';
 import {git} from '../models';
 import {recording} from '../models';
+import {setup} from '../models';
 import {terminal} from '../models';
 import {store} from '../models';
 
@@ -142,6 +143,8 @@ export function GetSessionTerminalOutput(arg1:number):Promise<string>;
 
 export function GetSessionTodos(arg1:string):Promise<Array<model.SessionTodo>>;
 
+export function GetSetupState():Promise<setup.SetupState>;
+
 export function GetStagedDiff(arg1:string):Promise<git.DiffResult>;
 
 export function GetTask(arg1:string):Promise<model.Task>;
@@ -196,6 +199,8 @@ export function IsJarvisDaemonConnected():Promise<boolean>;
 
 export function IsOllamaRunning():Promise<boolean>;
 
+export function IsSetupComplete():Promise<boolean>;
+
 export function LaunchFromTemplate(arg1:string):Promise<void>;
 
 export function LaunchReposInTerminal(arg1:Array<string>,arg2:string,arg3:Array<boolean>):Promise<void>;
@@ -226,6 +231,8 @@ export function OpenFileForImport():Promise<string>;
 
 export function OpenPRInBrowser(arg1:string):Promise<void>;
 
+export function OpenSetupLog():Promise<void>;
+
 export function OpenURL(arg1:string):Promise<void>;
 
 export function OpenWorkspaceInTerminal(arg1:string):Promise<void>;
@@ -253,6 +260,8 @@ export function RespondToApproval(arg1:number,arg2:string):Promise<void>;
 export function RestartJarvis():Promise<void>;
 
 export function ResumeSession(arg1:string):Promise<model.Session>;
+
+export function RunSetup():Promise<setup.SetupState>;
 
 export function SaveConfig(arg1:config.Config):Promise<config.SaveResult>;
 

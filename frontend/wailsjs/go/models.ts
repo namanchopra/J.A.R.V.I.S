@@ -220,6 +220,7 @@ export namespace config {
 	    googleAPIKey?: string;
 	    anthropicAPIKey?: string;
 	    cartesiaAPIKey?: string;
+	    llmModel?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -264,6 +265,7 @@ export namespace config {
 	        this.googleAPIKey = source["googleAPIKey"];
 	        this.anthropicAPIKey = source["anthropicAPIKey"];
 	        this.cartesiaAPIKey = source["cartesiaAPIKey"];
+	        this.llmModel = source["llmModel"];
 	    }
 	}
 	export class SaveResult {
@@ -1505,6 +1507,33 @@ export namespace recording {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace setup {
+	
+	export class SetupState {
+	    complete: boolean;
+	    phase?: string;
+	    phaseProgress: number;
+	    phaseDoneCount: number;
+	    setupVersion: string;
+	    lastError?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SetupState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.complete = source["complete"];
+	        this.phase = source["phase"];
+	        this.phaseProgress = source["phaseProgress"];
+	        this.phaseDoneCount = source["phaseDoneCount"];
+	        this.setupVersion = source["setupVersion"];
+	        this.lastError = source["lastError"];
+	    }
 	}
 
 }

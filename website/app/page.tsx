@@ -9,7 +9,7 @@ const RELEASES_URL = `${REPO_URL}/releases/latest`
 // site never serves a 404 even if the GitHub API call below fails at
 // build time (e.g. rate-limited or offline). Bump this whenever a new
 // tag ships; `fetchLatestVersion` will override it on every cache miss.
-const FALLBACK_VERSION = '0.2.4'
+const FALLBACK_VERSION = '0.2.5'
 
 /** Latest release tag (e.g. "0.1.6"), fetched once per hour at build time. */
 async function fetchLatestVersion(): Promise<string> {

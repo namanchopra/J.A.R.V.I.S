@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.5] - 2026-05-20
+
+### Fixed
+- **Bundle paths in `resolveSetupSpawnArgs` corrected.** v0.2.0..v0.2.4 looked for the setup payload at `Resources/scripts/setup/install-daemon.sh` and `Resources/uv` — but `post-build.sh` actually puts them at `Resources/setup/install-daemon.sh` and `Resources/setup/uv`. Result: install-daemon.sh either fell through to a source-tree relative path (only worked when launching the binary from the project root, i.e. dev/test) or PHASE_ERROR'd with `uv binary not found at` (empty path). For real users launching the .app from /Applications via Finder, install never completed.
+- Verified end-to-end with a local `wails build` + `post-build.sh` + run-the-bundled-binary cycle. The locally-built .app downloaded python-build-standalone, created the daemon venv, installed 180+ packages including pipecat + torch + vibevoice + transformers, synced the daemon source, and wrote the sentinel — all unattended.
+
 ## [0.2.4] - 2026-05-20
 
 ### Fixed

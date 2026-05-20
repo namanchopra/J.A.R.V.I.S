@@ -254,6 +254,10 @@ export function GetSessionTodos(arg1) {
   return window['go']['main']['App']['GetSessionTodos'](arg1);
 }
 
+export function GetSetupState() {
+  return window['go']['main']['App']['GetSetupState']();
+}
+
 export function GetStagedDiff(arg1) {
   return window['go']['main']['App']['GetStagedDiff'](arg1);
 }
@@ -362,6 +366,10 @@ export function IsOllamaRunning() {
   return window['go']['main']['App']['IsOllamaRunning']();
 }
 
+export function IsSetupComplete() {
+  return window['go']['main']['App']['IsSetupComplete']();
+}
+
 export function LaunchFromTemplate(arg1) {
   return window['go']['main']['App']['LaunchFromTemplate'](arg1);
 }
@@ -422,6 +430,10 @@ export function OpenPRInBrowser(arg1) {
   return window['go']['main']['App']['OpenPRInBrowser'](arg1);
 }
 
+export function OpenSetupLog() {
+  return window['go']['main']['App']['OpenSetupLog']();
+}
+
 export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
 }
@@ -476,6 +488,10 @@ export function RestartJarvis() {
 
 export function ResumeSession(arg1) {
   return window['go']['main']['App']['ResumeSession'](arg1);
+}
+
+export function RunSetup() {
+  return window['go']['main']['App']['RunSetup']();
 }
 
 export function SaveConfig(arg1) {

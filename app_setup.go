@@ -382,12 +382,24 @@ func defaultSetupSpawner(ctx context.Context, args setupSpawnArgs) (*setupSpawnR
 // either the .app bundle (production) or the source tree (dev / test). Errors
 // only when the install script itself cannot be located. uv and daemon-source
 // missing are deferred to the script's own checks (which emit PHASE_ERROR).
+//
+// Bundle layout (post-build.sh, TASK-005): all setup payload lives under
+// Resources/setup/. Specifically:
+//   - Resources/setup/install-daemon.sh
+//   - Resources/setup/uv
+//   - Resources/jarvis-daemon/  (the python source, NOT under setup/)
+//
+// v0.2.4 and earlier looked at Resources/scripts/setup/install-daemon.sh
+// and Resources/uv, both wrong -- the script silently fell back to a
+// source-tree relative path and uv to an empty string, causing
+// install-daemon.sh to PHASE_ERROR with "uv binary not found at "
+// (empty path).
 func resolveSetupSpawnArgs() (setupSpawnArgs, error) {
-	// Script: prefer bundled <Resources>/scripts/setup/install-daemon.sh,
-	// fall back to source tree.
+	// Script: prefer bundled <Resources>/setup/install-daemon.sh, fall back
+	// to source tree.
 	scriptPath := ""
 	if res := paths.BundledResourcesDir(); res != "" {
-		candidate := filepath.Join(res, "scripts", "setup", "install-daemon.sh")
+		candidate := filepath.Join(res, "setup", "install-daemon.sh")
 		if _, err := os.Stat(candidate); err == nil {
 			scriptPath = candidate
 		}
@@ -408,14 +420,15 @@ func resolveSetupSpawnArgs() (setupSpawnArgs, error) {
 		}
 	}
 	if scriptPath == "" {
-		return setupSpawnArgs{}, fmt.Errorf("install-daemon.sh not found (tried bundled <Resources>/scripts/setup/install-daemon.sh and source-tree paths)")
+		return setupSpawnArgs{}, fmt.Errorf("install-daemon.sh not found (tried bundled <Resources>/setup/install-daemon.sh and source-tree paths)")
 	}
 
-	// uv binary: bundled <Resources>/uv (the .app ships a pinned uv), or
-	// whatever `uv` resolves to on $PATH for dev.
+	// uv binary: bundled <Resources>/setup/uv (the .app ships a pinned uv
+	// alongside install-daemon.sh), or whatever `uv` resolves to on $PATH
+	// for dev.
 	uvPath := ""
 	if res := paths.BundledResourcesDir(); res != "" {
-		candidate := filepath.Join(res, "uv")
+		candidate := filepath.Join(res, "setup", "uv")
 		if _, err := os.Stat(candidate); err == nil {
 			uvPath = candidate
 		}
