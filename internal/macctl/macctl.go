@@ -95,21 +95,8 @@ func NewController(policy *Policy) *Controller {
 }
 
 // --- Apps + windows (TASK-011) ---
-
-// OpenApp launches or foregrounds the named application. TASK-011 will
-// shell `open -a "Name"`. Returns the app name on success.
-func (c *Controller) OpenApp(name string) (string, error) { return "", ErrNotImplemented }
-
-// QuitApp gracefully terminates the named application via the AppleScript
-// `tell application "Name" to quit` idiom. Destructive; TASK-011 will gate
-// on policy.Check("mac_quit_app") before issuing the script.
-func (c *Controller) QuitApp(name string) (string, error) { return "", ErrNotImplemented }
-
-// FocusWindow brings the (app, title substring) window to the foreground.
-// TASK-011 will use System Events to enumerate windows under the named
-// process and match title by substring. Returns ErrWindowNotFound when
-// no match exists.
-func (c *Controller) FocusWindow(app, title string) (string, error) { return "", ErrNotImplemented }
+// Implementations live in apps.go (OpenApp, QuitApp) and windows.go
+// (FocusWindow).
 
 // --- Audio + display (TASK-012) ---
 
