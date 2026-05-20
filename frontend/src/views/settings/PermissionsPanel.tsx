@@ -118,6 +118,11 @@ const TOOL_GROUPS: ReadonlyArray<ToolGroup> = [
 interface MacctlBindings {
   GetMacctlPolicy?: () => Promise<Record<string, string>>
   SetMacctlPolicy?: (tool: string, decision: string) => Promise<void>
+  // TASK-028 — manual "Test push" trigger. Fans an Expo push notification
+  // out to every paired Friday device. The binding is optional in the type
+  // so the panel stays buildable on branches where `wails generate module`
+  // hasn't been rerun (same resilience pattern as the macctl bindings).
+  JarvisSendTestPush?: () => Promise<string>
 }
 
 function macctlBindings(): MacctlBindings | null {
@@ -276,6 +281,41 @@ export function PermissionsPanel({ activeTab }: PermissionsPanelProps): React.Re
   }, [toast])
 
   // ---------------------------------------------------------------
+  // TASK-028 -- "Test push" button. Fans a notification out to every paired
+  // Friday device via the JarvisSendTestPush Wails binding (app_push.go).
+  // Surfaces the result via the same toast channel as the policy writes so
+  // there's a single visual feedback path for the panel.
+  //
+  // Local in-flight flag (testPushPending) disables the button while the
+  // request is in-flight -- the round-trip to Expo's push service takes
+  // ~200-800ms and a frantic double-click would otherwise fire two pushes.
+  // ---------------------------------------------------------------
+  const [testPushPending, setTestPushPending] = useState<boolean>(false)
+  const handleTestPush = useCallback(async (): Promise<void> => {
+    setTestPushPending(true)
+    try {
+      const app = macctlBindings()
+      if (!app?.JarvisSendTestPush) {
+        setToast({
+          text: 'JarvisSendTestPush binding unavailable — restart Jarvis after build.',
+          type: 'error',
+        })
+        return
+      }
+      // Go returns a status string on success ("Sent test push to N device(s).")
+      // and an Error on failure ("no push tokens registered", etc.). Surface
+      // both verbatim so the maintainer can debug from the toast alone.
+      const status = await app.JarvisSendTestPush()
+      setToast({ text: status || 'Test push sent — check your phone.', type: 'success' })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setToast({ text: `Test push failed: ${msg}`, type: 'error' })
+    } finally {
+      setTestPushPending(false)
+    }
+  }, [])
+
+  // ---------------------------------------------------------------
   // Optimistic write. Snap the UI to the new value first; revert on error.
   // This keeps the segmented control feeling instant even on a slow
   // SetMacctlPolicy round-trip and prevents the row from briefly jumping
@@ -339,6 +379,57 @@ export function PermissionsPanel({ activeTab }: PermissionsPanelProps): React.Re
           Stored at <span style={{ color: 'rgba(0,229,255,0.7)' }}>~/.jarvis/policy.json</span>.
           Changes save instantly.
         </p>
+      </section>
+
+      {/* ---------------------------------------------------------- */}
+      {/* TASK-028 -- Test push button. Fans an Expo push notification */}
+      {/* out to every paired Friday device. Lives in the Permissions  */}
+      {/* tab per the v0.3.0 plan rather than its own dedicated panel  */}
+      {/* because push is the same "Mac reaching the phone" surface    */}
+      {/* the tool permissions govern -- a maintainer auditing per-    */}
+      {/* tool decisions is exactly the person who wants to verify the */}
+      {/* phone is reachable end-to-end.                               */}
+      {/* ---------------------------------------------------------- */}
+      <section className="holo-panel p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <h3
+              className="text-xs font-semibold text-[#00e5ff] mb-1"
+              style={{
+                fontFamily: "'SF Mono', 'Menlo', monospace",
+                letterSpacing: '0.18em',
+                textTransform: 'uppercase',
+              }}
+            >
+              ▸ Push Notifications
+            </h3>
+            <p className="text-[11px] text-[#8ba4b8]">
+              Send a test notification to every paired Friday device. Verify the Mac can reach your
+              phone end-to-end before relying on session alerts.
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="permissions-test-push-button"
+            disabled={testPushPending}
+            onClick={() => void handleTestPush()}
+            className="text-[11px] px-4 py-2 transition-all disabled:opacity-50 flex-shrink-0"
+            style={{
+              fontFamily: "'SF Mono', 'Menlo', monospace",
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              fontWeight: 600,
+              background: testPushPending ? 'rgba(0, 229, 255, 0.04)' : 'rgba(0, 229, 255, 0.08)',
+              color: '#00e5ff',
+              border: '1px solid rgba(0, 229, 255, 0.4)',
+              borderRadius: '3px',
+              cursor: testPushPending ? 'wait' : 'pointer',
+              boxShadow: testPushPending ? 'none' : '0 0 10px rgba(0, 229, 255, 0.18)',
+            }}
+          >
+            {testPushPending ? 'Sending…' : 'Test push'}
+          </button>
+        </div>
       </section>
 
       {/* ---------------------------------------------------------- */}
