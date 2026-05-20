@@ -36,36 +36,16 @@ func TestNewControllerReturnsNonNil(t *testing.T) {
 // reporting fake successes to the user. Returning "" + ErrNotImplemented
 // is the only acceptable stub shape.
 func TestStubsReturnErrNotImplemented(t *testing.T) {
-	c := NewController(NewDefaultPolicy())
+	// All Controller methods are now implemented in Wave 1a/1b. This test
+	// is intentionally a no-op kept for posterity — if a future task adds
+	// a stub-back method, re-populate the closure list here.
+	_ = NewController(NewDefaultPolicy())
 
-	// stringStub covers the 14 methods returning (string, error). Each
-	// case names the method and supplies a closure that invokes it with
-	// representative arguments. The arguments are irrelevant for stub
-	// behavior (every code path returns the sentinel) but using
-	// realistic values documents the intended signature for readers.
 	stringStubs := []struct {
 		name string
 		call func() (string, error)
 	}{
-		// --- TASK-011: apps + windows ---
-		// OpenApp, QuitApp, FocusWindow are implemented; tests live below.
-
-		// --- TASK-012: audio + display ---
-		{"SetVolume", func() (string, error) { return c.SetVolume(50) }},
-		{"Mute", func() (string, error) { return c.Mute() }},
-		{"Unmute", func() (string, error) { return c.Unmute() }},
-		{"SetBrightness", func() (string, error) { return c.SetBrightness(75) }},
-		{"ToggleDND", func() (string, error) { return c.ToggleDND() }},
-
-		// --- TASK-013: files + clipboard + screenshots ---
-		{"OpenPath", func() (string, error) { return c.OpenPath("/tmp") }},
-		{"Spotlight", func() (string, error) { return c.Spotlight("README") }},
-		{"Screenshot", func() (string, error) { return c.Screenshot("screen") }},
-		{"ClipboardGet", func() (string, error) { return c.ClipboardGet() }},
-		{"ClipboardSet", func() (string, error) { return c.ClipboardSet("hello") }},
-
-		// --- TASK-014: shortcuts ---
-		// ListShortcuts, RunShortcut are implemented; tests live below.
+		// All implemented. Add new stubs here when reverting work-in-progress.
 	}
 
 	for _, tc := range stringStubs {

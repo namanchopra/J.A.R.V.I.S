@@ -31,6 +31,7 @@ var ErrWindowNotFound = errors.New("macctl: window not found")
 // not installed on the host. The Controller degrades gracefully — it
 // returns this typed error so callers can prompt the user to install
 // the missing dependency rather than reporting a generic exec failure.
+var ErrInvalidArg = errors.New("macctl: invalid argument")
 var ErrToolUnavailable = errors.New("macctl: required tool unavailable")
 
 // osascriptFn is a test seam — production passes a closure that shells
@@ -103,25 +104,20 @@ func NewController(policy *Policy) *Controller {
 // SetVolume sets the system output volume to pct (0..100). TASK-012 will
 // shell `osascript -e "set volume output volume <pct>"`. Values outside
 // 0..100 will be rejected with a typed error.
-func (c *Controller) SetVolume(pct int) (string, error) { return "", ErrNotImplemented }
 
 // Mute sets the output-muted property to true. TASK-012 will use
 // `set volume with output muted`. Idempotent — muting a muted device
 // is a no-op.
-func (c *Controller) Mute() (string, error) { return "", ErrNotImplemented }
 
 // Unmute sets the output-muted property to false. Counterpart to Mute.
-func (c *Controller) Unmute() (string, error) { return "", ErrNotImplemented }
 
 // SetBrightness sets the display brightness to pct (0..100). TASK-012
 // will shell the `brightness` CLI; if not installed it returns
 // ErrToolUnavailable rather than crashing.
-func (c *Controller) SetBrightness(pct int) (string, error) { return "", ErrNotImplemented }
 
 // ToggleDND toggles macOS Do Not Disturb. TASK-012 will route through
 // the built-in "Set Focus" Shortcuts.app shortcut to avoid private-API
 // danger (Apple removed the public defaults-write recipe in Monterey).
-func (c *Controller) ToggleDND() (string, error) { return "", ErrNotImplemented }
 
 // --- Files + clipboard + screenshots (TASK-013) ---
 
@@ -129,26 +125,21 @@ func (c *Controller) ToggleDND() (string, error) { return "", ErrNotImplemented 
 // (the `open` command treats both uniformly). TASK-013 will surface a
 // clear error if the path doesn't exist rather than letting `open`
 // silently succeed.
-func (c *Controller) OpenPath(path string) (string, error) { return "", ErrNotImplemented }
 
 // Spotlight runs `mdfind <query>` and returns up to 20 matching paths,
 // newline-separated. Read-only by policy default.
-func (c *Controller) Spotlight(query string) (string, error) { return "", ErrNotImplemented }
 
 // Screenshot shells `screencapture` with the appropriate flag for the
 // target. Valid targets: "screen" (full), "window" (interactive window
 // picker), "selection" (drag rectangle). TASK-013 will write the output
 // to ~/.jarvis/screenshots/<timestamp>.png and return the file path.
-func (c *Controller) Screenshot(target string) (string, error) { return "", ErrNotImplemented }
 
 // ClipboardGet shells `pbpaste` and returns the current clipboard text.
 // Returns "" + nil when the clipboard is empty (not an error condition).
-func (c *Controller) ClipboardGet() (string, error) { return "", ErrNotImplemented }
 
 // ClipboardSet shells `pbcopy` and writes text to the clipboard.
 // Destructive (overwrites whatever the user had copied); gated on
 // policy.Check("mac_clipboard_set").
-func (c *Controller) ClipboardSet(text string) (string, error) { return "", ErrNotImplemented }
 
 // --- Shortcuts (TASK-014) ---
 // Implementations live in shortcuts.go (ListShortcuts, RunShortcut).
