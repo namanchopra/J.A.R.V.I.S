@@ -58,6 +58,39 @@ import (
 // so this PR can land without the secret-injection dance.
 const defaultSpotifyClientID = "REPLACE_ME_WITH_REAL_CLIENT_ID"
 
+// ---------------------------------------------------------------------------
+// Test seams — TASK-030.
+//
+// These indirections let app_spotify_test.go exercise the full
+// SpotifySearchAndPlay roundtrip without burning a real osascript subprocess
+// or hitting the real Spotify Web API. Production code paths are unchanged:
+// both vars default to the real implementations and are mutated only by
+// tests (via t.Cleanup-restored swaps).
+//
+// Why two seams instead of one giant injectable client?
+//   - spotifyAppleScriptPlayFn   — substituting at the Play() boundary keeps
+//                                  the test surface tiny: a single func
+//                                  signature, easy to record.
+//   - spotifyWebBaseURLOverride  — non-empty string redirects the Web API
+//                                  client to an httptest.Server URL. Empty
+//                                  in production means "use the package
+//                                  default api.spotify.com" — i.e. the
+//                                  hot path is one extra string compare.
+// ---------------------------------------------------------------------------
+
+// spotifyAppleScriptPlayFn is the indirection SpotifySearchAndPlay calls so
+// tests can capture the URI without invoking the real `osascript` binary.
+// Production code path is unchanged: this dispatches to spotify.NewAppleScript().Play.
+var spotifyAppleScriptPlayFn = func(uri string) error {
+	return spotify.NewAppleScript().Play(uri)
+}
+
+// spotifyWebBaseURLOverride, when non-empty, redirects the Spotify Web API
+// HTTP client at the given URL via spotify.Client.WithBaseURL. Tests set
+// this to an httptest.Server URL; production leaves it empty so the client
+// hits the real api.spotify.com. Set inside tests; restored via t.Cleanup.
+var spotifyWebBaseURLOverride = ""
+
 // spotifyClientID returns the client id to use for OAuth. Prefers a
 // user-supplied id in config (for self-hosters who want their own quota)
 // and falls back to the Jarvis-bundled default.
@@ -182,6 +215,12 @@ func (a *App) SpotifySearchAndPlay(query string) (string, error) {
 	}
 
 	client := spotify.NewClient(&cfg.Spotify, saveCfg)
+	// In tests, spotifyWebBaseURLOverride points at an httptest.Server URL
+	// so client.Search hits a mock instead of api.spotify.com. Empty in
+	// production — the package default in internal/spotify/web.go wins.
+	if spotifyWebBaseURLOverride != "" {
+		client = client.WithBaseURL(spotifyWebBaseURLOverride)
+	}
 	tracks, err := client.Search(query, []string{"track"})
 	if err != nil {
 		return "", fmt.Errorf("SpotifySearchAndPlay: %w", err)
@@ -191,7 +230,7 @@ func (a *App) SpotifySearchAndPlay(query string) (string, error) {
 	}
 
 	top := tracks[0]
-	if err := spotify.NewAppleScript().Play(top.URI); err != nil {
+	if err := spotifyAppleScriptPlayFn(top.URI); err != nil {
 		return "", fmt.Errorf("SpotifySearchAndPlay: applescript play: %w", err)
 	}
 	return fmt.Sprintf("Playing %s by %s", top.Name, top.Artist), nil
