@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { SettingsView } from './views/SettingsView'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { JarvisHudView } from './components/JarvisHudView'
@@ -16,6 +16,11 @@ import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime'
 interface SetupBindings {
   IsSetupComplete?: () => Promise<boolean>
   OpenDaemonLog?: () => Promise<void>
+  // RunSetup kicks off install-daemon.sh. v0.2.0..v0.2.3 shipped this binding
+  // but never wired up the trigger -- the SetupScreen would mount and just sit
+  // forever because nothing actually started the install. v0.2.4 fires it
+  // from the App.tsx setup gate the moment isSetupComplete resolves to false.
+  RunSetup?: () => Promise<unknown>
 }
 
 function setupBindings(): SetupBindings | null {
@@ -77,6 +82,13 @@ function App(): React.ReactElement {
   const [firstRun, setFirstRun] = useState<boolean | null>(null)
   const [showSettings, setShowSettings] = useState(false)
 
+  // Guard against firing RunSetup more than once per session. RunSetup
+  // itself is dedup'd by sync.Mutex on the Go side, but we still don't want
+  // to spam it -- a React re-render that flips isSetupComplete null->false
+  // a second time (shouldn't happen but defensively guarded) must not
+  // re-fire.
+  const setupRunFiredRef = useRef(false)
+
   // Initial setup check on mount. If the binding isn't generated yet (dev
   // mode pre-wails-build), default to true so we don't trap the maintainer
   // behind a SetupScreen they don't need.
@@ -91,6 +103,33 @@ function App(): React.ReactElement {
       .then((v: boolean) => setIsSetupComplete(Boolean(v)))
       .catch(() => setIsSetupComplete(true))
   }, [])
+
+  // v0.2.4: kick off the install the moment isSetupComplete resolves to
+  // false. v0.2.0..v0.2.3 shipped the SetupScreen and the RunSetup binding
+  // but never wired this trigger, so users saw an empty SetupScreen forever
+  // because install-daemon.sh was never spawned. The Go-side mutex makes
+  // calling RunSetup a no-op if a previous attempt is already in flight, so
+  // the ref guard here is belt-and-braces.
+  useEffect(() => {
+    if (isSetupComplete !== false) return
+    if (setupRunFiredRef.current) return
+    const bindings = setupBindings()
+    if (typeof bindings?.RunSetup !== 'function') {
+      // Binding not regenerated yet (dev mode). Setup will fall through to
+      // manual `wails generate module` + relaunch path; no auto-recovery
+      // possible here because the runtime literally cannot reach Go.
+      console.warn('App: window.go.main.App.RunSetup not available; install will not auto-start')
+      return
+    }
+    setupRunFiredRef.current = true
+    bindings.RunSetup().catch((err: unknown) => {
+      // Don't unset setupRunFiredRef on error -- the Go side already
+      // surfaces the error via emitErrorEvent → setup_progress {state:error},
+      // and the SetupScreen renders a retry button per phase. Re-firing
+      // from here would spam Go without giving the user a chance to act.
+      console.warn('App: RunSetup rejected', err)
+    })
+  }, [isSetupComplete])
 
   // Subscribe to 'setup' channel — when setup completes mid-session (user
   // clicks Apply Now or installs finish), flip the gate without page reload.

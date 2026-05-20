@@ -33,6 +33,17 @@ describe('App.tsx v0.2.0 setup gate (TASK-012)', () => {
     expect(SOURCE).toMatch(/setIsSetupComplete\(true\)/)
   })
 
+  it('auto-fires RunSetup when isSetupComplete resolves to false (v0.2.4)', () => {
+    // Regression pin: v0.2.0..v0.2.3 shipped the binding but never wired the
+    // trigger, so the SetupScreen would mount forever without anything
+    // spawning install-daemon.sh. v0.2.4 fires RunSetup from a useEffect
+    // gated on isSetupComplete === false, with a ref guard so it only
+    // fires once per session.
+    expect(SOURCE).toMatch(/setupRunFiredRef/)
+    expect(SOURCE).toMatch(/if\s*\(\s*isSetupComplete\s*!==\s*false\s*\)\s*return/)
+    expect(SOURCE).toMatch(/bindings\.RunSetup\(\)/)
+  })
+
   it('subscribes to EventsOn for the "setup" channel', () => {
     expect(SOURCE).toMatch(/EventsOn\(\s*['"]setup['"]/)
   })

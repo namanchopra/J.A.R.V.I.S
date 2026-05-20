@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.4] - 2026-05-20
+
+### Fixed
+- **Setup actually runs now.** v0.2.0..v0.2.3 shipped the `RunSetup` Wails binding but never wired the trigger — nothing in production code called it. Users with no sentinel saw the SetupScreen mount and then sit forever because `install-daemon.sh` was never spawned (no `setup.log` was even being written, which is how this got caught). `App.tsx` now fires `RunSetup()` from a `useEffect` gated on `isSetupComplete === false`, with a `setupRunFiredRef` guard so it only fires once per session. The Go-side `sync.Mutex` is belt-and-braces dedup. Regression pinned by a new `App.test.tsx` source assertion.
+
 ## [0.2.3] - 2026-05-20
 
 ### Added
