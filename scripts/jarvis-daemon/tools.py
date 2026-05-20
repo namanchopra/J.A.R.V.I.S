@@ -599,6 +599,11 @@ class ToolExecutor:
                 "message": f"Spotify {action} isn't wired up yet — landing in a follow-up.",
             }
 
+        # v0.3.0/TASK-015 -- mac_* executor dispatch.
+        macctl_result = await self._maybe_execute_macctl(name, args)
+        if macctl_result is not None:
+            return macctl_result
+
         call_id = str(uuid.uuid4())
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -711,3 +716,341 @@ class ToolExecutor:
         if count:
             logger.info("Cancelled %d pending tool call(s)", count)
         return count
+
+    # v0.3.0/TASK-015 -- mac_* executor implementation.
+    #
+    # Lives in its own method (rather than inline in execute()) so the
+    # fallback generic dispatch above stays compact and so unit tests can
+    # exercise the mac_* surface in isolation by calling
+    # ``executor._maybe_execute_macctl(...)`` directly.
+    #
+    # Returns ``None`` when ``name`` is not a mac_* tool, signalling
+    # ``execute`` to continue with the generic WS forwarder. Returns the
+    # full ``{"ok": ..., "message": ...}`` envelope otherwise.
+    # -----------------------------------------------------------------------
+    async def _maybe_execute_macctl(
+        self,
+        name: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Dispatch mac_* tool calls; return None for non-mac names."""
+        if not name.startswith("mac_"):
+            return None
+
+        def _is_policy_deny(err: Any) -> bool:
+            err_str = str(err).lower()
+            return "errpolicydeny" in err_str or "denied by policy" in err_str
+
+        # ---- Apps + windows ----
+        if name == "mac_open_app":
+            app_name = (params.get("name") or "").strip()
+            if not app_name:
+                return {"ok": False, "message": "I need an app name to open."}
+            result = await self._call_wails("MacOpenApp", [app_name])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": f"I'm not permitted to open {app_name}."}
+                return {"ok": False, "message": f"Couldn't open {app_name}: {err}"}
+            return {"ok": True, "message": f"Opened {app_name}."}
+
+        if name == "mac_quit_app":
+            app_name = (params.get("name") or "").strip()
+            if not app_name:
+                return {"ok": False, "message": "I need an app name to quit."}
+            result = await self._call_wails("MacQuitApp", [app_name])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": f"I'm not permitted to quit {app_name}."}
+                return {"ok": False, "message": f"Couldn't quit {app_name}: {err}"}
+            return {"ok": True, "message": f"Quit {app_name}."}
+
+        if name == "mac_focus_window":
+            app_name = (params.get("app") or "").strip()
+            title = (params.get("title") or "").strip()
+            if not app_name or not title:
+                return {
+                    "ok": False,
+                    "message": "I need both an app and a window title to focus.",
+                }
+            result = await self._call_wails("MacFocusWindow", [app_name, title])
+            err = result.get("error")
+            if err:
+                err_str = str(err).lower()
+                if _is_policy_deny(err):
+                    return {
+                        "ok": False,
+                        "message": f"I'm not permitted to focus {app_name} windows.",
+                    }
+                if "window not found" in err_str or "errwindownotfound" in err_str:
+                    return {
+                        "ok": False,
+                        "message": f"I couldn't find a {app_name} window matching '{title}'.",
+                    }
+                return {"ok": False, "message": f"Couldn't focus {app_name}: {err}"}
+            return {"ok": True, "message": f"Focused {app_name}."}
+
+        # ---- Audio + display ----
+        if name == "mac_set_volume":
+            raw_pct = params.get("pct", params.get("percent"))
+            try:
+                pct = int(raw_pct)
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "message": "I need a volume percentage between 0 and 100.",
+                }
+            if pct < 0 or pct > 100:
+                return {
+                    "ok": False,
+                    "message": "Volume must be between 0 and 100.",
+                }
+            result = await self._call_wails("MacSetVolume", [pct])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to change the volume."}
+                return {"ok": False, "message": f"Couldn't set volume: {err}"}
+            return {"ok": True, "message": f"Volume set to {pct}."}
+
+        if name == "mac_mute":
+            result = await self._call_wails("MacMute", [])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to mute the system."}
+                return {"ok": False, "message": f"Couldn't mute: {err}"}
+            return {"ok": True, "message": "Muted."}
+
+        if name == "mac_unmute":
+            result = await self._call_wails("MacUnmute", [])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to unmute the system."}
+                return {"ok": False, "message": f"Couldn't unmute: {err}"}
+            return {"ok": True, "message": "Unmuted."}
+
+        if name == "mac_set_brightness":
+            raw_pct = params.get("pct", params.get("percent"))
+            try:
+                pct = int(raw_pct)
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "message": "I need a brightness percentage between 0 and 100.",
+                }
+            if pct < 0 or pct > 100:
+                return {
+                    "ok": False,
+                    "message": "Brightness must be between 0 and 100.",
+                }
+            result = await self._call_wails("MacSetBrightness", [pct])
+            err = result.get("error")
+            if err:
+                err_str = str(err).lower()
+                if _is_policy_deny(err):
+                    return {
+                        "ok": False,
+                        "message": "I'm not permitted to change the brightness.",
+                    }
+                if "errtoolunavailable" in err_str or "tool unavailable" in err_str:
+                    return {
+                        "ok": False,
+                        "message": (
+                            "The brightness CLI isn't installed -- "
+                            "install it with `brew install brightness` first."
+                        ),
+                    }
+                return {"ok": False, "message": f"Couldn't set brightness: {err}"}
+            return {"ok": True, "message": f"Brightness set to {pct}."}
+
+        if name == "mac_toggle_dnd":
+            result = await self._call_wails("MacToggleDND", [])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to toggle Do Not Disturb."}
+                return {"ok": False, "message": f"Couldn't toggle Do Not Disturb: {err}"}
+            return {"ok": True, "message": "Toggled Do Not Disturb."}
+
+        # ---- Files + spotlight + screenshots ----
+        if name == "mac_open_path":
+            path = (params.get("path") or params.get("url") or "").strip()
+            if not path:
+                return {"ok": False, "message": "I need a path or URL to open."}
+            result = await self._call_wails("MacOpenPath", [path])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": f"I'm not permitted to open {path}."}
+                return {"ok": False, "message": f"Couldn't open {path}: {err}"}
+            return {"ok": True, "message": f"Opened {path}."}
+
+        if name == "mac_spotlight":
+            query = (params.get("query") or "").strip()
+            if not query:
+                return {"ok": False, "message": "I need a search query."}
+            result = await self._call_wails("MacSpotlight", [query])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to run Spotlight searches."}
+                return {"ok": False, "message": f"Spotlight failed: {err}"}
+            hits = result.get("result") or ""
+            count = len([line for line in str(hits).splitlines() if line.strip()])
+            if count == 0:
+                return {"ok": True, "message": f"No results for '{query}'.", "results": ""}
+            return {
+                "ok": True,
+                "message": f"Found {count} result{'s' if count != 1 else ''} for '{query}'.",
+                "results": hits,
+            }
+
+        if name == "mac_screenshot":
+            target = (params.get("target") or "screen").strip().lower()
+            if target not in ("screen", "window", "selection"):
+                return {
+                    "ok": False,
+                    "message": "Screenshot target must be screen, window, or selection.",
+                }
+            result = await self._call_wails("MacScreenshot", [target])
+            err = result.get("error")
+            if err:
+                err_str = str(err).lower()
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to take screenshots."}
+                if "user cancelled" in err_str:
+                    return {
+                        "ok": False,
+                        "message": "I didn't capture anything -- let me know if you want to try again.",
+                    }
+                return {"ok": False, "message": f"Screenshot failed: {err}"}
+            path = result.get("result") or ""
+            return {"ok": True, "message": "Took a screenshot.", "path": path}
+
+        # ---- Clipboard ----
+        if name == "mac_clipboard_get":
+            result = await self._call_wails("MacClipboardGet", [])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to read the clipboard."}
+                return {"ok": False, "message": f"Couldn't read clipboard: {err}"}
+            content = result.get("result") or ""
+            if not str(content).strip():
+                return {"ok": True, "message": "Your clipboard is empty.", "content": ""}
+            return {"ok": True, "message": "Read the clipboard.", "content": content}
+
+        if name == "mac_clipboard_set":
+            text = params.get("text")
+            if text is None:
+                return {"ok": False, "message": "I need some text to copy to the clipboard."}
+            result = await self._call_wails("MacClipboardSet", [str(text)])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {"ok": False, "message": "I'm not permitted to write to the clipboard."}
+                return {"ok": False, "message": f"Couldn't set clipboard: {err}"}
+            return {"ok": True, "message": "Copied to the clipboard."}
+
+        # ---- Shortcuts ----
+        if name == "mac_list_shortcuts":
+            result = await self._call_wails("MacListShortcuts", [])
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {
+                        "ok": False,
+                        "message": "I'm not permitted to list shortcuts.",
+                    }
+                return {"ok": False, "message": f"Couldn't list shortcuts: {err}"}
+            shortcuts = result.get("result") or []
+            if not isinstance(shortcuts, list):
+                shortcuts = []
+            count = len(shortcuts)
+            if count == 0:
+                return {
+                    "ok": True,
+                    "message": "You don't have any Shortcuts installed.",
+                    "shortcuts": [],
+                }
+            return {
+                "ok": True,
+                "message": f"You have {count} shortcut{'s' if count != 1 else ''}.",
+                "shortcuts": shortcuts,
+            }
+
+        if name == "mac_run_shortcut":
+            shortcut_name = (params.get("name") or "").strip()
+            if not shortcut_name:
+                return {"ok": False, "message": "I need a shortcut name to run."}
+            shortcut_input = params.get("input") or ""
+            # Long-running shortcuts may take more than the default 10s
+            # bridge timeout (e.g. a "Take Note" shortcut that opens Notes
+            # before returning). Bump the per-call timeout to 30s.
+            result = await self._call_wails(
+                "MacRunShortcut",
+                [shortcut_name, str(shortcut_input)],
+                timeout=30.0,
+            )
+            err = result.get("error")
+            if err:
+                if _is_policy_deny(err):
+                    return {
+                        "ok": False,
+                        "message": f"I'm not permitted to run the {shortcut_name} shortcut.",
+                    }
+                return {
+                    "ok": False,
+                    "message": f"Couldn't run {shortcut_name}: {err}",
+                }
+            output = result.get("result") or ""
+            return {
+                "ok": True,
+                "message": f"Ran the {shortcut_name} shortcut.",
+                "output": str(output),
+            }
+
+        # Unknown mac_* tool -- fall through to the generic forwarder so a
+        # future tool added to TOOL_DEFINITIONS works without an explicit
+        # branch here. The Go-side dispatcher will return an "unknown tool"
+        # error if it doesn't recognise the name either.
+        return None
+
+    def handle_result(self, msg: dict[str, Any]) -> None:
+        """Resolve the pending future for an incoming ``tool_result`` message.
+
+        Called by the WS message handler when a ``tool_result`` message
+        arrives from the Go app.  If the ``id`` doesn't match any pending
+        call, a warning is logged and the message is dropped.
+
+        Args:
+            msg: The full ``tool_result`` message dict with ``id`` and
+                ``result`` keys.
+        """
+        call_id = msg.get("id")
+        if not call_id:
+            logger.warning("tool_result message missing 'id' field: %s", msg)
+            return
+
+        future = self._pending.get(call_id)
+        if future is None:
+            logger.warning(
+                "Received tool_result for unknown id=%s (may have timed out)",
+                call_id,
+            )
+            return
+
+        if future.done():
+            logger.warning(
+                "Future for id=%s already resolved (duplicate result?)",
+                call_id,
+            )
+            return
+
+        result = msg.get("result", {})
+        future.set_result(result)
+
+
