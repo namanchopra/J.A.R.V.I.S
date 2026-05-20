@@ -17,7 +17,7 @@ const RELEASES_URL = `${REPO_URL}/releases/latest`
 // site never serves a 404 even if the GitHub API call below fails at
 // build time (e.g. rate-limited or offline). Bump this whenever a new
 // tag ships; `fetchLatestVersion` will override it on every cache miss.
-const FALLBACK_VERSION = '0.2.12'
+const FALLBACK_VERSION = '0.3.0'
 
 /** Latest release tag (e.g. "0.2.12"), fetched at request time. */
 async function fetchLatestVersion(): Promise<string> {
@@ -293,6 +293,21 @@ const FEATURES: Feature[] = [
     body: 'Pipecat-powered pipeline streams audio in, partial transcripts, LLM tokens, and TTS chunks in parallel. End-to-end latency from "Hey Jarvis" to first spoken syllable: ~1.5s on M2.',
   },
   {
+    glyph: '♪',
+    title: 'Spotify control.',
+    body: 'Voice-driven playback. "Play Blinding Lights" routes through Spotify Web API search → AppleScript hands the URI to the Spotify desktop client. Pause, skip, queue, like, set volume — 9 tools in total. Works with Spotify Free for local playback.',
+  },
+  {
+    glyph: '◰',
+    title: 'Mac control.',
+    body: 'Open and quit apps, focus windows, set volume and brightness, take screenshots, copy and paste, run any Shortcuts.app shortcut — all by voice. 15 tools gated by per-tool allow/ask/deny permissions. Destructive actions trigger a spoken "are you sure?" confirmation.',
+  },
+  {
+    glyph: '◎',
+    title: 'Friday phone companion.',
+    body: 'Press-and-hold the orb on your phone to talk to the Mac\'s Jarvis. Audio streams over WebSocket; the brain stays on your Mac. Distributed via Expo Go — install the app, scan a QR, done. No App Store, no developer signing.',
+  },
+  {
     glyph: '✦',
     title: 'Open source.',
     body: 'Apache-2.0. ~50K LoC of Go (Wails backend) + TypeScript (React HUD) + Python (Pipecat daemon). Fork it, mod it, ship a derivative.',
@@ -335,5 +350,9 @@ const INSTALL_STEPS = [
   {
     title: 'Grant microphone permission and finish onboarding.',
     body: 'A short modal walks you through choosing an LLM provider (or local Ollama), pasting an API key if applicable, and previewing a voice. Say "Hey Jarvis" to begin.',
+  },
+  {
+    title: 'Open https://jarvis.namanchopra.dev/friday on your computer to install Friday on your phone (optional).',
+    body: 'Friday is the v0.3 phone companion — press-and-hold the orb to talk to your Mac\'s Jarvis from anywhere on the same Wi-Fi. Install Expo Go from the App Store, scan the QR on the /friday page, then pair via Settings → Connections → "Connect Friday phone" in Jarvis.',
   },
 ]

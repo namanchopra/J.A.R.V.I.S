@@ -15,6 +15,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.3.0] - 2026-05-21
+
+### Added
+- **Spotify control.** AppleScript local driver + OAuth PKCE + Web API search. 9 tools (`search_and_play`, `pause`, `resume`, `skip`, `previous`, `what_is_playing`, `set_volume`, `like_current`, `queue`).
+- **Mac control (`internal/macctl/`).** 15 system-wide tools: apps (open/quit/focus_window), audio (volume/mute), display (brightness/DND), files (open/spotlight), clipboard (get/set), screenshots, Shortcuts.app bridge. Each gated by a per-tool policy (`allow / ask / deny`) persisted at `~/.jarvis/policy.json`.
+- **Voice confirmation gate.** When a tool's policy is `ask`, the daemon emits `confirmation_required`, speaks the question ("Quit Slack?"), and awaits "yes"/"no" from the user. 30s timeout defaults to deny.
+- **Settings → Permissions tab.** Per-tool allow/ask/deny segmented controls for all 24 tools (9 Spotify + 15 Mac).
+- **Bundled Shortcuts.** 7 placeholder `.shortcut` files bundled under `Resources/shortcuts/` with a first-run installer Wails binding. Real exports replace placeholders later.
+- **Friday mobile companion.** React Native app distributable via Expo Go (zero App Store friction):
+  - Orb-first UX matching the Mac HUD (cyan #00ffcc particle ring, monospace LLM/STT/TTS/SESSIONS labels)
+  - Push-to-talk button — hold to record, release to send
+  - WebSocket audio transport over the existing `/ws/jarvis-mobile` (no LiveKit, no native module dependencies)
+  - QR pairing — Mac Settings → Connections → "Connect Friday phone" generates a `jarvis://pair?host=...&token=...&room=jarvis` QR. Friday scans + persists to SecureStore.
+  - Push notifications via expo-notifications
+  - Streaming WAV-wrapped audio playback for TTS
+  - Settings screen — re-pair, test connection, status
+- **EAS Update + GH Actions workflow.** Mobile updates auto-publish to the production channel on every `main` push affecting `mobile/`. Production URL: `https://u.expo.dev/<eas-project-id>?channel=production`.
+- **`install-friday.sh`** + **`https://jarvis.namanchopra.dev/friday`** — one-tap install paths.
+
+### Changed
+- Mobile app rebuilt from scratch — old tabs UI (tasks/sessions/repos/approvals lists) replaced with orb-first single-screen flow. LiveKit + react-native-webrtc removed (incompatible with Expo Go).
+- Daemon `TOOL_DEFINITIONS` extended with 24 new tool declarations.
+
+### Notes
+- Spotify Web API requires Premium for playback control; Free works for AppleScript-only commands.
+- Permissions UI ships with safe defaults: read-only tools allow, destructive tools ask, no deny defaults.
+
 ## [0.2.12] - 2026-05-20
 
 ### Fixed
