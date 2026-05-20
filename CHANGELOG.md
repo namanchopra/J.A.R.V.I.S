@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.9] - 2026-05-20
+
+### Fixed
+- **SetupScreen phases 3+4 now show smooth in-progress ticking during model downloads.** Previously the bars flashed empty → full in one frame because `ProgressTqdm.update()` (the tqdm subclass passed to `snapshot_download(tqdm_class=...)`) never fires under hf-xet — HuggingFace Hub's recently-adopted CAS-backed transport bypasses tqdm hooks entirely. With hf-xet the legacy progress callback path was dead code, even though the rest of the pipeline (`_DownloadState`, `_build_progress_payload`, the Go bridge's `model_download/progress` handler, the SetupScreen's `phaseProgress` rendering) was all functional.
+- v0.2.9 adds a **filesystem-based progress poller** (`_poll_download_progress`) that runs alongside `_download_hf_snapshot` / `_download_kokoro` in `ensure_model`. Every 500 ms it measures the size of the HF blobs dir (`~/.cache/huggingface/hub/models--{org}--{repo}/blobs/`) or Kokoro file paths, computes pct + ETA against the spec's `approx_size_bytes`, and emits a `model_download/progress` event. Transport-agnostic — works for both legacy chunked downloads and hf-xet's CAS sync.
+- Also emits a synthetic `pct: 100` event just before `_emit_done` so the bar visibly lands at full even when an xet cache-hit completed the "download" before the first 500 ms tick.
+
+### Known still-not-fixed
+- Voice preset download (~3.4 MB GitHub raw fetch) is still UI-silent. Lives in `pipecat_tts_vibevoice.py::_load_voice_preset` step #4, completes in 1–2s, logged in `daemon.log`. Not big enough to warrant a phase row.
+
 ## [0.2.8] - 2026-05-20
 
 ### Fixed

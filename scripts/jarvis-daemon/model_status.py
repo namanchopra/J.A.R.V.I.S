@@ -549,10 +549,33 @@ async def ensure_model(name: str, *, force: bool = False) -> None:
         await _emit_started(name)
         logger.info("Downloading model: %s", name)
         loop = asyncio.get_running_loop()
-        if name == "kokoro":
-            await loop.run_in_executor(None, _download_kokoro)
-        else:
-            await loop.run_in_executor(None, _download_hf_snapshot, name)
+        # Filesystem-based progress poller. Works regardless of HF transport
+        # (legacy chunked download OR hf-xet's CAS sync), unlike the tqdm
+        # hooks which only fire on the legacy path. Cancels on completion.
+        poller = asyncio.create_task(_poll_download_progress(name))
+        try:
+            if name == "kokoro":
+                await loop.run_in_executor(None, _download_kokoro)
+            else:
+                await loop.run_in_executor(None, _download_hf_snapshot, name)
+        finally:
+            poller.cancel()
+            try:
+                await poller
+            except asyncio.CancelledError:
+                pass
+        # Emit a synthetic 100% so the bar lands fully filled even when the
+        # poller never saw a stable measurement (e.g. xet CAS sync finished
+        # before the first 0.5s tick).
+        spec = _MODELS[name]
+        await _emit({
+            "type": "model_download",
+            "model": name,
+            "state": "progress",
+            "pct": 100,
+            "total_bytes": spec.approx_size_bytes,
+            "downloaded_bytes": spec.approx_size_bytes,
+        })
         await _emit_done(name)
         logger.info("Model downloaded: %s", name)
     except Exception as exc:
@@ -563,6 +586,100 @@ async def ensure_model(name: str, *, force: bool = False) -> None:
         async with _inflight_lock:
             _inflight.pop(name, None)
         done_event.set()
+
+
+# Polling interval for _poll_download_progress. Matches _THROTTLE_SECONDS
+# so the legacy tqdm path and the polling path emit at the same cadence.
+_POLL_INTERVAL_SECONDS: Final[float] = 0.5
+
+
+def _measure_hf_snapshot_size(name: str) -> int:
+    """Return the on-disk size of the HF snapshot/blobs for ``name``.
+
+    HF caches the model under ~/.cache/huggingface/hub/models--<org>--<repo>/.
+    The ``blobs/`` subdir contains the actual content-addressed files that
+    snapshots/ symlinks point at. We walk blobs/ (the symlinked snapshots
+    have no extra bytes on disk). Returns 0 if the cache dir does not exist
+    yet (download hasn't created it).
+    """
+    spec = _MODELS[name]
+    if not spec.repo_id:
+        return 0
+    # HF Hub's on-disk layout: hub/models--{org}--{repo}/blobs/<sha>
+    repo_dir = f"models--{spec.repo_id.replace('/', '--')}"
+    hub_root = os.path.expanduser("~/.cache/huggingface/hub")
+    blobs_dir = os.path.join(hub_root, repo_dir, "blobs")
+    if not os.path.isdir(blobs_dir):
+        return 0
+    total = 0
+    try:
+        for entry in os.scandir(blobs_dir):
+            if entry.is_file(follow_symlinks=False):
+                try:
+                    total += entry.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        return 0
+    return total
+
+
+def _measure_kokoro_size() -> int:
+    """Return on-disk size of Kokoro files (GitHub-hosted, not HF)."""
+    total = 0
+    for p in (_KOKORO_MODEL_PATH, _KOKORO_VOICES_PATH):
+        try:
+            if os.path.isfile(p):
+                total += os.path.getsize(p)
+        except OSError:
+            pass
+    return total
+
+
+async def _poll_download_progress(name: str) -> None:
+    """Background task: poll on-disk size of an in-flight download.
+
+    Emits ``model_download/progress`` events every ``_POLL_INTERVAL_SECONDS``
+    until cancelled by the caller in ``ensure_model``. Self-throttles when
+    the size doesn't change (the legacy tqdm hooks emit on bytes-received;
+    we only emit on bytes-on-disk grew).
+
+    Why this exists: huggingface_hub recently switched to hf-xet, a CAS-
+    backed transport that does NOT respect ``tqdm_class``. The legacy
+    ``ProgressTqdm.update()`` never fires under xet, so the SetupScreen
+    bars went from empty straight to full in one frame. This poller is
+    transport-agnostic -- it just measures the files on disk.
+    """
+    spec = _MODELS[name]
+    total = spec.approx_size_bytes
+    started_at = time.monotonic()
+    last_done = -1
+    while True:
+        try:
+            if name == "kokoro":
+                done = _measure_kokoro_size()
+            else:
+                done = _measure_hf_snapshot_size(name)
+            if done != last_done:
+                last_done = done
+                pct = int((done / total) * 100) if total > 0 else 0
+                elapsed = max(0.001, time.monotonic() - started_at)
+                speed = int(done / elapsed) if elapsed > 0 else 0
+                payload: dict[str, Any] = {
+                    "type": "model_download",
+                    "model": name,
+                    "state": "progress",
+                    "total_bytes": total,
+                    "downloaded_bytes": min(done, total) if total > 0 else done,
+                    "pct": min(100, max(0, pct)),
+                }
+                if speed > 0 and total > 0 and done < total:
+                    payload["speed_bytes_per_sec"] = speed
+                    payload["eta_seconds"] = int(max(0, total - done) / speed)
+                await _emit(payload)
+        except Exception as exc:
+            logger.debug("progress poll failed for %s: %s", name, exc)
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
 
 def required_models_for(config: dict[str, Any]) -> list[str]:
