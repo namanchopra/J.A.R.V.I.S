@@ -151,17 +151,4 @@ func (c *Controller) ClipboardGet() (string, error) { return "", ErrNotImplement
 func (c *Controller) ClipboardSet(text string) (string, error) { return "", ErrNotImplemented }
 
 // --- Shortcuts (TASK-014) ---
-
-// ListShortcuts shells `shortcuts list --output-format json` and returns
-// the array of Shortcut names installed on the host. Read-only by policy
-// default. Returns nil + ErrNotImplemented from the stub; TASK-014 will
-// return ([]string{}, nil) for the empty case (never nil) to match the
-// project's Wails serialization convention.
-func (c *Controller) ListShortcuts() ([]string, error) { return nil, ErrNotImplemented }
-
-// RunShortcut shells `shortcuts run "Name"` and pipes input to the
-// shortcut's stdin (for inputs >1KB; smaller inputs use --input). Returns
-// the shortcut's stdout. Destructive; gated on policy.Check("mac_run_shortcut").
-func (c *Controller) RunShortcut(name, input string) (string, error) {
-	return "", ErrNotImplemented
-}
+// Implementations live in shortcuts.go (ListShortcuts, RunShortcut).

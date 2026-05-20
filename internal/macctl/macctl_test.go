@@ -64,8 +64,8 @@ func TestStubsReturnErrNotImplemented(t *testing.T) {
 		{"ClipboardGet", func() (string, error) { return c.ClipboardGet() }},
 		{"ClipboardSet", func() (string, error) { return c.ClipboardSet("hello") }},
 
-		// --- TASK-014: shortcuts (RunShortcut returns string; ListShortcuts is tested below) ---
-		{"RunShortcut", func() (string, error) { return c.RunShortcut("Take Note", "test") }},
+		// --- TASK-014: shortcuts ---
+		// ListShortcuts, RunShortcut are implemented; tests live below.
 	}
 
 	for _, tc := range stringStubs {
@@ -88,26 +88,6 @@ func TestStubsReturnErrNotImplemented(t *testing.T) {
 					"stub contract is \"\" + ErrNotImplemented", tc.name, got)
 			}
 		})
-	}
-}
-
-// TestListShortcutsStub is split out because its return shape is
-// ([]string, error) rather than (string, error). Same contract: nil slice
-// + ErrNotImplemented while the stub stands. TASK-014 will switch the
-// success path to []string{} (never nil) per the project's Wails
-// serialization convention, but the stub MUST stay nil so this test
-// catches accidental "return []string{}, nil" half-implementations.
-func TestListShortcutsStub(t *testing.T) {
-	c := NewController(NewDefaultPolicy())
-
-	got, err := c.ListShortcuts()
-
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("ListShortcuts: err = %v; want ErrNotImplemented", err)
-	}
-	if got != nil {
-		t.Errorf("ListShortcuts: returned non-nil slice %v before implementation; "+
-			"stub contract is nil + ErrNotImplemented", got)
 	}
 }
 
@@ -367,5 +347,72 @@ func TestFocusWindow_PolicyDeny(t *testing.T) {
 	}
 	if osascriptCalls != 0 {
 		t.Errorf("FocusWindow with policy=deny: osascript called %d times; want 0", osascriptCalls)
+	}
+}
+
+// --- TASK-014 tests: ListShortcuts / RunShortcut ---
+
+// TestListShortcuts_PolicyDeny pins the deny short-circuit for the
+// read-by-default ListShortcuts tool. The default policy allows it, but
+// users can opt out via Settings -> Permissions; when they do, the
+// shortcuts CLI must NOT be invoked. We can't easily intercept
+// exec.Command from a unit test, so we verify the contract by asserting
+// the early-return error matches ErrPolicyDeny. The osascript seam is
+// unused by ListShortcuts (it shells `shortcuts` directly, not osascript)
+// so the recorder count check from the apps/windows suite doesn't apply
+// here -- the typed error IS the contract.
+func TestListShortcuts_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_list_shortcuts", DecisionDeny)
+
+	got, err := c.ListShortcuts()
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("ListShortcuts with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	// Nil (not []string{}) on deny -- the empty-slice convention applies
+	// only on success. A nil return here makes "did we deny?" cheaper to
+	// branch on at the caller.
+	if got != nil {
+		t.Errorf("ListShortcuts with policy=deny: got %v; want nil slice", got)
+	}
+}
+
+// TestRunShortcut_EmptyName pins the input-validation guard. Like every
+// other macctl method that accepts a name argument, an empty value must
+// produce a clear validation error rather than shelling `shortcuts run
+// ""` (which would either no-op or pop a Shortcuts.app picker at the
+// user -- both wrong for a programmatic dispatch path).
+func TestRunShortcut_EmptyName(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+
+	got, err := c.RunShortcut("", "input")
+	if err == nil {
+		t.Fatal("RunShortcut(\"\", _) err = nil; want validation error")
+	}
+	if !strings.Contains(err.Error(), "name is required") {
+		t.Errorf("RunShortcut(\"\", _) err = %v; want message containing %q",
+			err, "name is required")
+	}
+	if got != "" {
+		t.Errorf("RunShortcut(\"\", _) returned %q; want empty string on error", got)
+	}
+}
+
+// TestRunShortcut_PolicyDeny mirrors the deny short-circuit pattern from
+// QuitApp / FocusWindow: when policy returns deny, RunShortcut must
+// return ErrPolicyDeny BEFORE invoking the shortcuts CLI. The non-empty
+// name argument distinguishes this case from TestRunShortcut_EmptyName
+// -- we want to confirm a valid name + denied policy still produces the
+// policy-deny path (not a validation error).
+func TestRunShortcut_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_run_shortcut", DecisionDeny)
+
+	got, err := c.RunShortcut("Take Note", "test input")
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("RunShortcut with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	if got != "" {
+		t.Errorf("RunShortcut with policy=deny: returned %q; want empty string", got)
 	}
 }
