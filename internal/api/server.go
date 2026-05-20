@@ -31,6 +31,15 @@ func (s *Server) JarvisConn() *JarvisDaemonConn {
 	return s.jarvisConn
 }
 
+// PushHandler exposes the registered push notification handler, or nil if
+// WireRoutes has not been called yet. Used by the Wails-bound
+// JarvisSendTestPush binding (app_push.go) to fan a manual test push out to
+// every registered device. Safe to call from any goroutine -- callers must
+// nil-check before invoking handler methods.
+func (s *Server) PushHandler() *PushHandler {
+	return s.pushHandler
+}
+
 // New creates a new Server that will listen on the given port and require the
 // provided Bearer token for authentication. Call Start to begin serving.
 func New(port int, token string) *Server {

@@ -10,6 +10,11 @@
 // (first launch), redirect to /pair. The check runs in parallel with the
 // font loader so we never block on it -- both resolve into the same
 // `null` short-circuit until they're ready.
+//
+// TASK-028: once we know pairing exists, fire `setupPushNotifications()` in
+// a fire-and-forget effect so the Mac learns this device's Expo push token.
+// Intentionally NOT awaited -- the orb must not be blocked on permissions
+// prompts. See mobile/lib/push.ts for the full registration flow.
 import { useFonts } from 'expo-font';
 import * as SplashScreen from 'expo-splash-screen';
 import { Redirect, Stack } from 'expo-router';
@@ -18,6 +23,7 @@ import { useEffect, useState } from 'react';
 
 import { colors } from '../lib/hud-tokens';
 import { loadPairing } from '../lib/pairing';
+import { setupPushNotifications } from '../lib/push';
 
 export { ErrorBoundary } from 'expo-router';
 
@@ -70,6 +76,16 @@ export default function RootLayout() {
       SplashScreen.hideAsync().catch(() => {});
     }
   }, [fontsLoaded, fontError]);
+
+  // TASK-028: once we transition to "paired", fire the push-notification
+  // registration in the background. Re-running on every launch is cheap and
+  // resilient against rotated Expo push tokens or a Mac that wasn't yet
+  // reachable on the first attempt. Fire-and-forget on purpose -- any thrown
+  // error is swallowed inside push.ts so the orb is never blocked on it.
+  useEffect(() => {
+    if (paired !== true) return;
+    void setupPushNotifications();
+  }, [paired]);
 
   // Render nothing while EITHER fonts or pairing is still resolving -- splash
   // is up via the preventAutoHideAsync above. If fontError fires we still
