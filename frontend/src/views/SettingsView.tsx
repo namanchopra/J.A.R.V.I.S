@@ -11,6 +11,7 @@ import { config, main } from '../../wailsjs/go/models'
 import { SettingsTabs, type SettingsTabId } from './settings/SettingsTabs'
 import { ConnectionsPanel } from './settings/ConnectionsPanel'
 import { VoicePanel } from './settings/VoicePanel'
+import { PermissionsPanel } from './settings/PermissionsPanel'
 import { BehaviorPanel } from './settings/BehaviorPanel'
 import { DiagnosticsPanel } from './settings/DiagnosticsPanel'
 import { AdvancedPanel } from './settings/AdvancedPanel'
@@ -301,6 +302,7 @@ export function SettingsView({ onClose }: SettingsViewProps = {}): React.ReactEl
 
           <ConnectionsPanel {...baseProps} syncing={syncing} onSync={handleSync} />
           <VoicePanel {...baseProps} />
+          <PermissionsPanel {...baseProps} />
           <BehaviorPanel {...baseProps} terminals={terminals} />
           <DiagnosticsPanel {...baseProps} />
           <AdvancedPanel

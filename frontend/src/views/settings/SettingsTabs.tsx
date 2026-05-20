@@ -1,6 +1,7 @@
 export type SettingsTabId =
   | 'connections'
   | 'voice'
+  | 'permissions'
   | 'behavior'
   | 'diagnostics'
   | 'advanced'
@@ -14,6 +15,7 @@ export interface SettingsTabDef {
 export const SETTINGS_TABS: ReadonlyArray<SettingsTabDef> = [
   { id: 'connections', label: 'Connections', glyph: '⏚' },
   { id: 'voice',       label: 'Voice',       glyph: '◍' },
+  { id: 'permissions', label: 'Permissions', glyph: '◈' },
   { id: 'behavior',    label: 'Behavior',    glyph: '⌬' },
   { id: 'diagnostics', label: 'Diagnostics', glyph: '⊜' },
   { id: 'advanced',    label: 'Advanced',    glyph: '✦' },
