@@ -1,9 +1,10 @@
-// v0.3.0: orb root route. TASK-019 replaces the placeholder Text with the
-// real <OrbView /> centrepiece. State stays at 'idle' / sessions=11 until
-// the WS client (TASK-023) wires the daemon's state_change + pipeline_status
-// events through to props.
-import { OrbView } from '../components/OrbView';
+// v0.3.0: orb root route. TASK-021 replaces the raw OrbView with the
+// PushToTalkButton wrapper so the orb itself is the press-and-hold control.
+// The WS client (TASK-023) will later wire onAudioChunk/onPressStart/
+// onPressEnd through to the daemon; for now the button captures audio and
+// drops it on the floor, which still exercises the listening-state visual.
+import { PushToTalkButton } from '../components/PushToTalkButton';
 
 export default function FridayRoot() {
-  return <OrbView state="idle" sessions={11} />;
+  return <PushToTalkButton sessions={11} />;
 }
