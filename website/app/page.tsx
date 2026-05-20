@@ -2,6 +2,14 @@ import StarButton from '@/components/StarButton'
 import DemoTranscript from '@/components/DemoTranscript'
 import OrbClient from '@/components/OrbClient'
 
+// Render this route on every request. Without this the Next.js cache
+// pinned the version banner to whatever was current at the last build
+// or 1-hour revalidation window -- v0.2.12 shipping in the morning
+// would not show up until ~5pm. Setting force-dynamic + revalidate: 60
+// on the GitHub fetch below gives us "new tag visible within 60s of
+// being published" without spamming GitHub's API.
+export const dynamic = 'force-dynamic'
+
 const REPO_URL = 'https://github.com/namanchopra/J.A.R.V.I.S'
 const RELEASES_URL = `${REPO_URL}/releases/latest`
 
@@ -11,21 +19,22 @@ const RELEASES_URL = `${REPO_URL}/releases/latest`
 // tag ships; `fetchLatestVersion` will override it on every cache miss.
 const FALLBACK_VERSION = '0.2.12'
 
-/** Latest release tag (e.g. "0.1.6"), fetched once per hour at build time. */
+/** Latest release tag (e.g. "0.2.12"), fetched at request time. */
 async function fetchLatestVersion(): Promise<string> {
   try {
     const res = await fetch(
       'https://api.github.com/repos/namanchopra/J.A.R.V.I.S/releases/latest',
       {
         headers: { Accept: 'application/vnd.github+json' },
-        // Revalidate every hour so a fresh tag is picked up automatically
-        // without needing a manual website redeploy.
-        next: { revalidate: 3600 },
+        // Short revalidate so a new tag is reflected on the site within
+        // a minute of publish, without hitting GitHub's API on every
+        // request from every visitor.
+        next: { revalidate: 60 },
       },
     )
     if (!res.ok) return FALLBACK_VERSION
     const data = (await res.json()) as { tag_name?: string }
-    // GitHub returns tag like "v0.1.6"; strip the leading v.
+    // GitHub returns tag like "v0.2.12"; strip the leading v.
     return data.tag_name?.replace(/^v/, '') ?? FALLBACK_VERSION
   } catch {
     return FALLBACK_VERSION
@@ -214,7 +223,7 @@ export default async function Page() {
             <div>
               <p className="label-mono text-jarvis-cyan/45 mb-2">FIRST-LAUNCH SETUP</p>
               <p className="font-mono text-sm text-jarvis-cyan/65 max-w-md">
-                The DMG ships at ~80 MB. On first launch a full-screen progress UI installs a portable Python runtime + daemon venv into <code className="text-jarvis-cyan">~/.jarvis/</code> and fetches ~2.4 GB of VibeVoice + Whisper weights to <code className="text-jarvis-cyan">~/.cache/huggingface/</code> — ~10–15 min, one time. After first launch, Jarvis runs fully offline except your chosen cloud LLM.
+                The DMG ships at ~35 MB. On first launch a full-screen progress UI installs a portable Python runtime + daemon venv into <code className="text-jarvis-cyan">~/.jarvis/</code> and fetches ~2.4 GB of VibeVoice + Whisper weights to <code className="text-jarvis-cyan">~/.cache/huggingface/</code> — ~10–15 min, one time. After first launch, Jarvis runs fully offline except your chosen cloud LLM.
               </p>
             </div>
             <a href={dmgUrl} className="jarvis-btn-primary">
