@@ -56,6 +56,18 @@
     "experiments": {
       "typedRoutes": true
     },
-    "backgroundColor": "#0a0e1a"
+    "backgroundColor": "#0a0e1a",
+    "_updatesComment": "TODO(TASK-026): replace REPLACE_WITH_EAS_PROJECT_ID with the real EAS project ID (3 places) after running `eas init` from mobile/. See mobile/README.md.",
+    "updates": {
+      "url": "https://u.expo.dev/REPLACE_WITH_EAS_PROJECT_ID"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "REPLACE_WITH_EAS_PROJECT_ID"
+      }
+    }
   }
 }
