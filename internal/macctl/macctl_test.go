@@ -2,6 +2,7 @@ package macctl
 
 import (
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -58,11 +59,8 @@ func TestStubsReturnErrNotImplemented(t *testing.T) {
 		{"ToggleDND", func() (string, error) { return c.ToggleDND() }},
 
 		// --- TASK-013: files + clipboard + screenshots ---
-		{"OpenPath", func() (string, error) { return c.OpenPath("/tmp") }},
-		{"Spotlight", func() (string, error) { return c.Spotlight("README") }},
-		{"Screenshot", func() (string, error) { return c.Screenshot("screen") }},
-		{"ClipboardGet", func() (string, error) { return c.ClipboardGet() }},
-		{"ClipboardSet", func() (string, error) { return c.ClipboardSet("hello") }},
+		// OpenPath, Spotlight, Screenshot, ClipboardGet, ClipboardSet are
+		// implemented; tests live below.
 
 		// --- TASK-014: shortcuts (RunShortcut returns string; ListShortcuts is tested below) ---
 		{"RunShortcut", func() (string, error) { return c.RunShortcut("Take Note", "test") }},
@@ -367,5 +365,203 @@ func TestFocusWindow_PolicyDeny(t *testing.T) {
 	}
 	if osascriptCalls != 0 {
 		t.Errorf("FocusWindow with policy=deny: osascript called %d times; want 0", osascriptCalls)
+	}
+}
+
+// --- TASK-013 tests: OpenPath / Spotlight / ClipboardGet / ClipboardSet / Screenshot ---
+//
+// The implementations shell out to `open`, `mdfind`, `pbpaste`, `pbcopy`,
+// and `screencapture` — none of which route through the c.osascript test
+// seam. We therefore can't intercept their calls from a unit test the way
+// the apps/windows tests do. Two practical consequences:
+//
+//  1. Argument-validation and policy-deny short-circuits ARE unit-testable
+//     because they fire BEFORE the exec.Command. Those are pinned below.
+//  2. Round-trip / success-path tests require a real Mac with pbcopy etc.
+//     on $PATH — they live behind t.Skip in -short mode and behind a
+//     LookPath check so the package still passes `go test` on Linux CI.
+
+// TestOpenPath_EmptyPath pins the input-validation guard. The Wails layer
+// trims and validates path strings at the binding boundary, but the
+// controller is the defensive last line — an empty path must produce a
+// clear "path is required" error rather than shelling `open ""` (which
+// produces a confusing macOS dialog box at the user).
+func TestOpenPath_EmptyPath(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+
+	got, err := c.OpenPath("")
+	if err == nil {
+		t.Fatal("OpenPath(\"\") err = nil; want validation error")
+	}
+	if !strings.Contains(err.Error(), "path is required") {
+		t.Errorf("OpenPath(\"\") err = %v; want message containing %q", err, "path is required")
+	}
+	if got != "" {
+		t.Errorf("OpenPath(\"\") returned %q; want empty string on error", got)
+	}
+}
+
+// TestOpenPath_PolicyDeny pins the policy short-circuit: when policy
+// denies mac_open_path, OpenPath must return ErrPolicyDeny BEFORE
+// shelling `open` so a user-denied tool truly never side-effects. We
+// can't intercept the exec.Command from a unit test, but we CAN feed a
+// path that would visibly fail if `open` ran (a nonexistent file://) and
+// assert we got ErrPolicyDeny instead of the wrapped exec error.
+func TestOpenPath_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_open_path", DecisionDeny)
+
+	_, err := c.OpenPath("file:///definitely/not/a/real/path/jarvis-policy-deny")
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("OpenPath with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+}
+
+// TestSpotlight_EmptyQuery — same shape as OpenPath_EmptyPath. An empty
+// query against mdfind would return either a 0-result success or an
+// error depending on platform mood; we reject it up front for predictable
+// behaviour.
+func TestSpotlight_EmptyQuery(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+
+	got, err := c.Spotlight("")
+	if err == nil {
+		t.Fatal("Spotlight(\"\") err = nil; want validation error")
+	}
+	if !strings.Contains(err.Error(), "query is required") {
+		t.Errorf("Spotlight(\"\") err = %v; want message containing %q", err, "query is required")
+	}
+	if got != "" {
+		t.Errorf("Spotlight(\"\") returned %q; want empty string on error", got)
+	}
+}
+
+// TestSpotlight_PolicyDeny mirrors OpenPath_PolicyDeny — even though
+// mac_spotlight defaults to allow, an admin who flips it to deny must
+// see the short-circuit honoured.
+func TestSpotlight_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_spotlight", DecisionDeny)
+
+	_, err := c.Spotlight("README")
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("Spotlight with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+}
+
+// TestClipboardGet_PolicyDeny pins the deny path. The default for
+// mac_clipboard_get is allow (it's read-only), so the deny path only
+// kicks in when a privacy-conscious user has explicitly flipped it.
+// Without this test a future refactor that drops the policy check from
+// ClipboardGet wouldn't be caught.
+func TestClipboardGet_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_clipboard_get", DecisionDeny)
+
+	got, err := c.ClipboardGet()
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("ClipboardGet with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	if got != "" {
+		t.Errorf("ClipboardGet with policy=deny: returned %q; want empty string", got)
+	}
+}
+
+// TestClipboardSet_PolicyDeny is the most important test in the TASK-013
+// suite: ClipboardSet is destructive (it silently overwrites the user's
+// pasteboard), so the deny short-circuit MUST happen before pbcopy gets
+// any bytes. Because we can't intercept exec.Command from a unit test,
+// the indirect proof is: if pbcopy had run, the host clipboard would
+// have changed — but we can't query that without calling ClipboardGet,
+// which would itself touch the system. So this test asserts the contract
+// at the error-return layer: deny → ErrPolicyDeny → "" string return,
+// nothing else.
+func TestClipboardSet_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_clipboard_set", DecisionDeny)
+
+	got, err := c.ClipboardSet("this should never reach the pasteboard")
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("ClipboardSet with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	if got != "" {
+		t.Errorf("ClipboardSet with policy=deny: returned %q; want empty string", got)
+	}
+}
+
+// TestScreenshot_InvalidTarget pins the target-validation guard. Only
+// {"screen","window","selection"} are valid; anything else must return
+// an error containing "invalid" so the daemon's tool layer can render
+// a spoken response listing the accepted values.
+//
+// We assert the substring "invalid" rather than errors.Is(ErrInvalidArg)
+// because the ErrInvalidArg sentinel is owned by TASK-012's macctl.go
+// edits (which land in parallel). Substring matching is robust to either
+// landing order — both the wrapped-sentinel error and a plain
+// fmt.Errorf("...invalid...") satisfy this assertion.
+func TestScreenshot_InvalidTarget(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_screenshot", DecisionAllow)
+
+	got, err := c.Screenshot("windows") // plural typo — common LLM mistake
+	if err == nil {
+		t.Fatal("Screenshot(\"windows\") err = nil; want validation error")
+	}
+	if !strings.Contains(err.Error(), "invalid") {
+		t.Errorf("Screenshot(\"windows\") err = %v; want message containing %q", err, "invalid")
+	}
+	if got != "" {
+		t.Errorf("Screenshot(\"windows\") returned %q; want empty string on error", got)
+	}
+}
+
+// TestScreenshot_PolicyDeny pins the deny short-circuit. mac_screenshot
+// defaults to allow but a paranoid user may flip it to deny.
+func TestScreenshot_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_screenshot", DecisionDeny)
+
+	got, err := c.Screenshot("screen")
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("Screenshot with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	if got != "" {
+		t.Errorf("Screenshot with policy=deny: returned %q; want empty string", got)
+	}
+}
+
+// TestClipboardRoundTrip is the integration path: pbcopy "hello", pbpaste,
+// assert "hello". Requires a real Mac with pbcopy/pbpaste on $PATH —
+// skipped in short mode and on non-darwin hosts. The default `go test`
+// run on a developer's Mac will execute this; CI on Linux will skip it.
+//
+// Round-trip on darwin honours the TASK-013 acceptance criterion:
+//
+//	"ClipboardSet("hello") + ClipboardGet() round-trips the exact bytes"
+//
+// We pick a unique sentinel payload so a stale clipboard from a prior
+// test run can't mask a regression.
+func TestClipboardRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration only — touches real pasteboard")
+	}
+	if _, err := exec.LookPath("pbcopy"); err != nil {
+		t.Skip("pbcopy not available (non-darwin host)")
+	}
+
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_clipboard_set", DecisionAllow)
+	c.policy.Set("mac_clipboard_get", DecisionAllow)
+
+	want := "jarvis-task013-roundtrip-sentinel"
+	if _, err := c.ClipboardSet(want); err != nil {
+		t.Fatalf("ClipboardSet: unexpected err = %v", err)
+	}
+	got, err := c.ClipboardGet()
+	if err != nil {
+		t.Fatalf("ClipboardGet: unexpected err = %v", err)
+	}
+	if got != want {
+		t.Errorf("clipboard round-trip: got %q; want %q", got, want)
 	}
 }
