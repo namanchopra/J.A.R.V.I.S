@@ -305,6 +305,11 @@ func (a *App) monitorJarvisDaemon(cmd *exec.Cmd) {
 	}
 
 	slog.Error("jarvis daemon failed to restart after max attempts", "attempts", maxJarvisRestarts)
+	// Best-effort: if we were still mid-setup (phases 3+4 driven by this
+	// daemon), the bridge is now waiting for events that will never come.
+	// Tear it down so a future RunSetup retry isn't blocked by the dedup
+	// gate. Idempotent if the bridge already self-finalised.
+	a.clearSetupRunningAndUnsubscribe()
 }
 
 // ---------------------------------------------------------------------------

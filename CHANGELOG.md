@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.11] - 2026-05-20
+
+### Fixed
+- **Bridge teardown gaps in v0.2.10 error paths.** v0.2.10's restructured RunSetup lifecycle (bridge subscription kept alive through phases 3+4, torn down by the bridge itself on completion) missed two failure-mode edges that would leave the bridge orphaned + the dedup gate blocking any future retry:
+  1. **`StartJarvis()` failure after `install-daemon.sh` succeeded.** v0.2.6 added the StartJarvis call inside RunSetup but swallowed its error (phases 1+2 had completed). v0.2.10 left `rt.running = true` + bridge alive in that branch — but the daemon never launched, so no model events would ever fire to trigger the bridge's self-finalisation. Now explicitly calls `clearSetupRunningAndUnsubscribe()`.
+  2. **Daemon process dies mid-install and all restart attempts fail.** `monitorJarvisDaemon` ends with `slog.Error` after exhausting retries. If the daemon was killed mid phases 3+4, the bridge was still waiting on it. Now calls `clearSetupRunningAndUnsubscribe()` from `monitorJarvisDaemon`'s final-failure branch.
+- Both fixes are idempotent — `clearSetupRunningAndUnsubscribe` is safe to call multiple times (second call no-ops because `rt.running` is already false and `rt.bridgeCancel` is nil).
+
 ## [0.2.10] - 2026-05-20
 
 ### Fixed

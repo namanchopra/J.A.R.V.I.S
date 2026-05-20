@@ -849,6 +849,13 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 				// complete. The App.tsx daemonLaunchFailed banner path is
 				// the right surface for "daemon won't start", and a future
 				// daemon retry from Settings can recover.
+				//
+				// Tear down the bridge here -- the daemon won't emit any
+				// model events, so leaving the bridge alive (and rt.running
+				// true) would orphan the subscription AND block any future
+				// retry RunSetup call from running (the dedup gate at the
+				// top would short-circuit it).
+				a.clearSetupRunningAndUnsubscribe()
 			} else {
 				slog.Info("RunSetup: daemon launched after setup completion; model downloads will drive phases 3+4")
 			}
