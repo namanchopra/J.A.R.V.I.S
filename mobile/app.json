@@ -18,6 +18,7 @@
       "bundleIdentifier": "com.namanchopra.jarvis",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Jarvis needs the microphone so you can talk to him.",
+        "NSCameraUsageDescription": "Jarvis needs the camera to scan the QR pairing code from your Mac.",
         "UIBackgroundModes": ["audio", "voip"]
       }
     },
@@ -33,7 +34,8 @@
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MICROPHONE"
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.CAMERA"
       ]
     },
     "web": {
@@ -43,7 +45,13 @@
     },
     "plugins": [
       "expo-router",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Jarvis needs the camera to scan the QR pairing code from your Mac."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
