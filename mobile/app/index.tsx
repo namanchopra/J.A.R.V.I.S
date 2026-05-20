@@ -1,37 +1,9 @@
-// v0.3.0: placeholder route. The orb screen lands in TASK-019.
-//
-// TASK-006: route through hud-tokens so the smoke verification path
-// (Text styled with tokens.fontFamilies.mono + tokens.colors.cyan) is wired.
-import { StyleSheet, Text, View } from 'react-native';
+// v0.3.0: orb root route. TASK-019 replaces the placeholder Text with the
+// real <OrbView /> centrepiece. State stays at 'idle' / sessions=11 until
+// the WS client (TASK-023) wires the daemon's state_change + pipeline_status
+// events through to props.
+import { OrbView } from '../components/OrbView';
 
-import { colors, fontFamilies, spacing } from '../lib/hud-tokens';
-
-export default function FridayPlaceholder() {
-  return (
-    <View style={styles.container}>
-      <Text style={styles.heading}>JARVIS</Text>
-      <Text style={styles.subtext}>Friday — pairing pending</Text>
-    </View>
-  );
+export default function FridayRoot() {
+  return <OrbView state="idle" sessions={11} />;
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.bg,
-    gap: spacing.md,
-  },
-  heading: {
-    color: colors.cyan,
-    fontFamily: fontFamilies.monoBold,
-    fontSize: 24,
-    letterSpacing: 4,
-  },
-  subtext: {
-    color: colors.textDim,
-    fontFamily: fontFamilies.mono,
-    fontSize: 14,
-  },
-});
