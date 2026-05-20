@@ -51,11 +51,8 @@ func TestStubsReturnErrNotImplemented(t *testing.T) {
 		// OpenApp, QuitApp, FocusWindow are implemented; tests live below.
 
 		// --- TASK-012: audio + display ---
-		{"SetVolume", func() (string, error) { return c.SetVolume(50) }},
-		{"Mute", func() (string, error) { return c.Mute() }},
-		{"Unmute", func() (string, error) { return c.Unmute() }},
-		{"SetBrightness", func() (string, error) { return c.SetBrightness(75) }},
-		{"ToggleDND", func() (string, error) { return c.ToggleDND() }},
+		// SetVolume, Mute, Unmute, SetBrightness, ToggleDND are implemented;
+		// tests live below.
 
 		// --- TASK-013: files + clipboard + screenshots ---
 		{"OpenPath", func() (string, error) { return c.OpenPath("/tmp") }},
@@ -126,6 +123,7 @@ func TestErrorSentinelsAreDistinct(t *testing.T) {
 		{"ErrPolicyDeny", ErrPolicyDeny},
 		{"ErrWindowNotFound", ErrWindowNotFound},
 		{"ErrToolUnavailable", ErrToolUnavailable},
+		{"ErrInvalidArg", ErrInvalidArg},
 	}
 
 	for i, a := range sentinels {
@@ -367,5 +365,385 @@ func TestFocusWindow_PolicyDeny(t *testing.T) {
 	}
 	if osascriptCalls != 0 {
 		t.Errorf("FocusWindow with policy=deny: osascript called %d times; want 0", osascriptCalls)
+	}
+}
+
+// --- TASK-012 tests: SetVolume / Mute / Unmute / SetBrightness / ToggleDND ---
+
+// TestSetVolume_RejectsOutOfRange pins the input validation guard. The
+// daemon's LLM may hallucinate a percentage outside 0..100 (e.g. "Set
+// volume to 150" -> 150), and the controller is the defensive boundary.
+// Both -1 and 101 must return ErrInvalidArg AND NOT touch osascript --
+// the recorder pins the no-side-effect invariant.
+func TestSetVolume_RejectsOutOfRange(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_set_volume", DecisionAllow)
+
+	cases := []struct {
+		name string
+		pct  int
+	}{
+		{"negative", -1},
+		{"too large", 101},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var osascriptCalls int
+			c.osascript = func(script string) (string, error) {
+				osascriptCalls++
+				return "", nil
+			}
+			got, err := c.SetVolume(tc.pct)
+			if !errors.Is(err, ErrInvalidArg) {
+				t.Errorf("SetVolume(%d): err = %v; want ErrInvalidArg", tc.pct, err)
+			}
+			if got != "" {
+				t.Errorf("SetVolume(%d): returned %q; want empty string on error", tc.pct, got)
+			}
+			if osascriptCalls != 0 {
+				t.Errorf("SetVolume(%d): osascript called %d times; "+
+					"validation must short-circuit before any side effect", tc.pct, osascriptCalls)
+			}
+		})
+	}
+}
+
+// TestSetVolume_IssuesCorrectScript pins the AppleScript shape: the
+// daemon dispatches "set volume to 50" and the controller must emit
+// `set volume output volume 50` -- the publicly-documented recipe. If
+// a future refactor swaps the script (e.g. via the deprecated `osascript
+// -e "set output volume of (get volume settings) to 50"`) this test
+// fails and forces a conscious change.
+func TestSetVolume_IssuesCorrectScript(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_set_volume", DecisionAllow)
+
+	var recorded []string
+	c.osascript = func(script string) (string, error) {
+		recorded = append(recorded, script)
+		return "", nil
+	}
+
+	got, err := c.SetVolume(50)
+	if err != nil {
+		t.Fatalf("SetVolume(50): unexpected err = %v", err)
+	}
+	if got != "" {
+		t.Errorf("SetVolume(50): returned %q; want empty string", got)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("SetVolume(50): osascript invocations = %d; want 1", len(recorded))
+	}
+	want := "set volume output volume 50"
+	if recorded[0] != want {
+		t.Errorf("SetVolume(50): script = %q; want %q", recorded[0], want)
+	}
+}
+
+// TestSetVolume_PolicyDeny pins the deny short-circuit for the audio
+// controls. Same shape as OpenApp/QuitApp's policy guards -- deny must
+// return ErrPolicyDeny without touching osascript.
+func TestSetVolume_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_set_volume", DecisionDeny)
+
+	var osascriptCalls int
+	c.osascript = func(script string) (string, error) {
+		osascriptCalls++
+		return "", nil
+	}
+
+	_, err := c.SetVolume(50)
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("SetVolume with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	if osascriptCalls != 0 {
+		t.Errorf("SetVolume with policy=deny: osascript called %d times; want 0", osascriptCalls)
+	}
+}
+
+// TestMute_IssuesCorrectScript pins the canonical Mute AppleScript:
+// `set volume with output muted`. The "with output muted" idiom is the
+// AppleScript shorthand for setting the boolean property -- swapping to
+// the verbose `set volume settings to ...` form would still work but
+// breaks the symmetry with Unmute, so we pin the exact form.
+func TestMute_IssuesCorrectScript(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_mute", DecisionAllow)
+
+	var recorded []string
+	c.osascript = func(script string) (string, error) {
+		recorded = append(recorded, script)
+		return "", nil
+	}
+
+	got, err := c.Mute()
+	if err != nil {
+		t.Fatalf("Mute: unexpected err = %v", err)
+	}
+	if got != "" {
+		t.Errorf("Mute: returned %q; want empty string", got)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("Mute: osascript invocations = %d; want 1", len(recorded))
+	}
+	want := "set volume with output muted"
+	if recorded[0] != want {
+		t.Errorf("Mute: script = %q; want %q", recorded[0], want)
+	}
+}
+
+// TestUnmute_IssuesCorrectScript pins Unmute's counterpart shape:
+// `set volume without output muted`. Symmetric with Mute's recipe.
+func TestUnmute_IssuesCorrectScript(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_unmute", DecisionAllow)
+
+	var recorded []string
+	c.osascript = func(script string) (string, error) {
+		recorded = append(recorded, script)
+		return "", nil
+	}
+
+	got, err := c.Unmute()
+	if err != nil {
+		t.Fatalf("Unmute: unexpected err = %v", err)
+	}
+	if got != "" {
+		t.Errorf("Unmute: returned %q; want empty string", got)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("Unmute: osascript invocations = %d; want 1", len(recorded))
+	}
+	want := "set volume without output muted"
+	if recorded[0] != want {
+		t.Errorf("Unmute: script = %q; want %q", recorded[0], want)
+	}
+}
+
+// TestSetBrightness_ToolMissing pins the ErrToolUnavailable path: when
+// the `brightness` CLI is not on PATH, SetBrightness must return a
+// wrapped ErrToolUnavailable (so the daemon's tool layer can render the
+// install hint) WITHOUT shelling out. We monkey-patch the package-level
+// lookPathFn seam to simulate the missing CLI deterministically -- the
+// alternative (renaming the real binary or mutating PATH) would be both
+// flaky and host-mutating.
+func TestSetBrightness_ToolMissing(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_set_brightness", DecisionAllow)
+
+	// Save + restore the seam so other tests in the package see the real
+	// lookPathFn. t.Cleanup runs after the test even on failure/skip.
+	originalLookPath := lookPathFn
+	t.Cleanup(func() { lookPathFn = originalLookPath })
+
+	lookPathFn = func(file string) (string, error) {
+		// Simulate "command not found" for `brightness` specifically;
+		// any other lookups (none in this code path) hit the real impl.
+		if file == "brightness" {
+			return "", errors.New("exec: \"brightness\": executable file not found in $PATH")
+		}
+		return originalLookPath(file)
+	}
+
+	// Also stub runCmdFn so an accidental escape past the LookPath
+	// guard surfaces loudly via the call counter rather than silently
+	// mutating the host's brightness.
+	originalRunCmd := runCmdFn
+	t.Cleanup(func() { runCmdFn = originalRunCmd })
+	var runCmdCalls int
+	runCmdFn = func(name string, args ...string) ([]byte, error) {
+		runCmdCalls++
+		return nil, nil
+	}
+
+	got, err := c.SetBrightness(50)
+	if !errors.Is(err, ErrToolUnavailable) {
+		t.Errorf("SetBrightness with brightness missing: err = %v; want ErrToolUnavailable", err)
+	}
+	if got != "" {
+		t.Errorf("SetBrightness with brightness missing: returned %q; want empty string", got)
+	}
+	if runCmdCalls != 0 {
+		t.Errorf("SetBrightness with brightness missing: runCmd called %d times; "+
+			"LookPath failure must short-circuit before exec", runCmdCalls)
+	}
+	// Pin the install hint substring so the daemon's tool layer can rely
+	// on it for the spoken response. If a future refactor drops the
+	// "brew install brightness" hint this test fails -- forcing a
+	// conscious change to the user-facing copy.
+	if !strings.Contains(err.Error(), "brew install brightness") {
+		t.Errorf("SetBrightness err = %v; want message containing %q to guide user",
+			err, "brew install brightness")
+	}
+}
+
+// TestSetBrightness_RejectsOutOfRange mirrors the volume validation
+// guard -- same rationale, same boundary. Pinned because the brightness
+// CLI accepts 0.0..1.0 floats; an unvalidated int could be rescaled to
+// 1.5 and rejected by the CLI with a confusing message.
+func TestSetBrightness_RejectsOutOfRange(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_set_brightness", DecisionAllow)
+
+	originalLookPath := lookPathFn
+	t.Cleanup(func() { lookPathFn = originalLookPath })
+	var lookPathCalls int
+	lookPathFn = func(file string) (string, error) {
+		lookPathCalls++
+		return "/opt/homebrew/bin/brightness", nil
+	}
+
+	originalRunCmd := runCmdFn
+	t.Cleanup(func() { runCmdFn = originalRunCmd })
+	var runCmdCalls int
+	runCmdFn = func(name string, args ...string) ([]byte, error) {
+		runCmdCalls++
+		return nil, nil
+	}
+
+	cases := []struct {
+		name string
+		pct  int
+	}{
+		{"negative", -1},
+		{"too large", 101},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lookPathCalls = 0
+			runCmdCalls = 0
+			_, err := c.SetBrightness(tc.pct)
+			if !errors.Is(err, ErrInvalidArg) {
+				t.Errorf("SetBrightness(%d): err = %v; want ErrInvalidArg", tc.pct, err)
+			}
+			if lookPathCalls != 0 {
+				t.Errorf("SetBrightness(%d): lookPath called %d times; "+
+					"validation must short-circuit first", tc.pct, lookPathCalls)
+			}
+			if runCmdCalls != 0 {
+				t.Errorf("SetBrightness(%d): runCmd called %d times; want 0",
+					tc.pct, runCmdCalls)
+			}
+		})
+	}
+}
+
+// TestSetBrightness_PolicyDeny pins the deny short-circuit for the
+// brightness controller. Deny must beat both the LookPath guard and
+// the exec call.
+func TestSetBrightness_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_set_brightness", DecisionDeny)
+
+	originalLookPath := lookPathFn
+	t.Cleanup(func() { lookPathFn = originalLookPath })
+	var lookPathCalls int
+	lookPathFn = func(file string) (string, error) {
+		lookPathCalls++
+		return "/opt/homebrew/bin/brightness", nil
+	}
+
+	originalRunCmd := runCmdFn
+	t.Cleanup(func() { runCmdFn = originalRunCmd })
+	var runCmdCalls int
+	runCmdFn = func(name string, args ...string) ([]byte, error) {
+		runCmdCalls++
+		return nil, nil
+	}
+
+	_, err := c.SetBrightness(50)
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("SetBrightness with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	if lookPathCalls != 0 {
+		t.Errorf("SetBrightness with policy=deny: lookPath called %d times; want 0",
+			lookPathCalls)
+	}
+	if runCmdCalls != 0 {
+		t.Errorf("SetBrightness with policy=deny: runCmd called %d times; want 0",
+			runCmdCalls)
+	}
+}
+
+// TestToggleDND_PolicyDeny pins the deny short-circuit for the Focus
+// toggle. Same invariant: deny -> ErrPolicyDeny without touching the
+// `shortcuts` CLI.
+func TestToggleDND_PolicyDeny(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_toggle_dnd", DecisionDeny)
+
+	originalLookPath := lookPathFn
+	t.Cleanup(func() { lookPathFn = originalLookPath })
+	var lookPathCalls int
+	lookPathFn = func(file string) (string, error) {
+		lookPathCalls++
+		return "/usr/bin/shortcuts", nil
+	}
+
+	originalRunCmd := runCmdFn
+	t.Cleanup(func() { runCmdFn = originalRunCmd })
+	var runCmdCalls int
+	runCmdFn = func(name string, args ...string) ([]byte, error) {
+		runCmdCalls++
+		return nil, nil
+	}
+
+	_, err := c.ToggleDND()
+	if !errors.Is(err, ErrPolicyDeny) {
+		t.Errorf("ToggleDND with policy=deny: err = %v; want ErrPolicyDeny", err)
+	}
+	if lookPathCalls != 0 {
+		t.Errorf("ToggleDND with policy=deny: lookPath called %d times; want 0",
+			lookPathCalls)
+	}
+	if runCmdCalls != 0 {
+		t.Errorf("ToggleDND with policy=deny: runCmd called %d times; want 0",
+			runCmdCalls)
+	}
+}
+
+// TestToggleDND_IssuesCorrectArgv pins the `shortcuts run "Set Focus"`
+// invocation. Apple's stable public path for toggling Focus from the
+// command line is the Shortcuts.app "Set Focus" action -- pinning the
+// argv documents that contract and catches a future "let's just shell
+// `defaults write` again" regression.
+func TestToggleDND_IssuesCorrectArgv(t *testing.T) {
+	c := NewController(NewDefaultPolicy())
+	c.policy.Set("mac_toggle_dnd", DecisionAllow)
+
+	originalLookPath := lookPathFn
+	t.Cleanup(func() { lookPathFn = originalLookPath })
+	lookPathFn = func(file string) (string, error) {
+		return "/usr/bin/shortcuts", nil
+	}
+
+	originalRunCmd := runCmdFn
+	t.Cleanup(func() { runCmdFn = originalRunCmd })
+	var recorded [][]string
+	runCmdFn = func(name string, args ...string) ([]byte, error) {
+		recorded = append(recorded, append([]string{name}, args...))
+		return nil, nil
+	}
+
+	got, err := c.ToggleDND()
+	if err != nil {
+		t.Fatalf("ToggleDND: unexpected err = %v", err)
+	}
+	if got != "" {
+		t.Errorf("ToggleDND: returned %q; want empty string", got)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("ToggleDND: runCmd invocations = %d; want 1", len(recorded))
+	}
+	want := []string{"shortcuts", "run", "Set Focus"}
+	if len(recorded[0]) != len(want) {
+		t.Fatalf("ToggleDND: argv length = %d; want %d (argv=%v)",
+			len(recorded[0]), len(want), recorded[0])
+	}
+	for i, arg := range want {
+		if recorded[0][i] != arg {
+			t.Errorf("ToggleDND: argv[%d] = %q; want %q", i, recorded[0][i], arg)
+		}
 	}
 }

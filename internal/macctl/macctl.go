@@ -33,6 +33,17 @@ var ErrWindowNotFound = errors.New("macctl: window not found")
 // the missing dependency rather than reporting a generic exec failure.
 var ErrToolUnavailable = errors.New("macctl: required tool unavailable")
 
+// ErrInvalidArg is returned when a method receives an argument that
+// fails its preconditions (e.g. SetVolume(-1) or SetBrightness(101)).
+// Distinguishing this from a generic error lets the daemon's tool
+// layer render a precise spoken response ("That volume is out of
+// range — try 0 to 100") instead of a generic "something went wrong".
+//
+// Mirrors the ErrInvalidQuery sentinel pattern from
+// internal/spotify/errors.go — same rationale: validation failures
+// should never reach the side-effecting layer.
+var ErrInvalidArg = errors.New("macctl: invalid argument")
+
 // osascriptFn is a test seam — production passes a closure that shells
 // exec.Command("osascript", "-e", script). Tests substitute a recorder
 // so they can assert which scripts get issued without actually invoking
@@ -99,29 +110,8 @@ func NewController(policy *Policy) *Controller {
 // (FocusWindow).
 
 // --- Audio + display (TASK-012) ---
-
-// SetVolume sets the system output volume to pct (0..100). TASK-012 will
-// shell `osascript -e "set volume output volume <pct>"`. Values outside
-// 0..100 will be rejected with a typed error.
-func (c *Controller) SetVolume(pct int) (string, error) { return "", ErrNotImplemented }
-
-// Mute sets the output-muted property to true. TASK-012 will use
-// `set volume with output muted`. Idempotent — muting a muted device
-// is a no-op.
-func (c *Controller) Mute() (string, error) { return "", ErrNotImplemented }
-
-// Unmute sets the output-muted property to false. Counterpart to Mute.
-func (c *Controller) Unmute() (string, error) { return "", ErrNotImplemented }
-
-// SetBrightness sets the display brightness to pct (0..100). TASK-012
-// will shell the `brightness` CLI; if not installed it returns
-// ErrToolUnavailable rather than crashing.
-func (c *Controller) SetBrightness(pct int) (string, error) { return "", ErrNotImplemented }
-
-// ToggleDND toggles macOS Do Not Disturb. TASK-012 will route through
-// the built-in "Set Focus" Shortcuts.app shortcut to avoid private-API
-// danger (Apple removed the public defaults-write recipe in Monterey).
-func (c *Controller) ToggleDND() (string, error) { return "", ErrNotImplemented }
+// Implementations live in audio.go (SetVolume, Mute, Unmute) and
+// display.go (SetBrightness, ToggleDND).
 
 // --- Files + clipboard + screenshots (TASK-013) ---
 
