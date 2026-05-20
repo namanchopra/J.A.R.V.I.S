@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { SettingsPanelProps } from './types'
 import type { config as cfgModels } from '../../../wailsjs/go/models'
 import { ValidateAPIKey, IsOllamaRunning } from '../../../wailsjs/go/main/App'
+import { FridayPairingModal } from './FridayPairingModal'
 
 // ---------------------------------------------------------------------------
 // ConnectionsPanel — "what does Jarvis hook up to" surface.
@@ -392,6 +393,13 @@ export function ConnectionsPanel({
     ccfg.cartesiaAPIKey,
   ])
 
+  // v0.3.0 / TASK-025: "Connect Friday phone" modal state. Local to the
+  // panel because the modal is purely transient UI — open/close doesn't
+  // need to persist across reloads. The modal itself owns the QR fetch
+  // lifecycle (loading / ready / error) so this parent only tracks
+  // visibility.
+  const [fridayPairOpen, setFridayPairOpen] = useState<boolean>(false)
+
   // v0.1.5: LLM model selection now persists via cfg.llmModel (same
   // ConnectionsConfig superset cast pattern as the v0.1.2 key migration).
   // The default when cfg.llmModel is empty/undefined stays at
@@ -582,6 +590,39 @@ export function ConnectionsPanel({
           </span>
         </div>
       </section>
+
+      {/* v0.3.0 / TASK-025 — Friday mobile companion pairing.
+          Click the button → modal opens with a QR encoding
+          jarvis://pair?host=<LAN>:<port>&token=<bearer>&room=jarvis. Friday's
+          pair.tsx (TASK-020) scans it, stores the bearer in secure-store, and
+          connects to the existing /ws/jarvis-mobile WebSocket. The QR is
+          rendered server-side (Go) via GenerateMobilePairingQR so the bearer
+          token never crosses a React render boundary as a plain string. */}
+      <section className="holo-panel p-4" data-testid="friday-mobile-section">
+        <h2 className="text-sm font-semibold text-[#00e5ff] mb-1">Friday mobile</h2>
+        <p className="text-xs text-[#8ba4b8] mb-3">
+          Pair the Friday phone companion (Expo Go) with this Mac. Scanning the QR
+          stores a bearer token on the phone and points it at this Mac's local IP.
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setFridayPairOpen(true)}
+            data-testid="friday-pair-open"
+            className="text-xs px-3 py-1.5 rounded bg-[#0d9488] hover:bg-[#0d9488]/80 text-white transition-colors"
+          >
+            Connect Friday phone
+          </button>
+          <span className="text-[10px] text-[#4a6278] font-mono">
+            Opens a QR code Friday scans
+          </span>
+        </div>
+      </section>
+
+      <FridayPairingModal
+        open={fridayPairOpen}
+        onClose={() => setFridayPairOpen(false)}
+      />
     </div>
   )
 }
