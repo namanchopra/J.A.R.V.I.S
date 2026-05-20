@@ -1268,42 +1268,109 @@ func (a *App) handleDaemonModelEvent(payload map[string]interface{}) {
 }
 
 // bridgeHandleModelSetup processes a `model_setup` event from the daemon.
-// State `downloading` with a non-empty models_pending list emits a
-// `started` setup_progress event for each pending model the bridge
-// recognises. State `ready` is a no-op here (the per-model `done` events
-// drive sentinel-write because they're strictly more reliable — they
-// don't depend on the daemon batching the final ready emit relative to
-// the last per-model done).
+//
+// state == "downloading":  Daemon is about to download N models. Emit a
+//                          `started` setup_progress per pending model so
+//                          the SetupScreen lights up phase 3 / phase 4.
+// state == "ready":        Either (a) the per-model done events have all
+//                          fired and the daemon is signalling end-of-
+//                          prefetch, or (b) HF cache hit -- nothing needed
+//                          downloading at all. In case (b) NO model_download
+//                          events ever fired, so the per-model done branch
+//                          in bridgeHandleModelDownload never ran, and the
+//                          SetupScreen would sit forever on phases 3+4
+//                          pending. We finalise here too: latch both per-
+//                          model latches, emit `done` setup_progress for
+//                          the canonical phases, write sentinel, emit
+//                          setup_state{complete:true}.
+//
+// v0.2.6 and earlier silently dropped state=="ready" -- this is the bug
+// that left users with pre-cached models stuck on the SetupScreen forever.
 func (a *App) bridgeHandleModelSetup(payload map[string]interface{}, em eventEmitter) {
 	state, _ := payload["state"].(string)
-	if state != "downloading" {
-		return
-	}
-	pendingRaw, _ := payload["models_pending"].([]interface{})
-	for _, entry := range pendingRaw {
-		obj, ok := entry.(map[string]interface{})
-		if !ok {
-			continue
+	switch state {
+	case "downloading":
+		pendingRaw, _ := payload["models_pending"].([]interface{})
+		for _, entry := range pendingRaw {
+			obj, ok := entry.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name, _ := obj["name"].(string)
+			phase, ok := modelNameToPhase(name)
+			if !ok {
+				// Unknown model — silently skip.
+				continue
+			}
+			rt := setupRuntimeFor(a)
+			rt.mu.Lock()
+			rt.currentState.Phase = phase
+			rt.currentState.PhaseProgress = 0
+			rt.currentState.LastError = ""
+			rt.mu.Unlock()
+			em.Emit(a.ctx, "setup", setupProgressEvent{
+				Type:  "setup_progress",
+				Phase: phase,
+				State: stateStarted,
+			})
 		}
-		name, _ := obj["name"].(string)
-		phase, ok := modelNameToPhase(name)
-		if !ok {
-			// Unknown model — silently skip. The SetupScreen only
-			// recognises the four canonical phases.
-			continue
-		}
-		// Update cached state under the lock so a concurrent
-		// GetSetupState sees the phase advance.
+
+	case "ready":
+		// Finalise both model phases. Idempotent: if the per-model done
+		// branch already ran (the common downloading-from-scratch path),
+		// the latch checks below short-circuit and the only re-work is
+		// re-emitting the setup_state event, which the React side
+		// dedups via isSetupComplete in App.tsx.
 		rt := setupRuntimeFor(a)
 		rt.mu.Lock()
-		rt.currentState.Phase = phase
-		rt.currentState.PhaseProgress = 0
-		rt.currentState.LastError = ""
+		newlyDone := false
+		if !rt.vibeVoiceDone {
+			rt.vibeVoiceDone = true
+			rt.currentState.PhaseDoneCount++
+			newlyDone = true
+		}
+		if !rt.whisperDone {
+			rt.whisperDone = true
+			rt.currentState.PhaseDoneCount++
+			newlyDone = true
+		}
+		stateCopy := rt.currentState
 		rt.mu.Unlock()
-		em.Emit(a.ctx, "setup", setupProgressEvent{
-			Type:  "setup_progress",
-			Phase: phase,
-			State: stateStarted,
+
+		if newlyDone {
+			// Emit done for both phases so the SetupScreen progress bars
+			// fill in instead of staying empty. Order matches the visual
+			// layout (VibeVoice on top, Whisper below).
+			em.Emit(a.ctx, "setup", setupProgressEvent{
+				Type:  "setup_progress",
+				Phase: setup.PhaseVibeVoice,
+				State: stateDone,
+			})
+			em.Emit(a.ctx, "setup", setupProgressEvent{
+				Type:  "setup_progress",
+				Phase: setup.PhaseWhisper,
+				State: stateDone,
+			})
+
+			// Best-effort sentinel write -- install-daemon.sh already
+			// wrote one after phase 2, so this is usually a no-op refresh
+			// of the timestamp. Failure is logged but does not block the
+			// setup_state emit below.
+			data := setup.SentinelData{
+				Version:   setup.SetupExpectedVersion,
+				Timestamp: nowFn().UTC(),
+			}
+			if err := setupWriteSentinelFn(data); err != nil {
+				slog.Warn("bridge: WriteSentinel (cache-hit path) failed", "err", err)
+			}
+		}
+
+		em.Emit(a.ctx, "setup", setupStateEvent{
+			Type:           "setup_state",
+			Complete:       true,
+			Phase:          stateCopy.Phase,
+			PhaseDoneCount: stateCopy.PhaseDoneCount,
+			SetupVersion:   setup.SetupExpectedVersion,
 		})
 	}
 }

@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.7] - 2026-05-20
+
+### Fixed
+- **SetupScreen no longer freezes when models are pre-cached.** v0.2.6's SetupScreen sat forever on phases 3+4 pending whenever the user's `~/.cache/huggingface/hub/` already contained VibeVoice + Whisper from a previous Jarvis attempt. Reason: the daemon's `prefetch_models()` saw `pending=[]` and emitted a single `model_setup{state:"ready", models_pending:[]}` event — but the Go bridge's `bridgeHandleModelSetup` explicitly dropped `state:"ready"` (the original design assumed per-model `done` events would always fire, but cache-hits skip them entirely).
+- v0.2.7 extends the bridge: on `state:"ready"`, latch both `vibeVoiceDone` and `whisperDone`, emit `setup_progress{done}` for both phases, refresh sentinel, emit `setup_state{complete:true}`. Idempotent with the per-model done path so the normal download-from-scratch flow is unaffected.
+- Verified end-to-end locally with the user's exact scenario (cached HF models): daemon logged `Model prefetch: all required models already cached`, VibeVoice + Whisper loaded from cache, `TTS synthesizing: Good evening, sir.` confirmed the HUD-takeover + speech path works.
+- Regression pinned by `TestBridge_ModelSetupReadyFinalisesPhases`.
+
 ## [0.2.6] - 2026-05-20
 
 ### Fixed

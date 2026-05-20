@@ -1127,6 +1127,81 @@ func markSetupRunning(t *testing.T, a *App) {
 	})
 }
 
+// TestBridge_ModelSetupReadyFinalisesPhases regression-pins v0.2.7 fix:
+// when models are already cached in ~/.cache/huggingface (the user
+// previously installed Jarvis, models survived a ~/.jarvis wipe), the
+// daemon's prefetch_models() sees pending=[] and emits a SINGLE
+// model_setup{state:"ready", models_pending:[]} event. No model_download
+// events ever fire.
+//
+// Before v0.2.7 the bridge silently dropped state="ready" -- so the
+// per-model done branch in bridgeHandleModelDownload never ran, sentinel
+// was never written (well, install-daemon.sh wrote it earlier but the
+// bridge thought no progress was made), and setup_state{complete:true}
+// was never emitted -- SetupScreen sat forever on phases 3+4 pending.
+//
+// v0.2.7 finalises both phases on state="ready": emit done for both
+// phases, refresh sentinel, emit setup_state{complete:true}. This test
+// pins all three behaviours.
+func TestBridge_ModelSetupReadyFinalisesPhases(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+	markSetupRunning(t, a)
+
+	// Stub sentinel writer so we don't touch real ~/.jarvis. Tests assert
+	// the writer was called with a Version matching SetupExpectedVersion.
+	var sentinelWriteCount int32
+	prev := setupWriteSentinelFn
+	setupWriteSentinelFn = func(d setup.SentinelData) error {
+		atomic.AddInt32(&sentinelWriteCount, 1)
+		if d.Version != setup.SetupExpectedVersion {
+			t.Errorf("sentinel write Version = %q; want %q", d.Version, setup.SetupExpectedVersion)
+		}
+		return nil
+	}
+	t.Cleanup(func() { setupWriteSentinelFn = prev })
+
+	// Daemon's cache-hit emission.
+	a.handleDaemonModelEvent(map[string]interface{}{
+		"type":           "model_setup",
+		"state":          "ready",
+		"models_pending": []interface{}{},
+	})
+
+	if got := atomic.LoadInt32(&sentinelWriteCount); got != 1 {
+		t.Errorf("sentinel writes = %d; want 1", got)
+	}
+
+	// Expect emit order:
+	//   1. setup_progress {phase: vibevoice, state: done}
+	//   2. setup_progress {phase: whisper,   state: done}
+	//   3. setup_state    {complete: true}
+	events := rec.snapshot()
+	if len(events) != 3 {
+		t.Fatalf("emitted events = %d; want 3\nevents: %+v", len(events), events)
+	}
+	if p, ok := events[0].Event.(setupProgressEvent); !ok || p.Phase != setup.PhaseVibeVoice || p.State != stateDone {
+		t.Errorf("event[0] = %+v; want setup_progress{vibevoice, done}", events[0].Event)
+	}
+	if p, ok := events[1].Event.(setupProgressEvent); !ok || p.Phase != setup.PhaseWhisper || p.State != stateDone {
+		t.Errorf("event[1] = %+v; want setup_progress{whisper, done}", events[1].Event)
+	}
+	s, ok := events[2].Event.(setupStateEvent)
+	if !ok {
+		t.Fatalf("event[2] type = %T; want setupStateEvent", events[2].Event)
+	}
+	if !s.Complete {
+		t.Errorf("setup_state Complete = false; want true")
+	}
+	if s.PhaseDoneCount != 2 {
+		t.Errorf("setup_state PhaseDoneCount = %d; want 2 (vibevoice + whisper latched)", s.PhaseDoneCount)
+	}
+}
+
 // TestBridge_ForwardsModelDownloadVibeVoiceAsSetupProgress feeds a
 // representative model_download progress payload (matching the shape that
 // model_status.py's _build_progress_payload emits) into the bridge and
