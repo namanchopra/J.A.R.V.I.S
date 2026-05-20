@@ -429,6 +429,94 @@ class ToolExecutor:
         """Number of tool calls currently awaiting a result."""
         return len(self._pending)
 
+    async def _call_wails(
+        self,
+        method: str,
+        args: list[Any] | dict[str, Any] | None = None,
+        *,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Invoke a Wails-bound method on the Go App by its CamelCase name.
+
+        Sends a ``tool_call`` WS message with ``name`` set to the Wails
+        method (e.g. ``SpotifySearchAndPlay``) and awaits the Go app's
+        ``tool_result``. The result is normalised into a
+        ``{"result": <value>, "error": <str|None>}`` shape so callers
+        (the spotify_* / mac_* executor branches) can treat success and
+        failure uniformly without having to know the raw shape Go sends.
+
+        Args:
+            method: Wails method name in CamelCase (e.g. ``SpotifyPause``).
+            args: Positional args as a list, or kwargs as a dict.  Defaults
+                to ``[]``.
+            timeout: Max seconds to wait for the result.
+
+        Returns:
+            Dict with two keys:
+              - ``result``: The successful return value from Go (string,
+                dict, list, or None).
+              - ``error``: A string describing the failure, or ``None``
+                when the call succeeded.
+
+            Never raises -- transport, timeout and protocol failures are
+            all surfaced via the ``error`` key so the calling branch can
+            shape a voice-friendly message.
+        """
+        if args is None:
+            args = []
+
+        call_id = str(uuid.uuid4())
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._pending[call_id] = future
+
+        payload: dict[str, Any] = {
+            "type": "tool_call",
+            "id": call_id,
+            "name": method,
+            "args": args,
+        }
+
+        logger.debug("wails_call -> %s(%s) id=%s", method, args, call_id)
+
+        try:
+            await self._send(payload)
+        except Exception as exc:
+            self._pending.pop(call_id, None)
+            logger.exception("Failed to send wails_call for %s", method)
+            return {"result": None, "error": f"transport: {exc}"}
+
+        try:
+            raw = await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Wails call %s timed out after %.1fs (id=%s)", method, timeout, call_id
+            )
+            return {"result": None, "error": f"timeout after {timeout}s"}
+        finally:
+            self._pending.pop(call_id, None)
+
+        # Normalise the response. Go-side tool_result messages may come back
+        # in a few shapes; accept any of them:
+        #   1. {"result": ..., "error": "..."}        -- already normalised
+        #   2. {"ok": True,  "message": "..."}        -- daemon-style ok
+        #   3. {"ok": False, "error":   "..."}        -- daemon-style err
+        #   4. {"ok": False, "message": "..."}        -- daemon-style err (alt)
+        #   5. a bare string / scalar                 -- treat as success value
+        if isinstance(raw, dict):
+            if "error" in raw and "result" in raw:
+                return {"result": raw.get("result"), "error": raw.get("error")}
+            if raw.get("ok") is False:
+                err = raw.get("error") or raw.get("message") or "unknown error"
+                return {"result": None, "error": str(err)}
+            # ok=True or no ok key — treat message/result as the success value.
+            value = raw.get("result")
+            if value is None:
+                value = raw.get("message")
+            return {"result": value, "error": None}
+
+        return {"result": raw, "error": None}
+
     async def execute(
         self,
         name: str,
@@ -449,6 +537,67 @@ class ToolExecutor:
         """
         if args is None:
             args = {}
+
+        # -----------------------------------------------------------------
+        # v0.3.0 -- Spotify tools (TASK-010 executor branches)
+        # -----------------------------------------------------------------
+        # These tools have shaped behaviour (friendly empty-arg messages,
+        # ErrNotAuthenticated surfacing, "not yet wired" placeholders) so
+        # they short-circuit before the generic WS dispatch below.
+        # The 6 placeholders never touch the WS at all so they're safe to
+        # call against a no-op ws_send_fn during unit tests.
+        if name == "spotify_search_and_play":
+            query = str(args.get("query", "")).strip()
+            if not query:
+                return {"ok": False, "message": "I need a song name to play."}
+            result = await self._call_wails(
+                "SpotifySearchAndPlay", [query], timeout=timeout
+            )
+            if result.get("error"):
+                err_text = str(result["error"])
+                if (
+                    "ErrNotAuthenticated" in err_text
+                    or "not authenticated" in err_text.lower()
+                ):
+                    return {
+                        "ok": False,
+                        "message": "I need you to connect Spotify first — open Settings → Connections.",
+                    }
+                return {"ok": False, "message": f"Couldn't play that: {err_text}"}
+            return {"ok": True, "message": result.get("result") or "Playing."}
+
+        if name == "spotify_pause":
+            result = await self._call_wails("SpotifyPause", [], timeout=timeout)
+            err = result.get("error")
+            if err is None:
+                return {"ok": True, "message": "Paused."}
+            return {"ok": False, "message": f"Couldn't pause: {err}"}
+
+        if name == "spotify_resume":
+            result = await self._call_wails("SpotifyResume", [], timeout=timeout)
+            err = result.get("error")
+            if err is None:
+                return {"ok": True, "message": "Resuming."}
+            return {"ok": False, "message": f"Couldn't resume: {err}"}
+
+        # Six Spotify tools whose Go-side AppleScript helpers exist in
+        # internal/spotify but aren't exposed as Wails bindings yet
+        # (skip/previous/now-playing/set-volume/like/queue). Return a
+        # friendly "landing soon" message instead of crashing or sending
+        # a tool_call the Go side can't route.
+        if name in {
+            "spotify_skip",
+            "spotify_previous",
+            "spotify_what_is_playing",
+            "spotify_set_volume",
+            "spotify_like_current",
+            "spotify_queue",
+        }:
+            action = name.removeprefix("spotify_").replace("_", " ")
+            return {
+                "ok": False,
+                "message": f"Spotify {action} isn't wired up yet — landing in a follow-up.",
+            }
 
         call_id = str(uuid.uuid4())
         loop = asyncio.get_running_loop()
