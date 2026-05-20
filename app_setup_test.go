@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -500,6 +501,96 @@ func TestRunSetup_DeduplicatesConcurrentCalls(t *testing.T) {
 
 	if got := atomic.LoadInt32(&spawnCount); got != 1 {
 		t.Errorf("setupSpawnerFn invocations = %d; want 1 (dedup failed)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Daemon auto-launch after successful RunSetup (v0.2.6)
+// ---------------------------------------------------------------------------
+
+// TestRunSetup_LaunchesDaemonAfterSuccess regression-pins v0.2.6 fix:
+// when install-daemon.sh completes phases 1+2 and writes the sentinel,
+// RunSetup must call StartJarvis to kick off the daemon. Otherwise the
+// SetupScreen sits forever on "phase 2 done" because phases 3+4 are
+// driven by daemon-emitted model_download events that never fire (the
+// daemon was never launched -- the app's startup() StartJarvis call had
+// bailed earlier with ErrSetupRequired because the sentinel didn't exist
+// yet).
+//
+// We don't actually exercise the full daemon launch -- that would require
+// a real Python + venv on disk. Instead we just confirm RunSetup attempts
+// to spawn a daemon process by capturing startJarvisCommandFn invocations.
+func TestRunSetup_LaunchesDaemonAfterSuccess(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	stubInstallScript(t, tmp)
+
+	// Stub the quarantine strip and bundle resources dir so StartJarvis
+	// gets past its early bookkeeping.
+	fakeResources := filepath.Join(tmp, "Jarvis.app", "Contents", "Resources")
+	prevDirFn := bundledResourcesDirFn
+	bundledResourcesDirFn = func() string { return fakeResources }
+	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
+	prevStripFn := stripQuarantineFn
+	stripQuarantineFn = func(p string) error { return nil }
+	t.Cleanup(func() { stripQuarantineFn = prevStripFn })
+
+	// StartJarvis needs a sentinel + bundled requirements.txt to pass its
+	// preflight checks. writeValidSentinel materialises both.
+	writeValidSentinel(t, fakeResources)
+	// And a venv python so StartJarvis resolves an interpreter.
+	venvPy := filepath.Join(paths.DaemonVenvDir(), "bin", "python")
+	if err := os.MkdirAll(filepath.Dir(venvPy), 0o755); err != nil {
+		t.Fatalf("mkdir venv python dir: %v", err)
+	}
+	if err := os.WriteFile(venvPy, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write venv python: %v", err)
+	}
+	// And a daemon main.py.
+	mainPy := filepath.Join(paths.DaemonSourceDir(), "main.py")
+	if err := os.MkdirAll(filepath.Dir(mainPy), 0o755); err != nil {
+		t.Fatalf("mkdir daemon dir: %v", err)
+	}
+	if err := os.WriteFile(mainPy, []byte("# main\n"), 0o644); err != nil {
+		t.Fatalf("write main.py: %v", err)
+	}
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	_ = installRecorder(t, a)
+
+	// Spawner returns a clean phase-done sequence so RunSetup succeeds.
+	prev := setupSpawnerFn
+	setupSpawnerFn = func(_ context.Context, _ setupSpawnArgs) (*setupSpawnResult, error) {
+		stderr := "PHASE: python_install\nPHASE_PROGRESS: 100\nPHASE_DONE: python_install\nPHASE: venv_install\nPHASE_PROGRESS: 100\nPHASE_DONE: venv_install\n"
+		return &setupSpawnResult{
+			Stderr: io.NopCloser(strings.NewReader(stderr)),
+			Wait:   func() error { return nil },
+		}, nil
+	}
+	t.Cleanup(func() { setupSpawnerFn = prev })
+
+	// Capture daemon launch invocations. /bin/true exits immediately so
+	// the daemon monitor goroutine reaps cleanly before t.Cleanup tears
+	// down the temp HOME.
+	var daemonLaunches int32
+	prevCmdFn := startJarvisCommandFn
+	startJarvisCommandFn = func(name string, arg ...string) *exec.Cmd {
+		atomic.AddInt32(&daemonLaunches, 1)
+		return exec.Command("/bin/true")
+	}
+	t.Cleanup(func() { startJarvisCommandFn = prevCmdFn })
+
+	_, err := a.RunSetup()
+	if err != nil {
+		t.Fatalf("RunSetup = %v; want nil", err)
+	}
+	// Give the daemon-monitor goroutine a moment to fire so /bin/true
+	// reaps before t.Cleanup tears down the temp dir.
+	time.Sleep(100 * time.Millisecond)
+
+	if got := atomic.LoadInt32(&daemonLaunches); got != 1 {
+		t.Errorf("startJarvisCommandFn invocations = %d; want 1 (daemon must auto-launch after RunSetup success so phases 3+4 can fire)", got)
 	}
 }
 

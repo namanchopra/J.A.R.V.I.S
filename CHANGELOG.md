@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.6] - 2026-05-20
+
+### Fixed
+- **SetupScreen no longer freezes at phases 1+2 done.** `RunSetup` now calls `StartJarvis` after `install-daemon.sh` returns successfully, so the daemon launches as soon as the python + venv are installed. Without this fix, phases 3+4 (VibeVoice + Whisper model downloads) could never fire because the daemon — the thing that downloads the models — was never launched: the app's startup-time `StartJarvis` call had already bailed earlier with `ErrSetupRequired` because the sentinel didn't exist yet, and nothing re-fired it after the sentinel was written.
+- Verified end-to-end locally before tagging: launched the locally-built `.app` from `/tmp` (simulating a Finder launch), watched setup complete (python download + venv with 181 packages), and confirmed the daemon process spawned and logged `Pipecat 1.2.1 (Python 3.13.13)` to `~/.jarvis/logs/daemon.log` within seconds of setup completion.
+
 ## [0.2.5] - 2026-05-20
 
 ### Fixed

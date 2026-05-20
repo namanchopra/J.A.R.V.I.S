@@ -814,6 +814,24 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 		}
 		attemptErr := a.runSetupAttempt(parentCtx, args, logFile)
 		if attemptErr == nil {
+			// install-daemon.sh finished phases 1+2 (python + venv) and wrote
+			// the sentinel. The daemon must now launch so phases 3+4
+			// (VibeVoice + Whisper model downloads) can fire via the model-
+			// event bridge wired up at the top of RunSetup. StartJarvis was
+			// called once at app startup but bailed with ErrSetupRequired
+			// because the sentinel did not exist yet; without re-firing it
+			// here the daemon never starts and the SetupScreen sits forever
+			// on phases 1+2 done.
+			if startErr := a.StartJarvis(); startErr != nil {
+				slog.Warn("RunSetup: daemon launch after setup completion failed",
+					"err", startErr)
+				// Don't surface this as a setup failure -- phases 1+2 DID
+				// complete. The App.tsx daemonLaunchFailed banner path is
+				// the right surface for "daemon won't start", and a future
+				// daemon retry from Settings can recover.
+			} else {
+				slog.Info("RunSetup: daemon launched after setup completion; model downloads will drive phases 3+4")
+			}
 			return a.snapshotSetupState(), nil
 		}
 		lastAttemptErr = attemptErr
