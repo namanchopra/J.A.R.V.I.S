@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { SettingsPanelProps } from './types'
 import type { config as cfgModels } from '../../../wailsjs/go/models'
-import { ValidateAPIKey, IsOllamaRunning } from '../../../wailsjs/go/main/App'
+import {
+  ValidateAPIKey,
+  IsOllamaRunning,
+  SpotifyIsConnected,
+  SpotifySignIn,
+  SpotifySignOut,
+} from '../../../wailsjs/go/main/App'
 import { FridayPairingModal } from './FridayPairingModal'
 
 // ---------------------------------------------------------------------------
@@ -400,6 +406,56 @@ export function ConnectionsPanel({
   // visibility.
   const [fridayPairOpen, setFridayPairOpen] = useState<boolean>(false)
 
+  // v0.3.0 — Spotify connection state. Polled once on mount; SignIn is
+  // blocking (opens browser, waits for OAuth callback) so the button
+  // surfaces an in-flight pill. SignIn / SignOut errors land in
+  // spotifyError so the user can see why a sign-in dropped without
+  // hunting through logs.
+  const [spotifyConnected, setSpotifyConnected] = useState<boolean>(false)
+  const [spotifyBusy, setSpotifyBusy] = useState<boolean>(false)
+  const [spotifyError, setSpotifyError] = useState<string | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const ok = await SpotifyIsConnected()
+        if (!cancelled) setSpotifyConnected(Boolean(ok))
+      } catch {
+        if (!cancelled) setSpotifyConnected(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  async function handleSpotifyConnect(): Promise<void> {
+    if (spotifyBusy) return
+    setSpotifyBusy(true)
+    setSpotifyError(null)
+    try {
+      await SpotifySignIn()
+      const ok = await SpotifyIsConnected()
+      setSpotifyConnected(Boolean(ok))
+    } catch (err) {
+      setSpotifyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSpotifyBusy(false)
+    }
+  }
+  async function handleSpotifyDisconnect(): Promise<void> {
+    if (spotifyBusy) return
+    setSpotifyBusy(true)
+    setSpotifyError(null)
+    try {
+      await SpotifySignOut()
+      setSpotifyConnected(false)
+    } catch (err) {
+      setSpotifyError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSpotifyBusy(false)
+    }
+  }
+
   // v0.1.5: LLM model selection now persists via cfg.llmModel (same
   // ConnectionsConfig superset cast pattern as the v0.1.2 key migration).
   // The default when cfg.llmModel is empty/undefined stays at
@@ -589,6 +645,66 @@ export function ConnectionsPanel({
             Runs git pull then copies .claude/ to all workspaces
           </span>
         </div>
+      </section>
+
+      {/* v0.3.0 — Spotify connection.
+          Drives SpotifySignIn (PKCE OAuth) / SpotifySignOut. Tokens persist
+          to ~/.jarvis/spotify.json (split out of config.Config so the
+          generated Wails Config class stays primitive-only). */}
+      <section className="holo-panel p-4" data-testid="spotify-section">
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-sm font-semibold text-[#00e5ff]">Spotify</h2>
+          <span
+            className={
+              spotifyConnected
+                ? 'text-[10px] px-2 py-1 rounded bg-green-500/15 text-green-400 border border-green-500/30 whitespace-nowrap'
+                : 'text-[10px] px-2 py-1 rounded bg-[#1a2632] text-[#4a6278] border border-[#2d3f52] whitespace-nowrap'
+            }
+            data-testid="spotify-status-pill"
+          >
+            {spotifyConnected ? 'Connected' : 'Not connected'}
+          </span>
+        </div>
+        <p className="text-xs text-[#8ba4b8] mb-3">
+          Authorize Jarvis to search the Spotify Web API. Local play / pause /
+          resume work without this — the AppleScript path drives Spotify.app
+          directly — but "play X" by name needs Web API access.
+        </p>
+        <div className="flex items-center gap-2">
+          {spotifyConnected ? (
+            <button
+              type="button"
+              onClick={() => void handleSpotifyDisconnect()}
+              disabled={spotifyBusy}
+              data-testid="spotify-disconnect"
+              className="text-xs px-3 py-1.5 rounded bg-red-500/80 hover:bg-red-500 text-white disabled:opacity-50 transition-colors"
+            >
+              {spotifyBusy ? 'Working…' : 'Disconnect'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void handleSpotifyConnect()}
+              disabled={spotifyBusy}
+              data-testid="spotify-connect"
+              className="text-xs px-3 py-1.5 rounded bg-[#1db954] hover:bg-[#1db954]/85 text-black font-semibold disabled:opacity-50 transition-colors"
+            >
+              {spotifyBusy ? 'Opening browser…' : 'Connect Spotify'}
+            </button>
+          )}
+          <span className="text-[10px] text-[#4a6278] font-mono">
+            {spotifyConnected ? 'OAuth token on disk' : 'Opens spotify.com to authorize'}
+          </span>
+        </div>
+        {spotifyError && (
+          <p
+            className="text-[10px] text-red-400 mt-2 font-mono"
+            data-testid="spotify-error"
+            title={spotifyError}
+          >
+            {spotifyError}
+          </p>
+        )}
       </section>
 
       {/* v0.3.0 / TASK-025 — Friday mobile companion pairing.
