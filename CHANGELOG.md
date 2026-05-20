@@ -15,6 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.10] - 2026-05-20
+
+### Fixed
+- **Phases 3+4 progress bars actually tick now.** v0.2.9 wired the filesystem progress poller correctly in the daemon, but the Go bridge subscription was being **torn down by `RunSetup`'s deferred cleanup before phases 3+4 even started**. After v0.2.6 made `RunSetup` return as soon as `install-daemon.sh` finished + the daemon launched, the defer fired and called `bridgeCancel()` — the daemon's `model_download/progress` events fired into a void because nothing was listening.
+- v0.2.10 restructures lifecycle: RunSetup's happy-path defer no longer clears `rt.running` or tears down the bridge subscription. The bridge stays subscribed through phases 3+4 and **self-finalises** via a new `clearSetupRunningAndUnsubscribe()` helper that runs when:
+  1. `model_setup{state:"ready"}` arrives (cache-hit or all-done), OR
+  2. Both per-model `model_download{state:"done"}` events have been observed
+- Error paths in `RunSetup` (script failure, spawn failure, terminal hand-off failure) now call the same helper explicitly so the bridge always gets torn down — no orphan subscriptions.
+- Net result: with v0.2.9's filesystem poller emitting every 500 ms + v0.2.10's bridge staying alive to receive them, the SetupScreen Phase 3 and Phase 4 progress bars finally tick smoothly during real downloads.
+
 ## [0.2.9] - 2026-05-20
 
 ### Fixed

@@ -733,19 +733,38 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 	rt.whisperDone = false
 	rt.mu.Unlock()
 
-	// Always clear the running flag on exit AND tear down the daemon-event
-	// subscription so model events post-setup stop being re-emitted on the
-	// `setup` channel — they continue to flow on the `jarvis` channel to
-	// whoever else is listening (the FirstRunDownloadOverlay).
+	// On exit: clear the running flag for error paths only. For the happy
+	// path (install-daemon.sh succeeded, daemon launched), KEEP rt.running
+	// true and KEEP the bridge subscription alive -- phases 3+4 (VibeVoice
+	// + Whisper downloads) happen AFTER this function returns, driven by
+	// the daemon. The bridge needs to stay subscribed so it can re-emit
+	// the daemon's model_download/progress events onto the `setup` channel
+	// for the SetupScreen. The bridge itself tears down the subscription
+	// + clears running once it sees both phases done OR a model_setup
+	// state=ready event (see clearSetupRunningAndUnsubscribe).
+	//
+	// v0.2.6 broke this: it returned from RunSetup as soon as the daemon
+	// launched, and this defer fired -- which tore down the bridge JUST
+	// before phases 3+4 fired. Net result: bars never moved because
+	// handleDaemonModelEvent was unsubscribed and rt.running was false.
 	defer func() {
 		rt.mu.Lock()
-		rt.running = false
-		cancel := rt.bridgeCancel
-		rt.bridgeCancel = nil
+		stillRunning := rt.running
 		rt.mu.Unlock()
-		if cancel != nil {
-			cancel()
+		if !stillRunning {
+			// Error path already cleared running (see error handlers below).
+			// Tear down bridge too if not already done.
+			rt.mu.Lock()
+			cancel := rt.bridgeCancel
+			rt.bridgeCancel = nil
+			rt.mu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
 		}
+		// Happy path: leave running=true + bridge alive. The bridge will
+		// self-finalise via clearSetupRunningAndUnsubscribe once the
+		// daemon signals model setup completion.
 	}()
 
 	args, err := resolveSetupSpawnArgs()
@@ -753,6 +772,7 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 		wrapped := fmt.Errorf("RunSetup: %w", err)
 		a.setSetupError(wrapped.Error())
 		a.emitErrorEvent(wrapped.Error())
+		a.clearSetupRunningAndUnsubscribe() // tear down bridge for error path
 		return a.snapshotSetupState(), wrapped
 	}
 
@@ -846,6 +866,7 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 				a.setSetupError(msg)
 				a.emitErrorEvent(msg)
 			}
+			a.clearSetupRunningAndUnsubscribe()
 			return a.snapshotSetupState(), fmt.Errorf("RunSetup: %w", attemptErr)
 		}
 	}
@@ -863,6 +884,7 @@ func (a *App) RunSetup() (setup.SetupState, error) {
 		finalMsg := fmt.Sprintf("setup did not progress after %d attempts and Terminal hand-off failed: %v", setupMaxAttempts, launchErr)
 		a.setSetupError(finalMsg)
 		a.emitErrorEvent(finalMsg)
+		a.clearSetupRunningAndUnsubscribe()
 		return a.snapshotSetupState(), fmt.Errorf("RunSetup: %w", lastAttemptErr)
 	}
 	// Let the SetupScreen explain what just happened.
@@ -1372,6 +1394,13 @@ func (a *App) bridgeHandleModelSetup(payload map[string]interface{}, em eventEmi
 			PhaseDoneCount: stateCopy.PhaseDoneCount,
 			SetupVersion:   setup.SetupExpectedVersion,
 		})
+
+		// Finalise: tear down the daemon-event bridge subscription so we
+		// don't keep re-emitting on the `setup` channel after the user has
+		// transitioned to the HUD. RunSetup's deferred cleanup deliberately
+		// LEAVES rt.running == true on the happy path so the bridge stays
+		// alive through phases 3+4 -- this is where we close it.
+		a.clearSetupRunningAndUnsubscribe()
 	}
 }
 
@@ -1503,6 +1532,12 @@ func (a *App) bridgeHandleModelDownload(payload map[string]interface{}, em event
 				PhaseDoneCount: stateCopy.PhaseDoneCount,
 				SetupVersion:   setup.SetupExpectedVersion,
 			})
+
+			// Finalise: same teardown as the cache-hit path. RunSetup's
+			// happy-path defer leaves the bridge alive specifically so
+			// this branch can fire -- close it now that both per-model
+			// done events have arrived.
+			a.clearSetupRunningAndUnsubscribe()
 		}
 
 	case "error":
@@ -1573,6 +1608,31 @@ func (a *App) setSetupError(msg string) {
 	rt.mu.Lock()
 	rt.currentState.LastError = msg
 	rt.mu.Unlock()
+}
+
+// clearSetupRunningAndUnsubscribe tears down the in-flight setup state:
+// clears rt.running so the dedup gate in RunSetup will let the next call
+// through, and cancels the daemon-event bridge subscription so model
+// events stop being re-emitted on the `setup` channel (they keep flowing
+// on the `jarvis` channel for any other listener).
+//
+// Called from:
+//   - RunSetup error paths (script failure, spawn failure)
+//   - bridgeHandleModelSetup (state="ready" -- all models ready / cached)
+//   - bridgeHandleModelDownload (state="done" -- both per-model done events seen)
+//
+// Idempotent: safe to call multiple times; the second call no-ops because
+// rt.running is already false and rt.bridgeCancel is nil.
+func (a *App) clearSetupRunningAndUnsubscribe() {
+	rt := setupRuntimeFor(a)
+	rt.mu.Lock()
+	rt.running = false
+	cancel := rt.bridgeCancel
+	rt.bridgeCancel = nil
+	rt.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // snapshotSetupState returns a value copy of the cached state under the
