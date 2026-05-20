@@ -122,6 +122,10 @@ export function ForkSession(arg1) {
   return window['go']['main']['App']['ForkSession'](arg1);
 }
 
+export function GenerateMobilePairingQR() {
+  return window['go']['main']['App']['GenerateMobilePairingQR']();
+}
+
 export function GetActiveSessions() {
   return window['go']['main']['App']['GetActiveSessions']();
 }

@@ -77,6 +77,8 @@ export function FocusTerminalWindow(arg1:string):Promise<void>;
 
 export function ForkSession(arg1:string):Promise<model.Session>;
 
+export function GenerateMobilePairingQR():Promise<string>;
+
 export function GetActiveSessions():Promise<Array<model.Session>>;
 
 export function GetActivityFeed(arg1:number,arg2:string):Promise<Array<model.ActivityEvent>>;
