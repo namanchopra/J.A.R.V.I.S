@@ -195,7 +195,7 @@ func TestCurrentTrack_ParsesPipeDelimitedOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentTrack error: %v", err)
 	}
-	want := Track{
+	want := AppleScriptTrack{
 		Name:            "Blinding Lights",
 		Artist:          "The Weeknd",
 		URI:             "spotify:track:0VjIjW4GlUZAMYd2vXMi3b",
@@ -247,7 +247,7 @@ func TestCurrentTrack_SpotifyNotRunning_ReturnsZeroValueNoError(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CurrentTrack with Spotify not running expected nil error, got %v", err)
 			}
-			if got != (Track{}) {
+			if got != (AppleScriptTrack{}) {
 				t.Errorf("CurrentTrack with Spotify not running expected zero Track, got %+v", got)
 			}
 		})
@@ -278,7 +278,7 @@ func TestCurrentTrack_EmptyOutputReturnsZeroValue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentTrack empty output error: %v", err)
 	}
-	if got != (Track{}) {
+	if got != (AppleScriptTrack{}) {
 		t.Errorf("CurrentTrack empty output expected zero Track, got %+v", got)
 	}
 }

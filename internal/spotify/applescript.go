@@ -62,7 +62,11 @@ func NewAppleScript() *AppleScript {
 // Track is the subset of Spotify's "current track" metadata Jarvis cares
 // about. A zero-valued Track signals "Spotify isn't playing anything (or
 // isn't running)" — see CurrentTrack for the not-running contract.
-type Track struct {
+// AppleScriptTrack is the local-control track snapshot. Distinct from the
+// canonical Track in web.go (which has Album from the Web API and no
+// PositionSeconds). v0.3.0 keeps them separate so neither has to carry
+// fields the other can't populate.
+type AppleScriptTrack struct {
 	Name            string `json:"name"`
 	Artist          string `json:"artist"`
 	URI             string `json:"uri"`
@@ -150,7 +154,7 @@ func (a *AppleScript) SetVolume(pct int) error {
 //
 // Any other osascript failure (script syntax error, parse failure, etc.)
 // is returned as a wrapped error.
-func (a *AppleScript) CurrentTrack() (Track, error) {
+func (a *AppleScript) CurrentTrack() (AppleScriptTrack, error) {
 	const script = `tell application "Spotify"
 	set t to current track
 	return (name of t) & "|" & (artist of t) & "|" & (spotify url of t) & "|" & (player position as integer)
@@ -161,13 +165,13 @@ end tell`
 		// when the app isn't running and we ask it to look at a current
 		// track. Treat that signature as a soft "not running" state.
 		if isSpotifyNotRunning(out) || isSpotifyNotRunning(err.Error()) {
-			return Track{}, nil
+			return AppleScriptTrack{}, nil
 		}
-		return Track{}, fmt.Errorf("CurrentTrack: %w", err)
+		return AppleScriptTrack{}, fmt.Errorf("CurrentTrack: %w", err)
 	}
 	track, parseErr := parseCurrentTrack(out)
 	if parseErr != nil {
-		return Track{}, fmt.Errorf("CurrentTrack: %w", parseErr)
+		return AppleScriptTrack{}, fmt.Errorf("CurrentTrack: %w", parseErr)
 	}
 	return track, nil
 }
@@ -181,20 +185,20 @@ func isSpotifyNotRunning(s string) bool {
 // parseCurrentTrack parses the pipe-delimited output of the CurrentTrack
 // AppleScript snippet. Empty input produces a zero-valued Track without
 // error (Spotify returned no track).
-func parseCurrentTrack(out string) (Track, error) {
+func parseCurrentTrack(out string) (AppleScriptTrack, error) {
 	out = strings.TrimSpace(out)
 	if out == "" {
-		return Track{}, nil
+		return AppleScriptTrack{}, nil
 	}
 	parts := strings.Split(out, "|")
 	if len(parts) != 4 {
-		return Track{}, fmt.Errorf("unexpected current-track format: %q", out)
+		return AppleScriptTrack{}, fmt.Errorf("unexpected current-track format: %q", out)
 	}
 	pos, err := strconv.Atoi(strings.TrimSpace(parts[3]))
 	if err != nil {
-		return Track{}, fmt.Errorf("parse position %q: %w", parts[3], err)
+		return AppleScriptTrack{}, fmt.Errorf("parse position %q: %w", parts[3], err)
 	}
-	return Track{
+	return AppleScriptTrack{
 		Name:            strings.TrimSpace(parts[0]),
 		Artist:          strings.TrimSpace(parts[1]),
 		URI:             strings.TrimSpace(parts[2]),
