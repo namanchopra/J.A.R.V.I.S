@@ -15,6 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.12] - 2026-05-20
+
+### Fixed
+- **Voice no longer breaks after closing and reopening Jarvis.** Root cause was a latent corruption bug going back to v0.2.7: the Go bridge re-wrote `~/.jarvis/.setup-version-0.2.0` from `bridgeHandleModelSetup` (cache-hit path) and `bridgeHandleModelDownload` (both-done path) using an incomplete `setup.SentinelData{Version, Timestamp}` struct, **overwriting the canonical `requirements_sha256` and `python_pbs_tag` fields that install-daemon.sh had written after phase 2** with empty strings.
+- On the next launch, `setup.ReadSentinel` hashes the bundled `requirements.txt` and compares it to `sentinel.RequirementsSHA256`. With the latter blank, the comparison fails → returns `ErrSetupRequired` → `StartJarvis` bails with "setup not complete" → daemon never launches → HUD shows but LLM/STT/TTS labels stay `—` and voice doesn't work.
+- v0.2.12 simply removes both bridge sentinel-write call sites. install-daemon.sh's bash-side write is canonical and complete; the bridge had no business touching the file. Tests updated to assert the bridge does NOT call `setupWriteSentinelFn`.
+
+### Migration for affected users
+If your sentinel was corrupted by v0.2.7–v0.2.11, repair it manually with the correct SHA + PBS tag:
+```bash
+SHA=$(shasum -a 256 /Applications/Jarvis.app/Contents/Resources/jarvis-daemon/requirements.txt | awk '{print $1}')
+cat > ~/.jarvis/.setup-version-0.2.0 <<EOF
+version: 0.2.0
+timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+requirements_sha256: $SHA
+python_pbs_tag: 20260510
+EOF
+```
+Or just install v0.2.12+ over the top and re-run setup (Settings → Diagnostics → "Re-run setup").
+
 ## [0.2.11] - 2026-05-20
 
 ### Fixed

@@ -1381,17 +1381,15 @@ func (a *App) bridgeHandleModelSetup(payload map[string]interface{}, em eventEmi
 				State: stateDone,
 			})
 
-			// Best-effort sentinel write -- install-daemon.sh already
-			// wrote one after phase 2, so this is usually a no-op refresh
-			// of the timestamp. Failure is logged but does not block the
-			// setup_state emit below.
-			data := setup.SentinelData{
-				Version:   setup.SetupExpectedVersion,
-				Timestamp: nowFn().UTC(),
-			}
-			if err := setupWriteSentinelFn(data); err != nil {
-				slog.Warn("bridge: WriteSentinel (cache-hit path) failed", "err", err)
-			}
+			// v0.2.12: do NOT re-write the sentinel here. install-daemon.sh
+			// already wrote the canonical sentinel (with the correct
+			// requirements_sha256 + python_pbs_tag) after phase 2. Calling
+			// setupWriteSentinelFn here with an incomplete SentinelData
+			// (Version + Timestamp only) OVERWRITES those critical fields
+			// with empty strings -- and IsSetupComplete on the NEXT launch
+			// then fails its SHA check, treats setup as incomplete, and
+			// StartJarvis bails with ErrSetupRequired. That's the "voice
+			// no longer works after restart" bug.
 		}
 
 		em.Emit(a.ctx, "setup", setupStateEvent{
@@ -1516,19 +1514,14 @@ func (a *App) bridgeHandleModelDownload(payload map[string]interface{}, em event
 		})
 
 		if writeSentinel {
-			// Best-effort sentinel write. The bridge is the optimistic
-			// "we made it through phase 4 cleanly" sentinel; the next
-			// launch will still re-verify via setup.ReadSentinel against
-			// the bundled requirements.txt. A write failure is logged
-			// but does NOT block the setup_state emission — the React
-			// HUD still flips out of the SetupScreen based on the event.
-			data := setup.SentinelData{
-				Version:   setup.SetupExpectedVersion,
-				Timestamp: nowFn().UTC(),
-			}
-			if err := setupWriteSentinelFn(data); err != nil {
-				slog.Warn("bridge: WriteSentinel failed (HUD still flips via setup_state)", "err", err)
-			}
+			// v0.2.12: do NOT re-write the sentinel here either.
+			// install-daemon.sh's write after phase 2 is the canonical one
+			// (with correct requirements_sha256 + python_pbs_tag). The
+			// previous incomplete-struct write here was overwriting those
+			// fields with empty strings, which made the NEXT launch's
+			// IsSetupComplete fail its SHA check and bail with
+			// ErrSetupRequired. See v0.2.7 cache-hit branch above for
+			// the same fix.
 			// Emit setup_state {complete:true} so the React HUD swaps
 			// out of the SetupScreen immediately, without waiting for
 			// the next launch's IsSetupComplete to fire.

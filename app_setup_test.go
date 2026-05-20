@@ -1152,15 +1152,15 @@ func TestBridge_ModelSetupReadyFinalisesPhases(t *testing.T) {
 	rec := installRecorder(t, a)
 	markSetupRunning(t, a)
 
-	// Stub sentinel writer so we don't touch real ~/.jarvis. Tests assert
-	// the writer was called with a Version matching SetupExpectedVersion.
+	// v0.2.12 contract: bridge must NOT re-write the sentinel here. The
+	// install-daemon.sh sentinel write (with the correct
+	// requirements_sha256 + python_pbs_tag) is canonical; the bridge's
+	// previous incomplete-struct write corrupted those fields and broke
+	// IsSetupComplete on the next launch.
 	var sentinelWriteCount int32
 	prev := setupWriteSentinelFn
 	setupWriteSentinelFn = func(d setup.SentinelData) error {
 		atomic.AddInt32(&sentinelWriteCount, 1)
-		if d.Version != setup.SetupExpectedVersion {
-			t.Errorf("sentinel write Version = %q; want %q", d.Version, setup.SetupExpectedVersion)
-		}
 		return nil
 	}
 	t.Cleanup(func() { setupWriteSentinelFn = prev })
@@ -1172,8 +1172,8 @@ func TestBridge_ModelSetupReadyFinalisesPhases(t *testing.T) {
 		"models_pending": []interface{}{},
 	})
 
-	if got := atomic.LoadInt32(&sentinelWriteCount); got != 1 {
-		t.Errorf("sentinel writes = %d; want 1", got)
+	if got := atomic.LoadInt32(&sentinelWriteCount); got != 0 {
+		t.Errorf("sentinel writes = %d; want 0 (bridge must not touch the sentinel)", got)
 	}
 
 	// Expect emit order:
@@ -1409,18 +1409,16 @@ func TestBridge_ErrorEventPropagatesToSetupProgress(t *testing.T) {
 	}
 }
 
-// TestBridge_WhisperCompletionWritesSentinel asserts the bridge's
-// end-of-phase-4 contract: when BOTH vibevoice and whisper have emitted
-// {state:done}, the bridge must invoke setupWriteSentinelFn exactly once
-// AND emit a setup_state {complete:true} event so the React HUD can flip
-// out of the SetupScreen without waiting for the next launch.
-//
-// The sentinel write itself is recorded via a substituted
-// setupWriteSentinelFn so the test doesn't touch ~/.jarvis. The write
-// must happen on the whisper done (vibevoice was first), not before,
-// to mirror the production ordering where the daemon downloads
-// vibevoice then whisper serially.
-func TestBridge_WhisperCompletionWritesSentinel(t *testing.T) {
+// TestBridge_WhisperCompletionDoesNotWriteSentinel pins the v0.2.12 contract:
+// when BOTH vibevoice and whisper have emitted {state:done}, the bridge must
+// emit a setup_state {complete:true} event so the React HUD can flip out of
+// the SetupScreen -- but it must NOT touch the sentinel file. The sentinel
+// was written by install-daemon.sh's bash code (with the correct
+// requirements_sha256 + python_pbs_tag) after phase 2; any re-write here
+// with the bridge's incomplete SentinelData (Version + Timestamp only)
+// destroys the SHA + PBS tag fields and breaks IsSetupComplete on the next
+// launch (the "voice no longer works after restart" v0.2.11 bug).
+func TestBridge_WhisperCompletionDoesNotWriteSentinel(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
@@ -1429,8 +1427,8 @@ func TestBridge_WhisperCompletionWritesSentinel(t *testing.T) {
 	rec := installRecorder(t, a)
 	markSetupRunning(t, a)
 
-	// Recorder for sentinel writes. Each invocation appends the data so
-	// we can assert the call count + payload at the end.
+	// Recorder for sentinel writes. Each invocation appends so we can
+	// assert the count at the end. v0.2.12 contract: 0 writes.
 	var sentinelCalls []setup.SentinelData
 	prevWrite := setupWriteSentinelFn
 	setupWriteSentinelFn = func(d setup.SentinelData) error {
@@ -1439,8 +1437,7 @@ func TestBridge_WhisperCompletionWritesSentinel(t *testing.T) {
 	}
 	t.Cleanup(func() { setupWriteSentinelFn = prevWrite })
 
-	// Step 1: vibevoice done — sentinel must NOT be written yet (whisper
-	// hasn't finished).
+	// Step 1: vibevoice done — sentinel must NOT be written.
 	a.handleDaemonModelEvent(map[string]interface{}{
 		"type":  "model_download",
 		"model": "vibevoice",
@@ -1450,21 +1447,15 @@ func TestBridge_WhisperCompletionWritesSentinel(t *testing.T) {
 		t.Errorf("after vibevoice done only: sentinel write count = %d; want 0", got)
 	}
 
-	// Step 2: whisper done — both models complete; sentinel is written
-	// AND a setup_state {complete:true} event is emitted.
+	// Step 2: whisper done — both models complete; bridge emits
+	// setup_state{complete:true} but STILL does not write the sentinel.
 	a.handleDaemonModelEvent(map[string]interface{}{
 		"type":  "model_download",
 		"model": "whisper",
 		"state": "done",
 	})
-	if got := len(sentinelCalls); got != 1 {
-		t.Fatalf("after whisper done: sentinel write count = %d; want 1", got)
-	}
-	if sentinelCalls[0].Version != setup.SetupExpectedVersion {
-		t.Errorf("sentinel Version = %q; want %q", sentinelCalls[0].Version, setup.SetupExpectedVersion)
-	}
-	if sentinelCalls[0].Timestamp.IsZero() {
-		t.Errorf("sentinel Timestamp is zero; want a real time")
+	if got := len(sentinelCalls); got != 0 {
+		t.Fatalf("after whisper done: sentinel write count = %d; want 0 (bridge must not touch the sentinel -- install-daemon.sh owns it)", got)
 	}
 
 	// And a setup_state {complete:true} event should be in the recorder.
@@ -1606,57 +1597,27 @@ func TestIntegration_BridgeWritesSentinelAfterBothModelsDone(t *testing.T) {
 		t.Fatalf("sentinel exists after only vibevoice done; want absent until whisper done too")
 	}
 
-	// Step 3: whisper completes. Counter advances to 4; setupWriteSentinelFn
-	// runs end-to-end and produces a real file under the redirected HOME.
+	// Step 3: whisper completes. v0.2.12 contract: bridge must NOT write
+	// the sentinel here. install-daemon.sh's bash code is the sole writer
+	// (with the correct requirements_sha256 + python_pbs_tag). A re-write
+	// from the bridge with the incomplete SentinelData struct
+	// (Version + Timestamp only) was destroying those fields and breaking
+	// IsSetupComplete on the next launch.
 	a.handleDaemonModelEvent(map[string]interface{}{
 		"type":  "model_download",
 		"model": "whisper",
 		"state": "done",
 	})
 
-	// The sentinel file must now exist on disk under our temp home, with
-	// the correct version + a non-zero timestamp.
-	info, err := os.Stat(sentinelPath)
-	if err != nil {
-		t.Fatalf("sentinel not written after whisper done: %v", err)
-	}
-	if info.IsDir() {
-		t.Fatalf("sentinel path %q is a directory; want a file", sentinelPath)
+	// The sentinel file must NOT exist -- install-daemon.sh wasn't called
+	// in this test, so absence here proves the bridge didn't sneak in
+	// a write.
+	if _, err := os.Stat(sentinelPath); !os.IsNotExist(err) {
+		t.Fatalf("sentinel exists after bridge-only path; v0.2.12 contract says bridge must not touch the sentinel (err=%v)", err)
 	}
 
-	// Cross-package validation: parse the bridge-written file directly so
-	// we see exactly what the production WriteSentinel persisted. The unit
-	// tests stub setupWriteSentinelFn so they only verify the bridge CALLED
-	// the writer with the right arguments — this is the first test that
-	// confirms WriteSentinel's serializer + ReadSentinel's parser round-
-	// trip the bridge's payload.
-	rawBytes, err := os.ReadFile(sentinelPath)
-	if err != nil {
-		t.Fatalf("read bridge-written sentinel: %v", err)
-	}
-	rawStr := string(rawBytes)
-	if !strings.Contains(rawStr, "version: "+setup.SetupExpectedVersion) {
-		t.Errorf("sentinel missing version line; got: %q", rawStr)
-	}
-	if !strings.Contains(rawStr, "timestamp: ") {
-		t.Errorf("sentinel missing timestamp line; got: %q", rawStr)
-	}
-
-	// The bridge intentionally writes a minimal sentinel (Version +
-	// Timestamp only — see app_setup.go ~line 1144). The corresponding
-	// production contract is: app.IsSetupComplete (cheap existence check)
-	// accepts it; setup.IsSetupComplete (hash-checking) REJECTS it because
-	// the RequirementsSHA256 field is blank. Pinning both sides here makes
-	// any future change to that contract a visible code review event.
-	prevDirFn := bundledResourcesDirFn
-	bundledResourcesDirFn = func() string { return fakeResources }
-	t.Cleanup(func() { bundledResourcesDirFn = prevDirFn })
-
-	if !a.IsSetupComplete() {
-		t.Errorf("app.IsSetupComplete() = false after bridge wrote sentinel; want true (existence check)")
-	}
-	if setup.IsSetupComplete(reqPath) {
-		t.Errorf("setup.IsSetupComplete(%q) = true; want false (bridge writes minimal sentinel — bundled sha=%q does not match blank sentinel sha)",
-			reqPath, wantSha)
-	}
+	// The `wantSha` was the SHA we'd have asserted against; reference it
+	// here so the import + helper stay live for future cross-package
+	// tests that DO exercise install-daemon.sh's write path.
+	_ = wantSha
 }
