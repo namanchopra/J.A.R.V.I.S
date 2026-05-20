@@ -1,0 +1,4 @@
+JARVIS_PLACEHOLDER_SHORTCUT
+name: Open Downloads
+description: Open ~/Downloads in Finder
+# Real Shortcuts.app export pending — see build/shortcuts/README.md

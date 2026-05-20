@@ -1,0 +1,11 @@
+{
+  "shortcuts": [
+    { "name": "Take Note", "filename": "take-note.shortcut", "description": "Append a quick note to Apple Notes" },
+    { "name": "Quick Screenshot", "filename": "quick-screenshot.shortcut", "description": "Screenshot the screen + copy to clipboard" },
+    { "name": "Lock Screen", "filename": "lock-screen.shortcut", "description": "Immediately lock the Mac" },
+    { "name": "Sleep", "filename": "sleep.shortcut", "description": "Put the Mac to sleep" },
+    { "name": "Open Downloads", "filename": "open-downloads.shortcut", "description": "Open ~/Downloads in Finder" },
+    { "name": "New Calendar Event", "filename": "new-calendar-event.shortcut", "description": "Create an event in default calendar" },
+    { "name": "Toggle Focus", "filename": "toggle-focus.shortcut", "description": "Toggle Do Not Disturb / current Focus mode" }
+  ]
+}
