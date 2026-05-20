@@ -124,31 +124,8 @@ func (c *Controller) SetBrightness(pct int) (string, error) { return "", ErrNotI
 func (c *Controller) ToggleDND() (string, error) { return "", ErrNotImplemented }
 
 // --- Files + clipboard + screenshots (TASK-013) ---
-
-// OpenPath shells `open <path>`. Handles both filesystem paths and URLs
-// (the `open` command treats both uniformly). TASK-013 will surface a
-// clear error if the path doesn't exist rather than letting `open`
-// silently succeed.
-func (c *Controller) OpenPath(path string) (string, error) { return "", ErrNotImplemented }
-
-// Spotlight runs `mdfind <query>` and returns up to 20 matching paths,
-// newline-separated. Read-only by policy default.
-func (c *Controller) Spotlight(query string) (string, error) { return "", ErrNotImplemented }
-
-// Screenshot shells `screencapture` with the appropriate flag for the
-// target. Valid targets: "screen" (full), "window" (interactive window
-// picker), "selection" (drag rectangle). TASK-013 will write the output
-// to ~/.jarvis/screenshots/<timestamp>.png and return the file path.
-func (c *Controller) Screenshot(target string) (string, error) { return "", ErrNotImplemented }
-
-// ClipboardGet shells `pbpaste` and returns the current clipboard text.
-// Returns "" + nil when the clipboard is empty (not an error condition).
-func (c *Controller) ClipboardGet() (string, error) { return "", ErrNotImplemented }
-
-// ClipboardSet shells `pbcopy` and writes text to the clipboard.
-// Destructive (overwrites whatever the user had copied); gated on
-// policy.Check("mac_clipboard_set").
-func (c *Controller) ClipboardSet(text string) (string, error) { return "", ErrNotImplemented }
+// Implementations live in files.go (OpenPath, Spotlight), clipboard.go
+// (ClipboardGet, ClipboardSet), and screenshot.go (Screenshot).
 
 // --- Shortcuts (TASK-014) ---
 
