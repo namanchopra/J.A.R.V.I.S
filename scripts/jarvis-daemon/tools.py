@@ -424,6 +424,21 @@ class ToolExecutor:
         self._send: WsSendFn = ws_send_fn
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
+        # v0.3.0/TASK-018 -- confirmation gate state. When a destructive
+        # tool's policy is "ask", ``_confirm`` parks an asyncio Future
+        # here and emits a ``confirmation_required`` WS event. The
+        # transcript router on the daemon side (main.py) calls
+        # ``resolve_pending_confirmation`` on every final user utterance.
+        # The first yes/no synonym resolves the future; non-matching
+        # speech is ignored so the user can think before answering.
+        self._pending_confirmation: asyncio.Future[bool] | None = None
+        self._pending_confirmation_tool: str | None = None
+
+        # Per-``execute`` policy cache. Populated lazily on the first
+        # mac_* dispatch within a single call so Settings UI edits take
+        # effect for the next voice command without a daemon restart.
+        self._policy_cache: dict[str, str] | None = None
+
     @property
     def pending_count(self) -> int:
         """Number of tool calls currently awaiting a result."""
@@ -717,6 +732,266 @@ class ToolExecutor:
             logger.info("Cancelled %d pending tool call(s)", count)
         return count
 
+    # ------------------------------------------------------------------
+    # v0.3.0/TASK-018 -- confirmation gate.
+    # ------------------------------------------------------------------
+    # A tool whose policy is "ask" must surface a yes/no question to the
+    # user before we invoke the Wails method. We:
+    #   1. Park an ``asyncio.Future[bool]`` on the executor.
+    #   2. Emit a ``confirmation_required`` WS event so the Mac UI can
+    #      show a banner AND the TTS pipeline speaks the question.
+    #   3. Wait up to ``timeout`` seconds for the transcript router
+    #      (main.py) to call ``resolve_pending_confirmation`` with the
+    #      user's reply.
+    #
+    # On timeout we default to deny ("Got it, skipping.") which matches
+    # the spec's safe-by-default stance.
+    #
+    # The Go-side policy check inside each macctl controller method is
+    # still active as a second layer of defense -- if the user changes
+    # policy from "ask" to "deny" between the question and the Wails
+    # call, Go will refuse and the dispatch branch will surface
+    # ErrPolicyDeny as a denial message.
+    # ------------------------------------------------------------------
+
+    async def _confirm(
+        self,
+        tool: str,
+        question: str,
+        *,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Ask the user via TTS and await yes/no on the transcript pipe.
+
+        Args:
+            tool: Tool name being confirmed (e.g. ``"mac_quit_app"``).
+            question: Friendly question to speak (e.g. ``"Quit Slack?"``).
+            timeout: Max seconds to wait before defaulting to deny.
+
+        Returns:
+            ``True`` when the user explicitly affirmed, ``False`` on
+            explicit deny OR on timeout. Never raises -- transport
+            errors are treated as deny.
+        """
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[bool] = loop.create_future()
+
+        # Replace any prior pending confirmation. In normal operation
+        # there should be at most one outstanding -- ``execute`` serialises
+        # tool calls -- but if one was abandoned we refuse it now.
+        prev = self._pending_confirmation
+        if prev is not None and not prev.done():
+            prev.set_result(False)
+
+        self._pending_confirmation = fut
+        self._pending_confirmation_tool = tool
+
+        payload: dict[str, Any] = {
+            "type": "confirmation_required",
+            "tool": tool,
+            "question": question,
+            "timeout_seconds": timeout,
+        }
+
+        try:
+            try:
+                await self._send(payload)
+            except Exception:
+                logger.exception(
+                    "Failed to emit confirmation_required for %s -- defaulting to deny",
+                    tool,
+                )
+                return False
+
+            try:
+                return await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.info(
+                    "Confirmation for %s timed out after %.1fs -- defaulting to deny",
+                    tool,
+                    timeout,
+                )
+                return False
+        finally:
+            # Only clear if this future is still the active one.
+            if self._pending_confirmation is fut:
+                self._pending_confirmation = None
+                self._pending_confirmation_tool = None
+
+    def resolve_pending_confirmation(self, transcript_text: str) -> bool:
+        """Resolve an outstanding ``_confirm`` future from user transcript.
+
+        Called by the transcript router (``main.py``) on every final user
+        utterance. Matches a small set of yes/no synonyms; any other
+        speech leaves the future pending so the user can talk before
+        deciding.
+
+        Args:
+            transcript_text: Final user transcript text.
+
+        Returns:
+            ``True`` when the transcript was a yes/no answer that resolved
+            the pending confirmation. ``False`` if there was no pending
+            confirmation, the future was already done, or the text was
+            not a recognised yes/no synonym.
+        """
+        fut = self._pending_confirmation
+        if fut is None or fut.done():
+            return False
+
+        lower = transcript_text.strip().lower().rstrip(".!?")
+        if not lower:
+            return False
+
+        # Hand-picked synonyms covering common confirmations users speak
+        # in practice. Anything else (including "maybe", "wait") leaves
+        # the future pending so the user can think out loud.
+        if lower in {
+            "yes",
+            "yeah",
+            "yep",
+            "yup",
+            "sure",
+            "go ahead",
+            "do it",
+            "ok",
+            "okay",
+            "affirmative",
+            "confirm",
+            "confirmed",
+            "please do",
+        }:
+            fut.set_result(True)
+            return True
+        if lower in {
+            "no",
+            "nope",
+            "nah",
+            "cancel",
+            "stop",
+            "don't",
+            "do not",
+            "skip",
+            "skip it",
+            "negative",
+            "abort",
+            "never mind",
+        }:
+            fut.set_result(False)
+            return True
+        return False
+
+    def _confirmation_question(
+        self, tool: str, params: dict[str, Any]
+    ) -> str:
+        """Return a short voice-friendly question for a destructive tool."""
+        if tool == "mac_quit_app":
+            return f"Quit {params.get('name', 'the app')}?"
+        if tool == "mac_open_app":
+            return f"Open {params.get('name', 'the app')}?"
+        if tool == "mac_set_volume":
+            pct = params.get("pct", params.get("percent", "?"))
+            return f"Set volume to {pct}%?"
+        if tool == "mac_set_brightness":
+            pct = params.get("pct", params.get("percent", "?"))
+            return f"Set brightness to {pct}%?"
+        if tool == "mac_clipboard_set":
+            return "Replace your clipboard?"
+        if tool == "mac_open_path":
+            return f"Open {params.get('path', params.get('url', 'that'))}?"
+        if tool == "mac_run_shortcut":
+            shortcut_name = (params.get("name") or "").strip()
+            if shortcut_name:
+                return f"Run the {shortcut_name} shortcut?"
+            return "Run that shortcut?"
+        if tool == "mac_toggle_dnd":
+            return "Toggle Do Not Disturb?"
+        if tool == "mac_focus_window":
+            return f"Focus {params.get('app', 'the app')}?"
+        if tool == "mac_mute":
+            return "Mute the system?"
+        if tool == "mac_unmute":
+            return "Unmute the system?"
+        if tool == "mac_screenshot":
+            return "Take a screenshot?"
+        # Generic fallback for new mac_* tools.
+        return f"Run {tool.replace('_', ' ')}?"
+
+    async def _policy_get(self, tool: str) -> str:
+        """Return the current policy decision for ``tool``.
+
+        Decisions are one of ``"allow"``, ``"ask"`` or ``"deny"``. Result
+        is cached per-``execute`` call so multiple dispatches in a single
+        call don't ping Go for every check.
+
+        Returns ``"ask"`` as the safe default when the policy can't be
+        fetched (Go-side error, missing tool entry, malformed response).
+        """
+        if self._policy_cache is None:
+            result = await self._call_wails("GetMacctlPolicy", [])
+            err = result.get("error")
+            policy_obj: dict[str, str] = {}
+            if err is None:
+                value = result.get("result")
+                if isinstance(value, dict):
+                    # Policy may surface as a flat ``{tool: decision}``
+                    # map or nested under a ``tools`` key depending on
+                    # how Go serialises it. Accept both.
+                    nested = (
+                        value.get("tools")
+                        if isinstance(value.get("tools"), dict)
+                        else None
+                    )
+                    src = nested if nested is not None else value
+                    for k, v in src.items():
+                        if isinstance(v, str):
+                            policy_obj[str(k)] = v.lower()
+            else:
+                logger.debug(
+                    "GetMacctlPolicy failed (%s) -- defaulting to ask", err
+                )
+            self._policy_cache = policy_obj
+
+        decision = self._policy_cache.get(tool, "ask").lower()
+        if decision not in ("allow", "ask", "deny"):
+            decision = "ask"
+        return decision
+
+    async def _maybe_confirm_destructive(
+        self,
+        tool: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Apply the confirmation gate before invoking a destructive tool.
+
+        Returns:
+          - ``None`` -- policy is ``allow``; caller should proceed.
+          - ``{"ok": False, "message": "..."}`` -- policy is ``deny``,
+            or the user denied / timed out. Caller should return this
+            verbatim without invoking the Wails method.
+
+        Go-side ``policy.Check`` still acts as defense-in-depth; this
+        gate's job is to surface a *voice* question for the ``ask`` case
+        which Go alone can't do.
+        """
+        decision = await self._policy_get(tool)
+        if decision == "allow":
+            return None
+        if decision == "deny":
+            pretty = tool.removeprefix("mac_").replace("_", " ")
+            return {
+                "ok": False,
+                "message": f"I'm not permitted to {pretty}.",
+            }
+
+        # decision == "ask"
+        question = self._confirmation_question(tool, params)
+        approved = await self._confirm(tool, question)
+        if approved:
+            return None
+        # Single friendly response covers explicit "no" and timeout.
+        return {"ok": False, "message": "Got it, skipping."}
+
     # v0.3.0/TASK-015 -- mac_* executor implementation.
     #
     # Lives in its own method (rather than inline in execute()) so the
@@ -736,6 +1011,11 @@ class ToolExecutor:
         """Dispatch mac_* tool calls; return None for non-mac names."""
         if not name.startswith("mac_"):
             return None
+
+        # v0.3.0/TASK-018 -- reset the per-call policy cache. ``execute``
+        # serialises calls so populating once per dispatch is safe and
+        # lets Settings UI edits take effect for the next voice command.
+        self._policy_cache = None
 
         def _is_policy_deny(err: Any) -> bool:
             err_str = str(err).lower()
@@ -758,6 +1038,15 @@ class ToolExecutor:
             app_name = (params.get("name") or "").strip()
             if not app_name:
                 return {"ok": False, "message": "I need an app name to quit."}
+            # v0.3.0/TASK-018 -- confirmation gate. Demonstrates the
+            # ``ask``/``deny`` paths via policy + transcript loop.
+            # Returns ``None`` when the call should proceed (policy=allow
+            # or user said yes), or a voice-friendly denial envelope.
+            gate = await self._maybe_confirm_destructive(
+                "mac_quit_app", {"name": app_name}
+            )
+            if gate is not None:
+                return gate
             result = await self._call_wails("MacQuitApp", [app_name])
             err = result.get("error")
             if err:
