@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.2.8] - 2026-05-20
+
+### Fixed
+- **Voice presets now load even when bundled `<Resources>/models/` doesn't ship the user's chosen voice.** v0.2.0..v0.2.7 had two latent bugs in `pipecat_tts_vibevoice.py::_load_voice_preset`:
+  1. **`_resolve_model_dir()` short-circuit blinded the loader to `~/.jarvis/models/`.** When `JARVIS_BUNDLED_MODELS_DIR` was set (always true for a real `.app` launch), `_resolve_model_dir` returned the bundled (read-only) path and never fell through to `~/.jarvis/models/`. The runtime download couldn't write into the read-only bundle, the file had nowhere to land, and even files manually pre-staged in `~/.jarvis/models/` were ignored. Fixed by always adding `~/.jarvis/models/vibevoice/voices/{voice}.pt` to the lookup list regardless of bundled state.
+  2. **Runtime download was pointing at HuggingFace, which doesn't host voice presets.** Voice `.pt` files ship from the `microsoft/VibeVoice` **GitHub** repo at `demo/voices/streaming_model/{voice}.pt`, not from `microsoft/VibeVoice-Realtime-0.5B` (HF, weights only). The HF fallback silently failed and the user saw `FileNotFoundError: Voice preset 'en-Frank_man' not found`. Fixed by switching the runtime download to `raw.githubusercontent.com/microsoft/VibeVoice/main/demo/voices/streaming_model/{voice}.pt` and writing into `~/.jarvis/models/vibevoice/voices/` (always writable).
+- The bundled `en-Carter_man.pt` from `fetch-models.sh` still works the same. Users whose `voicePreset` config selects any other VibeVoice voice (`en-Frank_man`, `en-Maya_woman`, etc.) now get a ~3.4 MB one-time GitHub download on first daemon start, instead of an opaque silent crash loop.
+- Verified live on user's machine: dev-mode patch landed the file at `~/.jarvis/models/vibevoice/voices/en-Frank_man.pt`, daemon picked it up via the new fallback (`Loading voice preset from ~/.jarvis/models/...`), `VibeVoice model loaded (device=mps, voice=en-Frank_man)`, and the user proceeded to have a multi-turn voice conversation with Jarvis. End-to-end voice pipeline functional.
+
 ## [0.2.7] - 2026-05-20
 
 ### Fixed

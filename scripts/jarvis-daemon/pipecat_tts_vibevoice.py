@@ -269,12 +269,27 @@ class VibeVoiceTTSService(FrameProcessor):
 
         possible_paths: list[str] = []
 
-        # 1 + 2. Bundled / dev-mode local directory.
+        # 1. Bundled / dev-mode local directory chosen by _resolve_model_dir.
+        # In a signed .app this is read-only -- the runtime download below
+        # cannot write here, which is why path #2 exists.
         resolved_dir = _resolve_model_dir()
         if resolved_dir:
             possible_paths.append(
                 os.path.join(resolved_dir, "vibevoice", "voices", f"{voice_name}.pt")
             )
+
+        # 2. ALWAYS check ~/.jarvis/models too, regardless of whether
+        # JARVIS_BUNDLED_MODELS_DIR shortened _resolve_model_dir to the
+        # bundled path. Voice presets downloaded post-install (by the
+        # runtime download below, or manually pre-staged by the user)
+        # land here -- and without this fallback they would never be
+        # found again on a signed-bundle install.
+        home_jarvis_models = os.path.expanduser("~/.jarvis/models")
+        home_jarvis_path = os.path.join(
+            home_jarvis_models, "vibevoice", "voices", f"{voice_name}.pt"
+        )
+        if home_jarvis_path not in possible_paths:
+            possible_paths.append(home_jarvis_path)
 
         # 3. Source-tree sidecar (legacy support for users who cloned the
         #    VibeVoice repo and copied voices next to this script).
@@ -282,45 +297,39 @@ class VibeVoiceTTSService(FrameProcessor):
             os.path.join(os.path.dirname(__file__), "vibevoice_voices", f"{voice_name}.pt")
         )
 
-        # 4. HuggingFace cache fallback.
-        try:
-            from huggingface_hub import hf_hub_download
-            cache_path = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: hf_hub_download(
-                    repo_id=self._model_path,
-                    filename=f"voices/{voice_name}.pt",
-                    subfolder="demo/voices/streaming_model" if "/" not in voice_name else None,
-                ),
-            )
-            possible_paths.insert(0, cache_path)
-        except Exception:
-            pass
-
-        # Last-resort download into the resolved local directory so subsequent
-        # launches hit step 1/2 without any network call. In dev mode this
-        # lands under ~/.jarvis/models/vibevoice/voices/; in a bundled .app
-        # the Resources dir is read-only, so this branch is skipped.
-        if resolved_dir and os.access(resolved_dir, os.W_OK):
+        # 4. Runtime download (GitHub raw, NOT HuggingFace).
+        #
+        # The microsoft/VibeVoice-Realtime-0.5B HF repo contains ONLY model
+        # weights (model.safetensors + config). Voice presets ship from the
+        # microsoft/VibeVoice GitHub repo at:
+        #   demo/voices/streaming_model/{voice_name}.pt
+        # v0.2.7 and earlier tried HF Hub for the .pt and failed silently
+        # (the file simply doesn't exist there), leaving the user stuck.
+        #
+        # Target ~/.jarvis/models/ unconditionally so the download succeeds
+        # even on signed-bundle installs where resolved_dir is read-only.
+        github_voices_dir = os.path.join(home_jarvis_models, "vibevoice", "voices")
+        github_target = os.path.join(github_voices_dir, f"{voice_name}.pt")
+        if not os.path.exists(github_target):
             try:
-                from huggingface_hub import hf_hub_download
-                voices_dir = os.path.join(resolved_dir, "vibevoice", "voices")
-                os.makedirs(voices_dir, exist_ok=True)
-                target = os.path.join(voices_dir, f"{voice_name}.pt")
-                if not os.path.exists(target):
-                    logger.info("Downloading voice preset %s...", voice_name)
-                    downloaded = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: hf_hub_download(
-                            repo_id="microsoft/VibeVoice-Realtime-0.5B",
-                            filename=f"{voice_name}.pt",
-                            subfolder="demo/voices/streaming_model",
-                            local_dir=os.path.join(resolved_dir, "vibevoice"),
-                        ),
-                    )
-                    possible_paths.insert(0, downloaded)
+                import urllib.request
+                os.makedirs(github_voices_dir, exist_ok=True)
+                url = (
+                    "https://raw.githubusercontent.com/microsoft/VibeVoice/"
+                    f"main/demo/voices/streaming_model/{voice_name}.pt"
+                )
+                logger.info("Downloading voice preset %s from %s", voice_name, url)
+                tmp_target = github_target + ".tmp"
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: urllib.request.urlretrieve(url, tmp_target),
+                )
+                os.replace(tmp_target, github_target)
+                logger.info("Voice preset saved to %s", github_target)
             except Exception as e:
-                logger.debug("Could not download voice preset: %s", e)
+                logger.warning(
+                    "voice preset download failed (%s); will fall through to other paths", e
+                )
 
         device = self._device if self._device != "cpu" else "cpu"
         for path in possible_paths:
