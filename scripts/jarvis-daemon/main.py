@@ -475,6 +475,14 @@ class WSBridgeProcessor(FrameProcessor):
                     return  # Do NOT push frame — prevent it reaching user_aggregator
                 text = frame.text.strip()
                 if text:
+                    # v0.3.0/TASK-018 -- confirmation gate: yes/no replies
+                    # resolve a pending tool confirmation instead of
+                    # dispatching to the LLM.
+                    if _tool_executor is not None and _tool_executor.resolve_pending_confirmation(text):
+                        await send_transcript(self._ws, text, partial=False)
+                        logger.info("Confirmation answered: %s", text)
+                        return
+
                     # Filter out very short ambient noise fragments.
                     # Allow 2+ word phrases and single words that match known commands.
                     words = text.split()
