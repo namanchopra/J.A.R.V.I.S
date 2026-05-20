@@ -40,7 +40,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/namanchopra/jarvis/internal/config"
 	"github.com/namanchopra/jarvis/internal/model"
 	"github.com/namanchopra/jarvis/internal/spotify"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -92,12 +91,12 @@ var spotifyAppleScriptPlayFn = func(uri string) error {
 var spotifyWebBaseURLOverride = ""
 
 // spotifyClientID returns the client id to use for OAuth. Prefers a
-// user-supplied id in config (for self-hosters who want their own quota)
-// and falls back to the Jarvis-bundled default.
+// user-supplied id in ~/.jarvis/spotify.json (for self-hosters who want
+// their own quota) and falls back to the Jarvis-bundled default.
 func (a *App) spotifyClientID() string {
-	cfg := config.Get()
-	if cfg.Spotify.ClientID != "" {
-		return cfg.Spotify.ClientID
+	cfg, _ := spotify.LoadConfig(spotify.ConfigPath())
+	if cfg.ClientID != "" {
+		return cfg.ClientID
 	}
 	return defaultSpotifyClientID
 }
@@ -121,7 +120,7 @@ func (a *App) spotifyClientID() string {
 // mutates cfg.Spotify when ExchangeCode succeeds), so a botched sign-in
 // doesn't half-clobber a previously valid token set.
 func (a *App) SpotifySignIn() (string, error) {
-	cfg := config.Get()
+	cfg, _ := spotify.LoadConfig(spotify.ConfigPath())
 
 	// Wrap runtime.BrowserOpenURL to match the
 	// `func(url string) error` signature spotify.RunPKCEFlow demands.
@@ -131,16 +130,16 @@ func (a *App) SpotifySignIn() (string, error) {
 		return nil
 	}
 
-	if err := spotify.RunPKCEFlow(a.spotifyClientID(), openBrowser, &cfg.Spotify); err != nil {
+	if err := spotify.RunPKCEFlow(a.spotifyClientID(), openBrowser, &cfg); err != nil {
 		slog.Warn("SpotifySignIn: PKCE flow failed", "err", err)
 		return "", fmt.Errorf("SpotifySignIn: %w", err)
 	}
 
-	if err := config.Save(cfg); err != nil {
-		return "", fmt.Errorf("SpotifySignIn: save config: %w", err)
+	if err := spotify.SaveConfig(spotify.ConfigPath(), cfg); err != nil {
+		return "", fmt.Errorf("SpotifySignIn: save: %w", err)
 	}
 
-	slog.Info("SpotifySignIn: connected", "expiresAt", cfg.Spotify.ExpiresAt)
+	slog.Info("SpotifySignIn: connected", "expiresAt", cfg.ExpiresAt)
 	return "ok", nil
 }
 
@@ -151,11 +150,11 @@ func (a *App) SpotifySignIn() (string, error) {
 // preferred client id. After Save returns, a fresh SpotifyIsConnected
 // will report false.
 func (a *App) SpotifySignOut() error {
-	cfg := config.Get()
-	cfg.Spotify.AccessToken = ""
-	cfg.Spotify.RefreshToken = ""
-	cfg.Spotify.ExpiresAt = time.Time{}
-	if err := config.Save(cfg); err != nil {
+	cfg, _ := spotify.LoadConfig(spotify.ConfigPath())
+	cfg.AccessToken = ""
+	cfg.RefreshToken = ""
+	cfg.ExpiresAt = time.Time{}
+	if err := spotify.SaveConfig(spotify.ConfigPath(), cfg); err != nil {
 		return fmt.Errorf("SpotifySignOut: %w", err)
 	}
 	return nil
@@ -170,8 +169,8 @@ func (a *App) SpotifySignOut() error {
 // token is still valid still counts as "connected" — the next API call
 // will silently mint a new access token.
 func (a *App) SpotifyIsConnected() bool {
-	cfg := config.Get()
-	return cfg.Spotify.AccessToken != ""
+	cfg, _ := spotify.LoadConfig(spotify.ConfigPath())
+	return cfg.AccessToken != ""
 }
 
 // SpotifySearchAndPlay searches the Spotify Web API for the query and
@@ -201,20 +200,18 @@ func (a *App) SpotifySearchAndPlay(query string) (string, error) {
 		return "", spotify.ErrNotAuthenticated
 	}
 
-	cfg := config.Get()
+	cfg, _ := spotify.LoadConfig(spotify.ConfigPath())
 
-	// saveCfg closure persists token refreshes that happen mid-call so a
-	// daemon restart between refresh-and-play doesn't lose the new
-	// tokens. Reads the full Config fresh from disk each time (rather
-	// than capturing the outer `cfg`) so a concurrent SaveConfig from
-	// the Settings view doesn't get clobbered.
+	// saveCfg persists token refreshes that happen mid-call so a daemon
+	// restart between refresh-and-play doesn't lose the new tokens. The
+	// sibling-file design (~/.jarvis/spotify.json) means a concurrent
+	// SaveConfig from the Settings view can't clobber unrelated config
+	// keys — only spotify creds round-trip through here.
 	saveCfg := func(sc *model.SpotifyConfig) error {
-		full := config.Get()
-		full.Spotify = *sc
-		return config.Save(full)
+		return spotify.SaveConfig(spotify.ConfigPath(), *sc)
 	}
 
-	client := spotify.NewClient(&cfg.Spotify, saveCfg)
+	client := spotify.NewClient(&cfg, saveCfg)
 	// In tests, spotifyWebBaseURLOverride points at an httptest.Server URL
 	// so client.Search hits a mock instead of api.spotify.com. Empty in
 	// production — the package default in internal/spotify/web.go wins.

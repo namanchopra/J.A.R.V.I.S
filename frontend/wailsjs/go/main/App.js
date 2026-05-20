@@ -194,6 +194,10 @@ export function GetJarvisState() {
   return window['go']['main']['App']['GetJarvisState']();
 }
 
+export function GetMacctlPolicy() {
+  return window['go']['main']['App']['GetMacctlPolicy']();
+}
+
 export function GetMicPermissionStatus() {
   return window['go']['main']['App']['GetMicPermissionStatus']();
 }
@@ -374,6 +378,14 @@ export function IsSetupComplete() {
   return window['go']['main']['App']['IsSetupComplete']();
 }
 
+export function JarvisInstallBundledShortcuts() {
+  return window['go']['main']['App']['JarvisInstallBundledShortcuts']();
+}
+
+export function JarvisSendTestPush() {
+  return window['go']['main']['App']['JarvisSendTestPush']();
+}
+
 export function LaunchFromTemplate(arg1) {
   return window['go']['main']['App']['LaunchFromTemplate'](arg1);
 }
@@ -412,6 +424,66 @@ export function ListSessions(arg1) {
 
 export function ListWorkspaces() {
   return window['go']['main']['App']['ListWorkspaces']();
+}
+
+export function MacClipboardGet() {
+  return window['go']['main']['App']['MacClipboardGet']();
+}
+
+export function MacClipboardSet(arg1) {
+  return window['go']['main']['App']['MacClipboardSet'](arg1);
+}
+
+export function MacFocusWindow(arg1, arg2) {
+  return window['go']['main']['App']['MacFocusWindow'](arg1, arg2);
+}
+
+export function MacListShortcuts() {
+  return window['go']['main']['App']['MacListShortcuts']();
+}
+
+export function MacMute() {
+  return window['go']['main']['App']['MacMute']();
+}
+
+export function MacOpenApp(arg1) {
+  return window['go']['main']['App']['MacOpenApp'](arg1);
+}
+
+export function MacOpenPath(arg1) {
+  return window['go']['main']['App']['MacOpenPath'](arg1);
+}
+
+export function MacQuitApp(arg1) {
+  return window['go']['main']['App']['MacQuitApp'](arg1);
+}
+
+export function MacRunShortcut(arg1, arg2) {
+  return window['go']['main']['App']['MacRunShortcut'](arg1, arg2);
+}
+
+export function MacScreenshot(arg1) {
+  return window['go']['main']['App']['MacScreenshot'](arg1);
+}
+
+export function MacSetBrightness(arg1) {
+  return window['go']['main']['App']['MacSetBrightness'](arg1);
+}
+
+export function MacSetVolume(arg1) {
+  return window['go']['main']['App']['MacSetVolume'](arg1);
+}
+
+export function MacSpotlight(arg1) {
+  return window['go']['main']['App']['MacSpotlight'](arg1);
+}
+
+export function MacToggleDND() {
+  return window['go']['main']['App']['MacToggleDND']();
+}
+
+export function MacUnmute() {
+  return window['go']['main']['App']['MacUnmute']();
 }
 
 export function MarkFirstRunComplete() {
@@ -552,6 +624,34 @@ export function SetDotClaudeSource(arg1) {
 
 export function SetJarvisConfig(arg1) {
   return window['go']['main']['App']['SetJarvisConfig'](arg1);
+}
+
+export function SetMacctlPolicy(arg1, arg2) {
+  return window['go']['main']['App']['SetMacctlPolicy'](arg1, arg2);
+}
+
+export function SpotifyIsConnected() {
+  return window['go']['main']['App']['SpotifyIsConnected']();
+}
+
+export function SpotifyPause() {
+  return window['go']['main']['App']['SpotifyPause']();
+}
+
+export function SpotifyResume() {
+  return window['go']['main']['App']['SpotifyResume']();
+}
+
+export function SpotifySearchAndPlay(arg1) {
+  return window['go']['main']['App']['SpotifySearchAndPlay'](arg1);
+}
+
+export function SpotifySignIn() {
+  return window['go']['main']['App']['SpotifySignIn']();
+}
+
+export function SpotifySignOut() {
+  return window['go']['main']['App']['SpotifySignOut']();
 }
 
 export function StartJarvis() {

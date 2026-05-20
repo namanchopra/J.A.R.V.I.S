@@ -4,9 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/namanchopra/jarvis/internal/model"
 )
 
 // TestUnmarshalLegacyDexKeys verifies that a config file containing only the
@@ -506,106 +503,7 @@ func TestExistingLiveKitConfigPreserved(t *testing.T) {
 	}
 }
 
-// TestConfigSpotifyRoundTrip pins TASK-001 acceptance: the Spotify field on
-// Config marshals under the `spotify` JSON key, all nested fields round-trip,
-// and a previously-signed-in user's tokens survive a Marshal → Unmarshal
-// pass through the top-level Config (which is the same path Save → Load
-// uses).
-func TestConfigSpotifyRoundTrip(t *testing.T) {
-	orig := DefaultConfig()
-	orig.Spotify = model.SpotifyConfig{
-		AccessToken:  "BQA-test-access",
-		RefreshToken: "AQA-test-refresh",
-		ExpiresAt:    time.Date(2026, 5, 18, 12, 0, 0, 0, time.UTC),
-		ClientID:     "test-client-id",
-	}
-
-	data, err := json.Marshal(orig)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	outStr := string(data)
-
-	// The Spotify block must serialise under the `spotify` key with all
-	// four credential fields populated.
-	wantSubstrings := []string{
-		`"spotify":`,
-		`"accessToken":"BQA-test-access"`,
-		`"refreshToken":"AQA-test-refresh"`,
-		`"clientId":"test-client-id"`,
-	}
-	for _, sub := range wantSubstrings {
-		if !strings.Contains(outStr, sub) {
-			t.Errorf("marshaled JSON missing %q:\n%s", sub, outStr)
-		}
-	}
-
-	got := DefaultConfig()
-	if err := json.Unmarshal(data, got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	if got.Spotify.AccessToken != orig.Spotify.AccessToken {
-		t.Errorf("Spotify.AccessToken: got %q, want %q",
-			got.Spotify.AccessToken, orig.Spotify.AccessToken)
-	}
-	if got.Spotify.RefreshToken != orig.Spotify.RefreshToken {
-		t.Errorf("Spotify.RefreshToken: got %q, want %q",
-			got.Spotify.RefreshToken, orig.Spotify.RefreshToken)
-	}
-	if !got.Spotify.ExpiresAt.Equal(orig.Spotify.ExpiresAt) {
-		t.Errorf("Spotify.ExpiresAt: got %v, want %v",
-			got.Spotify.ExpiresAt, orig.Spotify.ExpiresAt)
-	}
-	if got.Spotify.ClientID != orig.Spotify.ClientID {
-		t.Errorf("Spotify.ClientID: got %q, want %q",
-			got.Spotify.ClientID, orig.Spotify.ClientID)
-	}
-	if !got.Spotify.IsConnected() {
-		t.Errorf("Spotify.IsConnected: got false, want true after round-trip")
-	}
-}
-
-// TestConfigSpotifyDefaultZeroValue verifies that a fresh DefaultConfig has
-// a zero-value Spotify field (no tokens leaked, IsConnected reports false).
-// Frontend "Connect Spotify" affordance depends on this contract.
-func TestConfigSpotifyDefaultZeroValue(t *testing.T) {
-	cfg := DefaultConfig()
-
-	if cfg.Spotify.IsConnected() {
-		t.Errorf("DefaultConfig().Spotify.IsConnected() = true; want false")
-	}
-	if cfg.Spotify.AccessToken != "" {
-		t.Errorf("DefaultConfig().Spotify.AccessToken = %q; want empty", cfg.Spotify.AccessToken)
-	}
-	if cfg.Spotify.RefreshToken != "" {
-		t.Errorf("DefaultConfig().Spotify.RefreshToken = %q; want empty", cfg.Spotify.RefreshToken)
-	}
-	if cfg.Spotify.ClientID != "" {
-		t.Errorf("DefaultConfig().Spotify.ClientID = %q; want empty", cfg.Spotify.ClientID)
-	}
-}
-
-// TestConfigSpotifyUnmarshalAbsent verifies that an old config file with no
-// `spotify` key continues to load cleanly, leaving Spotify at its zero value.
-// This is the backward-compat guarantee — an upgraded install must not
-// fail to load because the new field is missing.
-func TestConfigSpotifyUnmarshalAbsent(t *testing.T) {
-	oldJSON := `{
-		"defaultAgent": "claude-code",
-		"jarvisEnabled": true,
-		"jarvisAPIKey": "sk-ant-existing"
-	}`
-
-	var cfg Config
-	if err := json.Unmarshal([]byte(oldJSON), &cfg); err != nil {
-		t.Fatalf("unmarshal old-shape config: %v", err)
-	}
-
-	if cfg.Spotify.IsConnected() {
-		t.Errorf("Spotify.IsConnected: got true, want false on old-shape config")
-	}
-	if cfg.Spotify.AccessToken != "" {
-		t.Errorf("Spotify.AccessToken: got %q, want empty", cfg.Spotify.AccessToken)
-	}
-}
+// Spotify config round-trip / default / absent-key tests moved to
+// internal/spotify/store_test.go in v0.3.0 when Spotify creds were split
+// out of config.Config into ~/.jarvis/spotify.json. See the package doc
+// in internal/spotify/store.go for the rationale.

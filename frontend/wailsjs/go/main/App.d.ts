@@ -113,6 +113,8 @@ export function GetJarvisHistory():Promise<Array<jarvis.Message>>;
 
 export function GetJarvisState():Promise<string>;
 
+export function GetMacctlPolicy():Promise<Record<string, string>>;
+
 export function GetMicPermissionStatus():Promise<string>;
 
 export function GetMobileConnectionInfo():Promise<main.MobileConnectionInfo>;
@@ -203,6 +205,10 @@ export function IsOllamaRunning():Promise<boolean>;
 
 export function IsSetupComplete():Promise<boolean>;
 
+export function JarvisInstallBundledShortcuts():Promise<string>;
+
+export function JarvisSendTestPush():Promise<string>;
+
 export function LaunchFromTemplate(arg1:string):Promise<void>;
 
 export function LaunchReposInTerminal(arg1:Array<string>,arg2:string,arg3:Array<boolean>):Promise<void>;
@@ -222,6 +228,36 @@ export function ListSessionTemplates():Promise<Array<model.SessionTemplate>>;
 export function ListSessions(arg1:string):Promise<Array<model.Session>>;
 
 export function ListWorkspaces():Promise<Array<workspace.Workspace>>;
+
+export function MacClipboardGet():Promise<string>;
+
+export function MacClipboardSet(arg1:string):Promise<string>;
+
+export function MacFocusWindow(arg1:string,arg2:string):Promise<string>;
+
+export function MacListShortcuts():Promise<Array<string>>;
+
+export function MacMute():Promise<string>;
+
+export function MacOpenApp(arg1:string):Promise<string>;
+
+export function MacOpenPath(arg1:string):Promise<string>;
+
+export function MacQuitApp(arg1:string):Promise<string>;
+
+export function MacRunShortcut(arg1:string,arg2:string):Promise<string>;
+
+export function MacScreenshot(arg1:string):Promise<string>;
+
+export function MacSetBrightness(arg1:number):Promise<string>;
+
+export function MacSetVolume(arg1:number):Promise<string>;
+
+export function MacSpotlight(arg1:string):Promise<string>;
+
+export function MacToggleDND():Promise<string>;
+
+export function MacUnmute():Promise<string>;
 
 export function MarkFirstRunComplete():Promise<void>;
 
@@ -292,6 +328,20 @@ export function SendToTerminal(arg1:string,arg2:string):Promise<void>;
 export function SetDotClaudeSource(arg1:string):Promise<void>;
 
 export function SetJarvisConfig(arg1:jarvis.JarvisConfig):Promise<void>;
+
+export function SetMacctlPolicy(arg1:string,arg2:string):Promise<void>;
+
+export function SpotifyIsConnected():Promise<boolean>;
+
+export function SpotifyPause():Promise<void>;
+
+export function SpotifyResume():Promise<void>;
+
+export function SpotifySearchAndPlay(arg1:string):Promise<string>;
+
+export function SpotifySignIn():Promise<string>;
+
+export function SpotifySignOut():Promise<void>;
 
 export function StartJarvis():Promise<void>;
 

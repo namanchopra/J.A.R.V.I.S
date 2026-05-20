@@ -46,7 +46,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/namanchopra/jarvis/internal/config"
 	"github.com/namanchopra/jarvis/internal/model"
 	"github.com/namanchopra/jarvis/internal/spotify"
 )
@@ -127,8 +126,7 @@ func TestSpotifySearchAndPlay_HappyPath(t *testing.T) {
 	t.Cleanup(func() { spotifyAppleScriptPlayFn = prevPlay })
 
 	// --- 4. Persist a connected SpotifyConfig.
-	cfg := config.DefaultConfig()
-	cfg.Spotify = model.SpotifyConfig{
+	scfg := model.SpotifyConfig{
 		AccessToken: "test-token",
 		// RefreshToken empty: with a non-empty access token whose
 		// ExpiresAt is well in the future, refreshIfNeeded must not
@@ -137,8 +135,8 @@ func TestSpotifySearchAndPlay_HappyPath(t *testing.T) {
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 		ClientID:  "test-client",
 	}
-	if err := config.Save(cfg); err != nil {
-		t.Fatalf("config.Save: %v", err)
+	if err := spotify.SaveConfig(spotify.ConfigPath(), scfg); err != nil {
+		t.Fatalf("spotify.SaveConfig: %v", err)
 	}
 
 	// --- 5. Drive the binding.
@@ -197,13 +195,11 @@ func TestSpotifySearchAndPlay_NotAuthenticated(t *testing.T) {
 	}
 	t.Cleanup(func() { spotifyAppleScriptPlayFn = prevPlay })
 
-	// Persist a fresh config with NO Spotify access token. Important to
-	// Save explicitly so the in-memory `current` pointer in
-	// internal/config doesn't carry over a token from a previous test.
-	cfg := config.DefaultConfig()
-	cfg.Spotify = model.SpotifyConfig{} // zero value: empty token
-	if err := config.Save(cfg); err != nil {
-		t.Fatalf("config.Save: %v", err)
+	// Persist a fresh empty SpotifyConfig (no access token). Saved
+	// explicitly so a stale sibling file from a previous test in the
+	// same package can't leak a token here.
+	if err := spotify.SaveConfig(spotify.ConfigPath(), model.SpotifyConfig{}); err != nil {
+		t.Fatalf("spotify.SaveConfig: %v", err)
 	}
 
 	a := &App{}
@@ -242,11 +238,8 @@ func TestSpotifySearchAndPlay_EmptyQuery(t *testing.T) {
 	}
 	t.Cleanup(func() { spotifyAppleScriptPlayFn = prevPlay })
 
-	// Reset config to defaults so prior tests don't leak in-memory state.
-	if err := config.Save(config.DefaultConfig()); err != nil {
-		t.Fatalf("config.Save: %v", err)
-	}
-
+	// HOME is redirected to TempDir, so spotify.LoadConfig will return a
+	// zero-value SpotifyConfig — no prior-test bleed possible.
 	a := &App{}
 	out, err := a.SpotifySearchAndPlay("")
 	if err == nil {
