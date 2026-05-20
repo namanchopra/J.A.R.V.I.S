@@ -15,7 +15,7 @@ Jarvis is a desktop voice assistant that drives your AI coding agents the way yo
 
 **First launch** runs a one-time setup (~10–15 min) that installs a portable Python runtime + daemon venv into `~/.jarvis/` and downloads the VibeVoice + Whisper model weights to `~/.cache/huggingface/`. A full-screen progress UI tracks all four phases. After setup, Jarvis runs fully offline except for your chosen cloud LLM.
 
-After downloading, see **[Install](#install)** below — the first launch needs a one-time Gatekeeper workaround because the build is ad-hoc signed.
+The DMG is signed with an Apple Developer ID and notarized — no Gatekeeper warnings, no right-click workarounds. Just download, drag, and double-click.
 
 ## Demo
 
@@ -26,24 +26,18 @@ After downloading, see **[Install](#install)** below — the first launch needs 
 
 > Apple Silicon (M1 or later) running macOS 12 or newer.
 
-1. **Download** the latest `Jarvis-vX.Y.Z.dmg` from the [Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases) page. The DMG is ~80 MB.
-2. **Mount and install.** Open the DMG, drag **Jarvis.app** into `/Applications`.
-3. **Get past Gatekeeper.** The v0.2.0 build is ad-hoc signed. First launch is blocked with "developer cannot be verified". To bypass: right-click Jarvis.app in `/Applications` → **Open** → **Open** in the confirmation dialog. macOS remembers; future launches work normally.
-4. **Setup runs automatically on first launch** (~10–15 min, one-time). A full-screen progress UI shows four install phases — Installing Python runtime, Installing voice pipeline, Downloading VibeVoice (~1.9 GB), Downloading Whisper (~460 MB). You can keep using your Mac while it runs. The whole install lives in `~/.jarvis/` plus `~/.cache/huggingface/`; nothing else on the system is touched.
+1. **Download** the latest `Jarvis-vX.Y.Z.dmg` from the [Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases) page. The DMG is ~35 MB — signed with an Apple Developer ID and notarized.
+2. **Mount and install.** Open the DMG, drag **Jarvis.app** onto the **Applications** folder shortcut inside the DMG window.
+3. **Double-click Jarvis** in `/Applications`. No Gatekeeper warning, no right-click workaround — the notarization is stapled to the DMG.
+4. **First-launch setup runs automatically** (~10–15 min, one-time). A full-screen progress UI shows four install phases — Installing Python runtime, Installing voice pipeline, Downloading VibeVoice (~1.9 GB), Downloading Whisper (~460 MB). You can keep using your Mac while it runs. The whole install lives in `~/.jarvis/` plus `~/.cache/huggingface/`; nothing else on the system is touched.
 5. **Grant microphone permission** when prompted.
 6. **Onboarding modal** walks you through picking an LLM provider and pasting an API key (or confirming Ollama is running locally), then previews a voice. Say "Hey Jarvis" to begin.
 
-If macOS refuses to launch the app at all, strip the quarantine flag from a terminal:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/Jarvis.app
-```
-
 ## System Requirements
 
-- **CPU**: Apple Silicon — M1, M2, M3, M4 (Intel Macs are not supported in v0.1).
+- **CPU**: Apple Silicon — M1, M2, M3, M4 (Intel Macs are not supported).
 - **OS**: macOS 12 Monterey or later.
-- **Disk**: ~80 MB for the installed `.app`, plus **4 GB free for the first-launch install** (Python venv + VibeVoice + Whisper model weights) staged into `~/.jarvis/` and `~/.cache/huggingface/`.
+- **Disk**: ~35 MB for the installed `.app`, plus **4 GB free for the first-launch install** (Python venv + VibeVoice + Whisper model weights) staged into `~/.jarvis/` and `~/.cache/huggingface/`.
 - **RAM**: 16 GB recommended. The bundled voice models fit happily in 8 GB, but you'll want headroom for running multiple agent sessions.
 - **Microphone**: any built-in or external input device.
 
@@ -54,7 +48,7 @@ xattr -dr com.apple.quarantine /Applications/Jarvis.app
 - **Cross-session conflict detection (impact warnings).** Jarvis runs `git diff --name-only HEAD` for every active session in the background and raises three classes of warning: *shared-dependency* (two agents both modify `package.json` or `go.mod`), *shared-file* (overlap inside `shared/` or `common/` directories), and *API contract* (concurrent edits under `/api/` or `/routes/` directories). You see the conflict before the merge does.
 - **Workspace virtualization.** Spin up a virtual monorepo at `~/.jarvis/workspaces/<name>/` that symlinks several real repos together, auto-generates a `CLAUDE.md` describing the workspace and cross-repo guidelines, and launches a single Claude Code session with `--add-dir` for every repo. One conversation, multiple codebases, no manual juggling.
 - **Terminal integration.** Focus, send keystrokes, and read output from CMux workspaces, iTerm2 windows, and Terminal.app windows interchangeably — Jarvis picks the right provider automatically or honors the `preferredTerminal` config override.
-- **Mobile companion (coming v0.2).** A Bearer-token-authenticated HTTP and WebSocket API is already live in the desktop build (Echo server on port 4422 by default) — the Expo mobile client that consumes it ships in v0.2.
+- **Mobile companion (in progress).** A Bearer-token-authenticated HTTP and WebSocket API is already live in the desktop build (Echo server on port 4422 by default) — the Expo mobile client that consumes it ships separately.
 - **Local-first voice pipeline.** STT via `mlx-whisper` running on Apple Silicon Metal and TTS via Microsoft VibeVoice Realtime 0.5B, both bundled into the DMG, both running entirely on your machine. No audio leaves the device.
 - **Ollama path for fully offline operation.** Point Jarvis at a local Ollama instance (e.g. `ollama:qwen3:4b`) and the assistant can run end-to-end with zero external network calls — STT, LLM, and TTS all local.
 - **Process auto-detection.** Jarvis scans the OS process table every five seconds (configurable) and auto-creates task records for any running agent process it recognizes, marking them done when the process exits.
@@ -63,7 +57,7 @@ xattr -dr com.apple.quarantine /Applications/Jarvis.app
 
 ## Settings
 
-The Settings view in v0.1 is a full UI replacement for hand-editing `~/.jarvis/config.json`. It is laid out as five tabs:
+The Settings view is a full UI replacement for hand-editing `~/.jarvis/config.json`. It is laid out as five tabs:
 
 - **Connections** — LLM provider selection and API key fields for OpenRouter, Google AI Studio, Anthropic, Cartesia, ElevenLabs, and Picovoice. Each key has a show/hide toggle and a one-click **Validate** button that hits the provider with a single-token test request and reports back with a green or red status pill. Keys are never logged.
 - **Voice** — TTS provider (VibeVoice / Kokoro / Edge / Cartesia), voice preset with a ✨ **Preview** button, STT model, mic input device, wake-word toggle and sensitivity slider.
@@ -73,26 +67,26 @@ The Settings view in v0.1 is a full UI replacement for hand-editing `~/.jarvis/c
 
 <!-- TODO: capture docs/settings-walkthrough.png once Settings UI work (TASK-016..023) lands -->
 
-## What works in v0.1
+## What works today
 
-Everything in the **Features** list above is live in v0.1:
+Everything in the **Features** list above is live:
 
 - Wake-word + voice loop end-to-end.
 - All five agent adapters (Claude Code, Kiro, Gemini, Codex, Aider).
 - Cross-session impact warnings.
 - Virtual monorepo workspaces.
 - CMux / iTerm2 / Terminal.app providers.
-- Bundled VibeVoice + Whisper (no first-run model download required).
+- VibeVoice + Whisper running locally (downloaded once on first launch via the setup UI, then fully offline).
 - Comprehensive Settings UI with provider validation.
 - Ollama support for fully local operation.
+- Signed + notarized DMG — no Gatekeeper friction on install.
 
 ## Known limitations
 
 - **Apple Silicon only.** Intel Macs are not supported and the binary refuses to start under Rosetta 2.
-- **Gatekeeper warning on first launch.** The DMG is ad-hoc signed because the project does not currently have an Apple Developer ID. See the [Install](#install) section for the right-click workaround. Notarization is on the v0.2 roadmap.
-- **Mobile companion is not yet wired.** The Bearer-token HTTP API and WebSocket terminal stream are in the desktop build, but the Expo client ships in v0.2.
-- **No auto-update.** v0.1 has no Sparkle integration — new versions are downloaded manually from Releases.
-- **No telemetry.** Jarvis does not phone home. This is intentional for v0.1; an opt-in error reporter may land in v0.2.
+- **Mobile companion is not yet wired.** The Bearer-token HTTP API and WebSocket terminal stream are in the desktop build, but the Expo client ships separately.
+- **No auto-update.** No Sparkle integration yet — new versions are downloaded manually from Releases. On the roadmap.
+- **No telemetry.** Jarvis does not phone home. This is intentional; an opt-in error reporter may land later.
 
 ## Privacy & Data
 
