@@ -1,17 +1,20 @@
 {
   "cli": {
-    "version": ">= 15.0.0"
+    "version": ">= 15.0.0",
+    "appVersionSource": "remote"
   },
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "channel": "development",
       "ios": {
         "simulator": true
       }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "channel": "preview"
     },
     "local": {
       "distribution": "internal",
@@ -23,6 +26,17 @@
         "buildType": "apk"
       }
     },
+    "production": {
+      "channel": "production",
+      "autoIncrement": true
+    }
+  },
+  "submit": {
     "production": {}
+  },
+  "update": {
+    "production": {
+      "channel": "production"
+    }
   }
 }
