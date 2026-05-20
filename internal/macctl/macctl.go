@@ -95,6 +95,20 @@ func NewController(policy *Policy) *Controller {
 	}
 }
 
+// Policy returns the *Policy this Controller was constructed with.
+//
+// Exposed so the Wails-side Settings UI (TASK-017) can read and mutate
+// the per-tool decisions without reaching into the unexported field via
+// reflection. Returning the pointer (rather than a snapshot) is by design:
+// the *Policy guards its own Decisions map with an RWMutex, so callers can
+// safely Snapshot / Set / Check across goroutines without coordinating
+// with the Controller. The Controller does not cache decisions, so a
+// change made via the returned *Policy takes effect on the very next
+// tool call.
+func (c *Controller) Policy() *Policy {
+	return c.policy
+}
+
 // --- Apps + windows (TASK-011) ---
 // Implementations live in apps.go (OpenApp, QuitApp) and windows.go
 // (FocusWindow).

@@ -175,6 +175,30 @@ func (p *Policy) Check(tool string) Decision {
 	return DecisionAsk
 }
 
+// Snapshot returns an independently-mutable copy of the per-tool decisions
+// map. Acquires the same RLock that Save uses, so callers can iterate the
+// returned map without coordinating with concurrent Set callers.
+//
+// Returns an empty (but non-nil) map when the policy has no decisions
+// configured. Callers that mutate the returned map do NOT affect the
+// underlying *Policy; use Set for that.
+//
+// Used by the Wails Settings UI (App.GetMacctlPolicy in app_macctl.go) to
+// render the full table of tool -> decision without exposing the internal
+// mutex to the Wails layer.
+func (p *Policy) Snapshot() map[string]Decision {
+	if p == nil {
+		return map[string]Decision{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make(map[string]Decision, len(p.Decisions))
+	for tool, decision := range p.Decisions {
+		out[tool] = decision
+	}
+	return out
+}
+
 // Set updates the in-memory decision for the named tool. Does NOT touch
 // disk — the caller is responsible for invoking Save afterwards. This
 // split lets the Settings UI batch many edits and persist them once at

@@ -25,6 +25,7 @@ import (
 	"github.com/namanchopra/jarvis/internal/discovery"
 	"github.com/namanchopra/jarvis/internal/nlquery"
 	"github.com/namanchopra/jarvis/internal/git"
+	"github.com/namanchopra/jarvis/internal/macctl"
 	"github.com/namanchopra/jarvis/internal/model"
 	"github.com/namanchopra/jarvis/internal/notify"
 	"github.com/namanchopra/jarvis/internal/paths"
@@ -78,6 +79,14 @@ type App struct {
 	// Cached for 60s to avoid log spam from sessions without CMux workspaces.
 	approvalFailCache map[int]time.Time
 	approvalFailMu    sync.RWMutex
+
+	// macctlOnce + macctlController back the lazy macctl.Controller singleton
+	// returned by App.macctl(). The Controller is constructed once on first
+	// use (rather than in NewApp) so policy file I/O failures don't break
+	// startup -- a Wails call that never uses macctl shouldn't pay the cost
+	// of reading ~/.jarvis/policy.json. See app_macctl.go for the accessor.
+	macctlOnce       sync.Once
+	macctlController *macctl.Controller
 }
 
 // NewApp creates a new App with the given Store, optional Scanner, optional
