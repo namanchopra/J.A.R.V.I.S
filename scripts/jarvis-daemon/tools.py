@@ -155,6 +155,132 @@ TOOL_DEFINITIONS: Final[list[dict[str, Any]]] = [
         "description": "Execute a multi-phase agent workflow pipeline",
         "params": {"phases": "string"},
     },
+    # ---------------------------------------------------------------------------
+    # v0.3.0 -- Spotify tools (TASK-004 declarations; impls in TASK-010)
+    # ---------------------------------------------------------------------------
+    {
+        "name": "spotify_search_and_play",
+        "description": "Search Spotify by name and play the top result on the user's Mac.",
+        "params": {"query": "string"},
+    },
+    {
+        "name": "spotify_pause",
+        "description": "Pause Spotify playback on the user's Mac.",
+        "params": {},
+    },
+    {
+        "name": "spotify_resume",
+        "description": "Resume Spotify playback on the user's Mac.",
+        "params": {},
+    },
+    {
+        "name": "spotify_skip",
+        "description": "Skip to the next track in Spotify.",
+        "params": {},
+    },
+    {
+        "name": "spotify_previous",
+        "description": "Go back to the previous track in Spotify.",
+        "params": {},
+    },
+    {
+        "name": "spotify_what_is_playing",
+        "description": "Get the currently-playing Spotify track (name, artist, position).",
+        "params": {},
+    },
+    {
+        "name": "spotify_set_volume",
+        "description": "Set Spotify playback volume (0-100).",
+        "params": {"percent": "integer"},
+    },
+    {
+        "name": "spotify_like_current",
+        "description": "Add the currently-playing track to the user's Liked Songs.",
+        "params": {},
+    },
+    {
+        "name": "spotify_queue",
+        "description": "Queue a track to play next by name.",
+        "params": {"query": "string"},
+    },
+    # ---------------------------------------------------------------------------
+    # v0.3.0 -- Mac control tools (TASK-004 declarations; impls in TASK-015)
+    # ---------------------------------------------------------------------------
+    {
+        "name": "mac_open_app",
+        "description": "Open or activate a macOS application by name.",
+        "params": {"name": "string"},
+    },
+    {
+        "name": "mac_quit_app",
+        "description": "Quit a macOS application by name (destructive).",
+        "params": {"name": "string"},
+    },
+    {
+        "name": "mac_focus_window",
+        "description": "Focus a specific window of a macOS application by title substring.",
+        "params": {"app": "string", "title": "string"},
+    },
+    {
+        "name": "mac_set_volume",
+        "description": "Set system audio output volume (0-100).",
+        "params": {"percent": "integer"},
+    },
+    {
+        "name": "mac_mute",
+        "description": "Mute the system audio output.",
+        "params": {},
+    },
+    {
+        "name": "mac_unmute",
+        "description": "Unmute the system audio output.",
+        "params": {},
+    },
+    {
+        "name": "mac_set_brightness",
+        "description": "Set screen brightness (0-100).",
+        "params": {"percent": "integer"},
+    },
+    {
+        "name": "mac_toggle_dnd",
+        "description": "Toggle Do Not Disturb / Focus mode on macOS.",
+        "params": {},
+    },
+    {
+        "name": "mac_open_path",
+        "description": "Open a file path or URL in the default app via macOS 'open'.",
+        "params": {"path": "string"},
+    },
+    {
+        "name": "mac_spotlight",
+        "description": "Search the macOS Spotlight index for files matching a query (returns up to 20 paths).",
+        "params": {"query": "string"},
+    },
+    {
+        "name": "mac_screenshot",
+        "description": "Take a screenshot. Target: 'screen' (full screen), 'window' (interactive window pick), or 'selection' (rectangular crop). Returns the saved PNG path.",
+        "params": {"target": "string"},
+    },
+    {
+        "name": "mac_clipboard_get",
+        "description": "Read the current macOS clipboard contents as text.",
+        "params": {},
+    },
+    {
+        "name": "mac_clipboard_set",
+        "description": "Replace the macOS clipboard contents with the given text.",
+        "params": {"text": "string"},
+    },
+    {
+        "name": "mac_list_shortcuts",
+        "description": "List all macOS Shortcuts.app shortcuts available to the user.",
+        "params": {},
+    },
+    {
+        "name": "mac_run_shortcut",
+        "description": "Run a macOS Shortcut by name, optionally with an input string. Returns the shortcut's stdout.",
+        "params": {"name": "string", "input": "string"},
+    },
 ]
 
 # Mapping from our shorthand type names to JSON Schema types.
