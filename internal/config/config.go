@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/namanchopra/jarvis/internal/model"
 	"github.com/namanchopra/jarvis/internal/paths"
 )
 
@@ -140,6 +141,20 @@ type Config struct {
 	// "ollama:qwen3:4b"). Empty means use the daemon's legacy key-driven
 	// detection (pick whichever provider has credentials configured).
 	LlmModel string `json:"llmModel,omitempty"`
+
+	// ---------------------------------------------------------------------
+	// v0.3.0 — Spotify connection (TASK-001 skeleton).
+	//
+	// Holds the OAuth tokens + client ID populated by the sign-in flow that
+	// lands in TASK-008. Marshalled under the `spotify` JSON key. Zero-value
+	// safe (every nested field uses omitempty), so an installation that has
+	// never connected Spotify keeps a clean config file. Because the parent
+	// `spotify` key has no omitempty, fresh installs will see
+	// `"spotify": {}` on disk after the first Save — that's fine and
+	// distinguishes "feature exists but unused" from "feature missing
+	// because old binary".
+	// ---------------------------------------------------------------------
+	Spotify model.SpotifyConfig `json:"spotify"`
 }
 
 // UnmarshalJSON reads jarvis* keys preferentially. If a jarvis* key is absent
