@@ -206,6 +206,10 @@ export function GetMobileConnectionInfo() {
   return window['go']['main']['App']['GetMobileConnectionInfo']();
 }
 
+export function GetNextCalendarEvent() {
+  return window['go']['main']['App']['GetNextCalendarEvent']();
+}
+
 export function GetPendingApprovals() {
   return window['go']['main']['App']['GetPendingApprovals']();
 }
@@ -354,6 +358,38 @@ export function GitStashList(arg1) {
   return window['go']['main']['App']['GitStashList'](arg1);
 }
 
+export function GoogleCalendarCreateEvent(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['GoogleCalendarCreateEvent'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function GoogleCalendarGetNextEvent() {
+  return window['go']['main']['App']['GoogleCalendarGetNextEvent']();
+}
+
+export function GoogleCalendarGetUpcomingEvents(arg1) {
+  return window['go']['main']['App']['GoogleCalendarGetUpcomingEvents'](arg1);
+}
+
+export function GoogleCalendarIsConnected() {
+  return window['go']['main']['App']['GoogleCalendarIsConnected']();
+}
+
+export function GoogleCalendarMoveEvent(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['GoogleCalendarMoveEvent'](arg1, arg2, arg3, arg4);
+}
+
+export function GoogleCalendarSetCredentials(arg1, arg2) {
+  return window['go']['main']['App']['GoogleCalendarSetCredentials'](arg1, arg2);
+}
+
+export function GoogleCalendarSignIn() {
+  return window['go']['main']['App']['GoogleCalendarSignIn']();
+}
+
+export function GoogleCalendarSignOut() {
+  return window['go']['main']['App']['GoogleCalendarSignOut']();
+}
+
 export function ImportConfig(arg1, arg2) {
   return window['go']['main']['App']['ImportConfig'](arg1, arg2);
 }
@@ -368,6 +404,10 @@ export function IsFirstRun() {
 
 export function IsJarvisDaemonConnected() {
   return window['go']['main']['App']['IsJarvisDaemonConnected']();
+}
+
+export function IsMeetingActive() {
+  return window['go']['main']['App']['IsMeetingActive']();
 }
 
 export function IsOllamaRunning() {
@@ -518,8 +558,32 @@ export function OpenWorkspaceInTerminal(arg1) {
   return window['go']['main']['App']['OpenWorkspaceInTerminal'](arg1);
 }
 
+export function OverlayHide() {
+  return window['go']['main']['App']['OverlayHide']();
+}
+
+export function OverlayPTTPress() {
+  return window['go']['main']['App']['OverlayPTTPress']();
+}
+
+export function OverlayPTTRelease() {
+  return window['go']['main']['App']['OverlayPTTRelease']();
+}
+
+export function OverlayShow() {
+  return window['go']['main']['App']['OverlayShow']();
+}
+
+export function OverlayToggle() {
+  return window['go']['main']['App']['OverlayToggle']();
+}
+
 export function PreviewVoice(arg1, arg2) {
   return window['go']['main']['App']['PreviewVoice'](arg1, arg2);
+}
+
+export function ProbeMeetingPermission() {
+  return window['go']['main']['App']['ProbeMeetingPermission']();
 }
 
 export function QueueSession(arg1, arg2, arg3, arg4, arg5) {
@@ -532,6 +596,10 @@ export function ReadFromCMux(arg1) {
 
 export function ReadFromTerminal(arg1) {
   return window['go']['main']['App']['ReadFromTerminal'](arg1);
+}
+
+export function RebindOverlayHotkey(arg1) {
+  return window['go']['main']['App']['RebindOverlayHotkey'](arg1);
 }
 
 export function RegenerateMobileToken() {
@@ -658,12 +726,20 @@ export function StartJarvis() {
   return window['go']['main']['App']['StartJarvis']();
 }
 
+export function StartMeeting(arg1) {
+  return window['go']['main']['App']['StartMeeting'](arg1);
+}
+
 export function StopAllWatchers() {
   return window['go']['main']['App']['StopAllWatchers']();
 }
 
 export function StopJarvis() {
   return window['go']['main']['App']['StopJarvis']();
+}
+
+export function StopMeeting() {
+  return window['go']['main']['App']['StopMeeting']();
 }
 
 export function StopSession(arg1) {
@@ -680,6 +756,10 @@ export function SuggestWorkflows() {
 
 export function SyncDotClaude() {
   return window['go']['main']['App']['SyncDotClaude']();
+}
+
+export function TriggerMeetingRecap() {
+  return window['go']['main']['App']['TriggerMeetingRecap']();
 }
 
 export function UpdateSessionTodo(arg1, arg2) {

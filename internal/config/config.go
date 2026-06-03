@@ -141,6 +141,83 @@ type Config struct {
 	// detection (pick whichever provider has credentials configured).
 	LlmModel string `json:"llmModel,omitempty"`
 
+	// ---------------------------------------------------------------------
+	// v0.3.0 — Mac overlay widget settings (TASK-001).
+	//
+	// Configures the frameless, always-on-top mini overlay used by the
+	// push-to-talk hotkey flow. These fields are read by the Go window-morph
+	// bindings (TASK-004) and the global hotkey manager (TASK-005), and
+	// surfaced in the new Settings → Overlay panel (TASK-009).
+	//
+	// Defaults are wired in DefaultConfig() AND defensively re-applied in
+	// Load() for OverlayHotkey (an empty hotkey string would brick the
+	// global-hotkey registration). Booleans are NOT defensively re-applied
+	// on Load() because Go's zero value for bool is `false` and we can't
+	// distinguish "user explicitly set false" from "field missing" without
+	// a pointer — see the WakeWordEnabled comment above for the pattern we
+	// reject here. We accept that a config file written before this version
+	// (with no overlay keys) will unmarshal OverlayEnabled=false; Load()
+	// constructs a defaulted Config via DefaultConfig() before unmarshaling,
+	// so missing keys keep the default values.
+	// ---------------------------------------------------------------------
+
+	// OverlayEnabled toggles the Mac overlay widget feature (default true).
+	OverlayEnabled bool `json:"overlayEnabled"`
+
+	// OverlayHotkey is the global hotkey that TOGGLES the overlay open or
+	// closed. Single-edge: press once to show, press again to hide.
+	// e.g. "alt+space" (default), "cmd+shift+j".
+	OverlayHotkey string `json:"overlayHotkey"`
+
+	// OverlayPTTHotkey is the global push-to-talk hotkey. Press-and-hold
+	// to start a turn (mic opens, overlay appears for visual feedback);
+	// release to end the turn and trigger the LLM response. Works from
+	// any app -- you don't need the overlay window to have focus.
+	// Default "ctrl+space". An empty string falls back to "ctrl+space"
+	// at Load() (mirrors OverlayHotkey's defensive fallback).
+	OverlayPTTHotkey string `json:"overlayPTTHotkey"`
+
+	// OverlayPosition is the screen corner the overlay snaps to. One of:
+	// "top-right", "top-left", "bottom-right", "bottom-left", "last-dragged"
+	// (default "top-right"). Unknown values are tolerated on load; the
+	// frontend treats them as "top-right".
+	OverlayPosition string `json:"overlayPosition"`
+
+	// OverlayShowTranscript toggles a small transcript chip under the orb
+	// (default false).
+	OverlayShowTranscript bool `json:"overlayShowTranscript"`
+
+	// ---------------------------------------------------------------------
+	// v0.3.0 — Meeting mode settings (TASK-001).
+	//
+	// Configures the calendar-driven meeting-mode feature: where notes are
+	// written, which calendar events qualify as meetings, and whether the
+	// auto-suggest banner is shown. Defaults are wired in DefaultConfig()
+	// AND defensively re-applied in Load() for the string + slice fields
+	// (an empty notes dir or empty keywords list would silently disable the
+	// feature). The bool toggle MeetingAutoSuggest is not defensively
+	// re-applied for the same reason documented above for OverlayEnabled:
+	// Load() constructs a defaulted Config via DefaultConfig() before
+	// unmarshaling, so missing keys keep the default true.
+	// ---------------------------------------------------------------------
+
+	// MeetingNotesDir is the directory where meeting markdown files are saved.
+	// Default "~/.jarvis/meetings". An empty string at load time falls back to
+	// the default (mirrors the OverlayHotkey defensive normaliser pattern).
+	// ~ is left literal in the stored value; the daemon expands it when writing
+	// files. Documented so users editing config.json directly know what to type.
+	MeetingNotesDir string `json:"meetingNotesDir"`
+
+	// MeetingKeywords is the list of substrings (lowercased, case-insensitive
+	// match) that mark a calendar event as a "meeting" for the auto-suggest
+	// banner. Default ["call", "sync", "1:1", "meeting", "standup", "review",
+	// "interview"]. Empty/nil at load time falls back to the default.
+	MeetingKeywords []string `json:"meetingKeywords"`
+
+	// MeetingAutoSuggest toggles the calendar-driven auto-suggest banner
+	// (default true). When false, only the manual overlay button starts a
+	// meeting; calendar events are ignored.
+	MeetingAutoSuggest bool `json:"meetingAutoSuggest"`
 }
 
 // UnmarshalJSON reads jarvis* keys preferentially. If a jarvis* key is absent
@@ -256,6 +333,18 @@ func DefaultConfig() *Config {
 		JarvisVoice:           "Daniel",
 		JarvisVerbosity:       "concise",
 		JarvisWakeSensitivity: 0.5,
+
+		// v0.3.0 overlay defaults (TASK-001).
+		OverlayEnabled:        true,
+		OverlayHotkey:         "alt+space",
+		OverlayPTTHotkey:      "ctrl+space",
+		OverlayPosition:       "top-right",
+		OverlayShowTranscript: false,
+
+		// v0.3.0 meeting mode defaults.
+		MeetingNotesDir:    "~/.jarvis/meetings",
+		MeetingKeywords:    []string{"call", "sync", "1:1", "meeting", "standup", "review", "interview"},
+		MeetingAutoSuggest: true,
 	}
 }
 
@@ -297,6 +386,30 @@ func Load() (*Config, error) {
 	}
 	if cfg.MobileAPIPort <= 0 {
 		cfg.MobileAPIPort = 4422
+	}
+	// v0.3.0 overlay (TASK-001): an empty hotkey would brick the global
+	// hotkey registration (golang.design/x/hotkey requires a parsed spec).
+	// Fall back to the documented default. OverlayPosition is deliberately
+	// NOT normalized here: the frontend renders unknown values as
+	// "top-right" so user-typed corner names don't get silently rewritten.
+	if cfg.OverlayHotkey == "" {
+		cfg.OverlayHotkey = "alt+space"
+	}
+	if cfg.OverlayPTTHotkey == "" {
+		cfg.OverlayPTTHotkey = "ctrl+space"
+	}
+	// v0.3.0 meeting mode (TASK-001): empty notes dir or empty keywords
+	// list would silently disable the auto-suggest banner / leave the
+	// markdown writer with no destination. Fall back to documented
+	// defaults. MeetingAutoSuggest is a bool — its zero value is `false`,
+	// and a missing key in JSON keeps DefaultConfig's `true` because
+	// Load() constructs a defaulted Config before unmarshaling. This
+	// matches the OverlayEnabled rationale already documented above.
+	if cfg.MeetingNotesDir == "" {
+		cfg.MeetingNotesDir = "~/.jarvis/meetings"
+	}
+	if len(cfg.MeetingKeywords) == 0 {
+		cfg.MeetingKeywords = []string{"call", "sync", "1:1", "meeting", "standup", "review", "interview"}
 	}
 
 	current = cfg

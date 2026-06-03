@@ -4,6 +4,8 @@ import { JarvisToastContainer } from './JarvisToast'
 import { HudSessionPanel } from './hud/HudSessionPanel'
 import { HudCostPanel } from './hud/HudCostPanel'
 import { HudActivityPanel } from './hud/HudActivityPanel'
+import { HudCalendarPanel } from './hud/HudCalendarPanel'
+import { HudMeetingBanner } from './hud/HudMeetingBanner'
 import { HudApprovalPanel } from './hud/HudApprovalPanel'
 import { HudVoiceBar } from './hud/HudVoiceBar'
 import { HudInput } from './hud/HudInput'
@@ -910,6 +912,15 @@ export function JarvisHudView(): React.ReactElement {
 
       {/* ---- MAIN HUD AREA ---- */}
       <div className="flex-1 relative" style={{ zIndex: 20, minHeight: 0 }}>
+        {/* ---- TASK-011: Meeting auto-suggest banner ----
+            Top-center floating banner. Polls upcoming calendar events at
+            15s cadence and surfaces a one-tap "Start note-taking?" prompt
+            when an event matches `cfg.meetingKeywords` AND is starting
+            in <2min. Uses its own zIndex (40) so it floats above the
+            absolute-positioned panels (z=25) but below modal overlays
+            (z=80/100). Renders null when no event matches. */}
+        <HudMeetingBanner />
+
         {/* ---- CENTER: Orb + Concentric Rings ---- */}
         <div
           className="absolute flex items-center justify-center"
@@ -1055,6 +1066,13 @@ export function JarvisHudView(): React.ReactElement {
             className={approvals.length > 0 ? 'pulse-glow' : ''}
           >
             <HudApprovalPanel approvals={approvals} />
+          </HudBracket>
+
+          {/* Google Calendar — next event + upcoming list. Polls every 60s
+              via the GoogleCalendar* Wails bindings. Renders a connect CTA
+              when the user hasn't signed in (Settings -> Connections). */}
+          <HudBracket label="CALENDAR">
+            <HudCalendarPanel />
           </HudBracket>
         </div>
 

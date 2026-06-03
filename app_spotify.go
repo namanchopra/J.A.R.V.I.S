@@ -51,11 +51,7 @@ import (
 // is safe to expose to a desktop binary. Users who register their own
 // Spotify Developer app can override this by setting
 // config.Config.Spotify.ClientID.
-//
-// TODO(v0.3.0): Replace the placeholder with the real Jarvis Spotify
-// Developer app client id before shipping. Tracked in a follow-up task
-// so this PR can land without the secret-injection dance.
-const defaultSpotifyClientID = "REPLACE_ME_WITH_REAL_CLIENT_ID"
+const defaultSpotifyClientID = "ba17d6fb406749ee9aa97bec6841687a"
 
 // ---------------------------------------------------------------------------
 // Test seams — TASK-030.

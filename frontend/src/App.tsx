@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { SettingsView } from './views/SettingsView'
+import { OverlayView } from './views/OverlayView'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { JarvisHudView } from './components/JarvisHudView'
 import { Onboarding } from './components/Onboarding'
@@ -7,6 +8,13 @@ import { SetupScreen } from './components/setup/SetupScreen'
 import { isSetupStateEvent } from './lib/use-setup-state'
 import { IsFirstRun } from '../wailsjs/go/main/App'
 import { EventsOn, BrowserOpenURL } from '../wailsjs/runtime/runtime'
+
+// v0.3.0 overlay mode (TASK-008). The Go backend emits a Wails 'overlay:mode'
+// event from OverlayShow/OverlayHide (TASK-004) with payload 'overlay' or
+// 'hud'. We swap the rendered view based on that signal -- the user opens the
+// overlay via the global hotkey (TASK-005, Go side); React never calls
+// OverlayShow itself.
+type OverlayMode = 'hud' | 'overlay'
 
 // v0.2.0: IsSetupComplete is a Wails binding added by TASK-006. `wails
 // generate module` hasn't run in this sandbox, so the TS declaration in
@@ -81,6 +89,9 @@ function App(): React.ReactElement {
   const [daemonLaunchFailed, setDaemonLaunchFailed] = useState<boolean>(false)
   const [firstRun, setFirstRun] = useState<boolean | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  // v0.3.0 overlay mode -- swapped via the Go-side 'overlay:mode' event.
+  // Default 'hud' so existing flows are unaffected on cold start.
+  const [overlayMode, setOverlayMode] = useState<OverlayMode>('hud')
 
   // Guard against firing RunSetup more than once per session. RunSetup
   // itself is dedup'd by sync.Mutex on the Go side, but we still don't want
@@ -151,6 +162,19 @@ function App(): React.ReactElement {
     }
   }, [])
 
+  // v0.3.0: subscribe to the Go-side 'overlay:mode' event (TASK-004). The
+  // backend emits 'overlay' when OverlayShow() resizes the window to the
+  // 180x180 always-on-top form and 'hud' when OverlayHide() restores it.
+  // We mirror that into local state so the renderer can swap views.
+  useEffect(() => {
+    const cancel = EventsOn('overlay:mode', (mode: unknown) => {
+      if (mode === 'overlay' || mode === 'hud') {
+        setOverlayMode(mode)
+      }
+    })
+    return () => cancel()
+  }, [])
+
   // First-run flag check runs AFTER setup is complete, so Onboarding never
   // mounts in front of an unfinished install.
   useEffect(() => {
@@ -189,6 +213,15 @@ function App(): React.ReactElement {
   // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
+
+  // v0.3.0 overlay mode: bypasses the setup/onboarding gates because the
+  // global hotkey can only fire after the Go backend is up, which itself
+  // only happens once setup is complete. Rendering OverlayView early avoids
+  // a flash-of-setup-screen if overlay:mode arrives before IsSetupComplete
+  // has resolved on cold start.
+  if (overlayMode === 'overlay') {
+    return <OverlayView />
+  }
 
   // Brief splash while we resolve IsSetupComplete.
   if (isSetupComplete === null) {

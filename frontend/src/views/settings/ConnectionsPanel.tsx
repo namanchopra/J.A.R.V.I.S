@@ -7,6 +7,14 @@ import {
   SpotifyIsConnected,
   SpotifySignIn,
   SpotifySignOut,
+  // TASK-009: Google Calendar bindings. These names are exported from
+  // app_gcal.go (TASK-007). If TypeScript fails to resolve them, run
+  // `wails dev` once to regenerate frontend/wailsjs/go/main/App.{js,d.ts}.
+  GoogleCalendarIsConnected,
+  GoogleCalendarSetCredentials,
+  GoogleCalendarSignIn,
+  GoogleCalendarSignOut,
+  OpenURL,
 } from '../../../wailsjs/go/main/App'
 import { FridayPairingModal } from './FridayPairingModal'
 
@@ -456,6 +464,93 @@ export function ConnectionsPanel({
     }
   }
 
+  // TASK-009 — Google Calendar connection state. Mirrors the Spotify
+  // pattern: poll IsConnected on mount, surface in-flight via gcalBusy,
+  // surface sign-in / sign-out / save-cred failures via gcalError. The
+  // clientID / clientSecret inputs live in local state so the user can
+  // type, hit "Save credentials" (which calls GoogleCalendarSetCredentials),
+  // and then "Connect" (which opens the system browser for OAuth). The
+  // secret input defaults to type="password" with a show toggle so a
+  // shoulder-surfer can't read it off the screen.
+  const [gcalConnected, setGcalConnected] = useState<boolean>(false)
+  const [gcalBusy, setGcalBusy] = useState<boolean>(false)
+  const [gcalError, setGcalError] = useState<string | null>(null)
+  const [gcalClientID, setGcalClientID] = useState<string>('')
+  const [gcalClientSecret, setGcalClientSecret] = useState<string>('')
+  const [gcalSecretRevealed, setGcalSecretRevealed] = useState<boolean>(false)
+  const [gcalConfirmDisconnect, setGcalConfirmDisconnect] = useState<boolean>(false)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const ok = await GoogleCalendarIsConnected()
+        if (!cancelled) setGcalConnected(Boolean(ok))
+      } catch {
+        if (!cancelled) setGcalConnected(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  // v0.3.0 wizard refactor: the four-step setup card collapses save +
+  // sign-in into a single click. The button is disabled until both inputs
+  // are non-empty, so we don't need the prior "creds optional" branch —
+  // we always have a Client ID + Secret to push down before SignIn opens
+  // the system browser. Errors from either Wails call land in gcalError.
+  async function handleGcalSaveAndConnect(): Promise<void> {
+    if (gcalBusy) return
+    const id = gcalClientID.trim()
+    const secret = gcalClientSecret.trim()
+    if (!id || !secret) return
+    setGcalBusy(true)
+    setGcalError(null)
+    try {
+      await GoogleCalendarSetCredentials(id, secret)
+      await GoogleCalendarSignIn()
+      const ok = await GoogleCalendarIsConnected()
+      setGcalConnected(Boolean(ok))
+    } catch (err) {
+      setGcalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setGcalBusy(false)
+    }
+  }
+  // Wails-side browser launcher for the three "Open ..." wizard buttons.
+  // Surfaces failures into gcalError so the user sees them in the same
+  // spot as sign-in failures.
+  async function handleGcalOpenURL(url: string): Promise<void> {
+    try {
+      await OpenURL(url)
+    } catch (err) {
+      setGcalError(err instanceof Error ? err.message : String(err))
+    }
+  }
+  async function handleGcalDisconnect(): Promise<void> {
+    if (gcalBusy) return
+    // Two-click confirm: first click arms the button, second within 5s
+    // performs the sign-out. Avoids window.confirm() which Wails' macOS
+    // webview silently suppresses on some configs (the native dialog
+    // never appears and confirm() returns false, so the user clicks
+    // Disconnect and nothing happens).
+    if (!gcalConfirmDisconnect) {
+      setGcalConfirmDisconnect(true)
+      setTimeout(() => setGcalConfirmDisconnect(false), 5000)
+      return
+    }
+    setGcalConfirmDisconnect(false)
+    setGcalBusy(true)
+    setGcalError(null)
+    try {
+      await GoogleCalendarSignOut()
+      setGcalConnected(false)
+    } catch (err) {
+      setGcalError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setGcalBusy(false)
+    }
+  }
+
   // v0.1.5: LLM model selection now persists via cfg.llmModel (same
   // ConnectionsConfig superset cast pattern as the v0.1.2 key migration).
   // The default when cfg.llmModel is empty/undefined stays at
@@ -703,6 +798,214 @@ export function ConnectionsPanel({
             title={spotifyError}
           >
             {spotifyError}
+          </p>
+        )}
+      </section>
+
+      {/* TASK-009 (v0.3.0 wizard refactor) — Google Calendar connection.
+          Open-source app + BYO credentials means every user creates their
+          own Google Cloud project. The 4-step wizard collapses that flow
+          to: click 3 "Open ..." buttons in order → paste ID + secret →
+          single "Save & Connect" click. Tokens persist to ~/.jarvis/gcal.json
+          on the Go side; nothing crosses Jarvis servers. */}
+      <section className="holo-panel p-4" data-testid="gcal-section">
+        <div className="flex items-center justify-between mb-1">
+          <h2 className="text-sm font-semibold text-[#00e5ff]">Google Calendar</h2>
+          <span
+            className={
+              gcalConnected
+                ? 'text-[10px] px-2 py-1 rounded bg-green-500/15 text-green-400 border border-green-500/30 whitespace-nowrap'
+                : 'text-[10px] px-2 py-1 rounded bg-[#1a2632] text-[#4a6278] border border-[#2d3f52] whitespace-nowrap'
+            }
+            data-testid="gcal-status-pill"
+          >
+            {gcalConnected ? 'Connected' : 'Not connected'}
+          </span>
+        </div>
+        <p className="text-xs text-[#8ba4b8] mb-3">
+          Friday + Jarvis read your calendar and create events on your behalf.
+        </p>
+
+        {gcalConnected ? (
+          <>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleGcalDisconnect()}
+                disabled={gcalBusy}
+                data-testid="gcal-disconnect"
+                className={`text-xs px-3 py-1.5 rounded text-white disabled:opacity-50 transition-colors ${
+                  gcalConfirmDisconnect
+                    ? 'bg-red-600 hover:bg-red-700 ring-2 ring-red-400'
+                    : 'bg-red-500/80 hover:bg-red-500'
+                }`}
+              >
+                {gcalBusy
+                  ? 'Working…'
+                  : gcalConfirmDisconnect
+                    ? 'Click again to confirm'
+                    : 'Disconnect'}
+              </button>
+              {gcalConfirmDisconnect && (
+                <span className="text-[10px] text-[#8ba4b8]">
+                  Tokens will be cleared. 5s to confirm.
+                </span>
+              )}
+            </div>
+            <p className="text-[10px] text-[#4a6278] mt-2 font-mono">
+              🔒 Stored at <code className="text-[#00e5ff]">~/.jarvis/gcal.json</code>
+            </p>
+          </>
+        ) : (
+          <>
+            {/* Cyan-bordered subpanel framing the one-time setup. Matches
+                the existing palette (border #1a2632, bg #0a1419). */}
+            <div className="border border-[#1a2632] rounded-md p-3 bg-[#0a1419] space-y-3">
+              <p className="text-[11px] text-[#8ba4b8] font-semibold">
+                One-time setup (~3 min)
+              </p>
+
+              {/* Step 1 — pick / create a Google Cloud project + enable
+                  the Calendar API. The library URL lets the user do both
+                  on one page. */}
+              <div className="space-y-1">
+                <p className="text-xs text-[#8ba4b8]">
+                  <span className="text-[#00e5ff] font-semibold">1.</span> Create a Google Cloud
+                  project and enable the Calendar API.
+                </p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleGcalOpenURL(
+                      'https://console.cloud.google.com/apis/library/calendar-json.googleapis.com',
+                    )
+                  }
+                  data-testid="gcal-open-cloud-console"
+                  className="text-[10px] px-2 py-1 rounded bg-transparent border border-[#00e5ff]/40 text-[#00e5ff] hover:bg-[#00e5ff]/10 transition-colors"
+                >
+                  Open Google Cloud Console →
+                </button>
+              </div>
+
+              {/* Step 2 — OAuth consent screen. The disclaimer below the
+                  card explains the "add yourself as a test user OR publish"
+                  fork. */}
+              <div className="space-y-1">
+                <p className="text-xs text-[#8ba4b8]">
+                  <span className="text-[#00e5ff] font-semibold">2.</span> Configure OAuth consent
+                  screen. Set status to "In production".
+                </p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleGcalOpenURL(
+                      'https://console.cloud.google.com/apis/credentials/consent',
+                    )
+                  }
+                  data-testid="gcal-open-oauth-consent"
+                  className="text-[10px] px-2 py-1 rounded bg-transparent border border-[#00e5ff]/40 text-[#00e5ff] hover:bg-[#00e5ff]/10 transition-colors"
+                >
+                  Open OAuth Consent →
+                </button>
+              </div>
+
+              {/* Step 3 — create the Desktop-app OAuth Client ID. */}
+              <div className="space-y-1">
+                <p className="text-xs text-[#8ba4b8]">
+                  <span className="text-[#00e5ff] font-semibold">3.</span> Create OAuth Client ID
+                  (type: Desktop app).
+                </p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleGcalOpenURL('https://console.cloud.google.com/apis/credentials')
+                  }
+                  data-testid="gcal-open-credentials"
+                  className="text-[10px] px-2 py-1 rounded bg-transparent border border-[#00e5ff]/40 text-[#00e5ff] hover:bg-[#00e5ff]/10 transition-colors"
+                >
+                  Open Credentials →
+                </button>
+              </div>
+
+              {/* Step 4 — paste ID + Secret + single Save & Connect.
+                  The button is disabled until both inputs trim to non-empty,
+                  so the merged handler never runs without creds. */}
+              <div className="space-y-2 pt-1">
+                <p className="text-xs text-[#8ba4b8]">
+                  <span className="text-[#00e5ff] font-semibold">4.</span> Paste them here:
+                </p>
+                <label className="block">
+                  <span className="block text-[10px] text-[#8ba4b8] mb-1">Client ID</span>
+                  <input
+                    type="text"
+                    value={gcalClientID}
+                    onChange={(e) => setGcalClientID(e.target.value)}
+                    placeholder="xxxxxxxxxxxx-yyyyyyyyyyyy.apps.googleusercontent.com"
+                    data-testid="gcal-client-id"
+                    className="sci-fi w-full text-xs font-mono"
+                  />
+                </label>
+                <label className="block">
+                  <span className="block text-[10px] text-[#8ba4b8] mb-1">Client Secret</span>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        type={gcalSecretRevealed ? 'text' : 'password'}
+                        value={gcalClientSecret}
+                        onChange={(e) => setGcalClientSecret(e.target.value)}
+                        placeholder="GOCSPX-…"
+                        data-testid="gcal-client-secret"
+                        className="sci-fi w-full text-xs font-mono pr-9"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setGcalSecretRevealed((v) => !v)}
+                        aria-label={gcalSecretRevealed ? 'Hide Client Secret' : 'Show Client Secret'}
+                        aria-pressed={gcalSecretRevealed}
+                        data-testid="gcal-secret-toggle"
+                        className="absolute inset-y-0 right-1 my-auto h-7 w-7 flex items-center justify-center text-[#8ba4b8] hover:text-[#00e5ff] transition-colors"
+                      >
+                        <EyeIcon open={gcalSecretRevealed} />
+                      </button>
+                    </div>
+                  </div>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void handleGcalSaveAndConnect()}
+                  disabled={
+                    gcalBusy || !gcalClientID.trim() || !gcalClientSecret.trim()
+                  }
+                  data-testid="gcal-save-and-connect"
+                  className="text-xs px-3 py-1.5 rounded bg-[#1db954] hover:bg-[#1db954]/85 text-black font-semibold disabled:opacity-50 transition-colors"
+                >
+                  {gcalBusy ? 'Opening browser…' : 'Save & Connect'}
+                </button>
+              </div>
+
+              {/* Need-help disclaimer covering the test-user vs publish
+                  fork in the OAuth consent screen. */}
+              <p className="text-[10px] text-[#4a6278] mt-2">
+                In the OAuth consent screen, add yourself as a test user OR
+                click "Publish app" → "Confirm". Tokens last forever once
+                published; testing-mode tokens expire weekly.
+              </p>
+            </div>
+
+            <p className="text-[10px] text-[#4a6278] mt-3 font-mono">
+              🔒 Stays on this machine in <code className="text-[#00e5ff]">~/.jarvis/gcal.json</code>.
+              Never sent to Jarvis servers.
+            </p>
+          </>
+        )}
+
+        {gcalError && (
+          <p
+            className="text-[10px] text-red-400 mt-2 font-mono"
+            data-testid="gcal-error"
+            title={gcalError}
+          >
+            {gcalError}
           </p>
         )}
       </section>

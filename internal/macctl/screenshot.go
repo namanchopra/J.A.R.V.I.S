@@ -74,6 +74,18 @@ func (c *Controller) Screenshot(target string) (string, error) {
 	}
 
 	if err := exec.Command("screencapture", args...).Run(); err != nil {
+		// `screencapture` exits non-zero with no useful stderr when the
+		// host app lacks Screen Recording entitlement (TCC denies the
+		// frame grab silently). The exec error is just "exit status 1".
+		// Probe for the missing-permission case by checking whether the
+		// output file was actually written — TCC denial produces a
+		// nonzero exit AND no file. A genuine syscall failure usually
+		// also produces no file, but the user-facing fix is the same:
+		// point them at System Settings.
+		info, statErr := os.Stat(out)
+		if statErr != nil || info.Size() == 0 {
+			return "", fmt.Errorf("Screenshot(%s): screen recording permission likely missing — enable it for the host app in System Settings > Privacy & Security > Screen Recording: %w", target, err)
+		}
 		return "", fmt.Errorf("Screenshot(%s): %w", target, err)
 	}
 

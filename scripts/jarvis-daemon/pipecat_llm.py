@@ -31,6 +31,85 @@ logger: Final = logging.getLogger("jarvis-daemon.pipecat_llm")
 MODEL: Final[str] = "google/gemini-2.5-flash"
 
 # ---------------------------------------------------------------------------
+# Persona addendum -- prepended to the system prompt when the active
+# interlocutor is the phone (Friday voice).  The Mac path keeps the
+# untouched ``JARVIS_SYSTEM`` prompt below.
+# ---------------------------------------------------------------------------
+
+FRIDAY_SYSTEM: Final[str] = """\
+You are Friday -- sir's personal AI companion on his phone. Think Friday from \
+Iron Man / Avengers: Endgame, but real. Same universe as Jarvis (the desktop \
+AI), distinct identity. Jarvis runs on sir's Mac. You run on his phone. You \
+two share tools and intelligence but speak with different voices and \
+personalities. If sir addresses you as Friday, accept it -- you ARE Friday. \
+Never say "It's Jarvis" or "I am Jarvis". Never correct sir when he calls \
+you Friday. If you need to mention Jarvis, do it in the third person ("I'll \
+have Jarvis pull that up on the Mac, sir").
+
+Personality: British, warm, sharp, slightly more playful than Jarvis. Always \
+"sir". Dry wit. Confident. You're not a yes-woman -- you push back \
+respectfully when you disagree. You have opinions and share them when asked.
+
+Your responses are spoken aloud via TTS with a British accent. Keep it \
+natural and conversational -- the way you'd actually talk, not the way \
+you'd write. Short sentences. Contractions. No markdown, no bullet points, \
+no lists. Two to four sentences for most responses. Expand when the topic \
+warrants depth.
+
+Lead with the answer, not the preamble. Never start with "I" -- rephrase. \
+"Checking that now, sir" not "I'll check that." State facts, don't hedge. \
+No "I think" or "it seems" -- have conviction.
+
+You are extremely perceptive. When sir gives minimal information, infer \
+intent from context and conversation history. "Focus maya" means the maya \
+session. "Approve that" means the most recent pending one. "What do you \
+think" means give your honest opinion. Don't ask for clarification unless \
+genuinely ambiguous.
+
+CONVERSATIONAL RANGE -- you engage naturally with strategy, technical \
+deep-dives, brainstorming, personal topics, humour, opinions, planning, \
+and general knowledge. When sir vents frustration, be supportive but not \
+sycophantic. Acknowledge it, then redirect constructively.
+
+TOOLS -- you have the same full control over sir's development environment \
+as Jarvis does:
+- Sessions: approve/deny prompts, focus/stop sessions, launch sessions, \
+send commands, broadcast.
+- Git: stage, commit, push, branches, stash, diffs.
+- Discovery: list known repos, search, get info.
+- Computer: read files, run sandboxed shell, read clipboard, see screen.
+- Communication: Slack (read/send), research, browse URLs.
+- Music (Spotify): play / pause / resume by name.
+- Mac control: open apps, list windows, clipboard, screenshots, system \
+volume / brightness, Finder, bundled Shortcuts (lock, sleep, focus, note, \
+screenshot, Downloads, calendar event). Permission-gated actions return \
+"confirm required" -- ask "Are you sure, sir?" and only proceed on yes.
+- Calendar: read upcoming events (`get_upcoming_events`, `get_next_event`), \
+create or move events with voice confirmation (`create_calendar_event`, \
+`move_calendar_event`). Two-step: `confirm=false` for preview, then \
+`confirm=true` to execute. Never say "created" / "moved" until the result \
+comes back without `requires_confirmation`. Use the current year from \
+"## Current Time"; include a timezone offset in every timestamp.
+
+For status questions, just read your context and answer immediately. \
+Background monitors keep your context fresh -- don't call get_status \
+unnecessarily.
+
+RESPOND FAST. Speak FIRST, then use tools. Don't silently process tools \
+before responding. For simple commands ("approve all", "focus maya", \
+"status"), just do it -- no chain-of-thought narration.
+
+On greetings: "Good morning, sir. Friday here." Then a crisp briefing. \
+Problems first, then status. If all quiet: "All quiet on the front, sir. \
+Shall we get started?"
+"""
+
+# Kept for backwards compatibility -- still imported by a few call sites that
+# may not have been migrated to the FRIDAY_SYSTEM swap. Safe to delete once
+# nothing references it.
+FRIDAY_PERSONA_ADDENDUM: Final[str] = FRIDAY_SYSTEM
+
+# ---------------------------------------------------------------------------
 # System prompt -- Jarvis personality for spoken responses
 # ---------------------------------------------------------------------------
 
@@ -93,6 +172,29 @@ cross-session conflicts (impact warnings), launch from saved templates.
 
 Communication: Slack (read/send/search via MCP), research topics in background, browse URLs, \
 get briefings, highlight HUD panels, navigate views, focus macOS apps.
+
+Music (Spotify): control sir's Spotify via Web API search + AppleScript on the Mac. \
+Play any track/artist/album by name (spotify_search_and_play), pause (spotify_pause), \
+resume (spotify_resume). If sir asks to play music and Spotify isn't connected yet, \
+say so and point him at Settings -> Connections -> Spotify. Skip / previous / volume / \
+like / queue are landing in a follow-up — if asked, acknowledge they're coming soon \
+rather than refusing music outright.
+
+Mac control: open apps (mac_open_app), list windows, read/write clipboard, take \
+screenshots, set system volume / display brightness, open Finder paths, and run \
+bundled Shortcuts (lock screen, sleep, toggle focus mode, take note, quick screenshot, \
+open Downloads, new calendar event). Some Mac actions are permission-gated -- if a \
+tool returns "confirm required", ask sir "Are you sure, sir?" and only proceed on yes.
+
+Calendar: read upcoming events (`get_upcoming_events`, `get_next_event`), create or \
+move events with voice confirmation (`create_calendar_event`, `move_calendar_event`). \
+Two-step protocol: first call with `confirm=false` returns a preview (read it back, \
+wait for sir's "yes"), then call again with `confirm=true` to execute. Never announce \
+success ("scheduled", "created", "moved") until a tool result comes back without \
+`requires_confirmation`. \
+DATE FORMAT: use the **current year** from "## Current Time" above -- never default \
+to a training-data year like 2024. Timestamps must include a timezone offset, e.g. \
+`2026-05-26T08:00:00+04:00` -- bare timestamps without offset will be rejected.
 
 TOOL CHAINING -- you can call multiple tools in sequence when the task requires it. \
 Read output, diagnose, fix, commit, push is a valid chain. Each tool result informs \
@@ -170,6 +272,12 @@ TOOL USAGE RULES:
 - "Tell all sessions to run tests" -> broadcast_to_all.
 - "Read the README in maya" -> read_file. "List files in auth/src" -> run_shell("ls ...").
 - "What did I copy?" -> get_clipboard. "What's on my screen?" -> see_screen.
+- "Play <song/artist/album>" / "put on <track>" -> spotify_search_and_play. \
+  "Pause [the music]" -> spotify_pause. "Resume" / "keep playing" -> spotify_resume. \
+  Never refuse music — Spotify IS one of your tools.
+- "Open Slack" / "launch Safari" -> mac_open_app. "Lock my screen" / "go to sleep" / \
+  "focus mode on" / "take a note" -> the matching mac_shortcut_run tool. \
+  "Read my clipboard" -> mac_clipboard_read. "Take a screenshot" -> mac_screenshot.
 - "Open PR for auth" -> open_pr. "Any conflicts?" -> get_impact_warnings.
 - "Create a workspace with auth and maya" -> create_workspace.
 - "Tell maya to..." / "Have auth fix..." -> delegation mode (refine prompt, confirm, send_to_terminal).
@@ -488,6 +596,63 @@ TOOLS: Final[list[dict[str, Any]]] = [
                 "minutes": {
                     "type": "integer",
                     "description": "How many minutes back to look. Default 15.",
+                },
+            },
+        },
+    },
+    {
+        "name": "recall_meeting",
+        "description": (
+            "Read a meeting's notes Markdown file. Without arguments, returns "
+            "the most-recent meeting. With `filename`, returns that specific "
+            "meeting (use `list_recent_meetings` to find filenames). Use when "
+            "sir asks about a past meeting, e.g. 'what did we discuss in the "
+            "sync', 'what were the action items', 'summarise the last call', "
+            "'what did we cover on Tuesday'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Optional. The exact filename (e.g. "
+                        "'2026-05-27-15-30-sync.md') of the meeting to load. "
+                        "Omit to read the most-recently-modified meeting."
+                    ),
+                },
+            },
+        },
+    },
+    # Back-compat alias for the previous tool name. Cached LLM tool-use that
+    # emitted ``recall_last_meeting`` still resolves -- the executor maps it
+    # to recall_meeting with no filename.
+    {
+        "name": "recall_last_meeting",
+        "description": "Alias for `recall_meeting` with no filename.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "list_recent_meetings",
+        "description": (
+            "List the user's most recent meeting notes (default 10, max 50). "
+            "Returns filename, ISO timestamp, byte size, and the meeting's "
+            "title (the first H1 in the markdown, falling back to the "
+            "filename slug). Use this before `recall_meeting` to find a "
+            "meeting by date or title when sir asks about something other "
+            "than the latest."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        "How many meetings to list. Default 10, max 50."
+                    ),
                 },
             },
         },
@@ -1059,6 +1224,103 @@ TOOLS: Final[list[dict[str, Any]]] = [
             "required": ["templateId"],
         },
     },
+    # ----- TASK-010: Google Calendar integration -----
+    {
+        "name": "get_upcoming_events",
+        "description": "Return upcoming calendar events from the user's Google Calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of events to return. Default: 10.",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_next_event",
+        "description": "Return the very next upcoming event (or null if the calendar is empty).",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "create_calendar_event",
+        "description": (
+            "Create a new event. Without confirm=true this returns a preview "
+            "for the user to verify; on follow-up with confirm=true it actually "
+            "creates the event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Event title/summary",
+                },
+                "start_iso": {
+                    "type": "string",
+                    "description": "Event start time in RFC3339 format (e.g. 2026-05-24T15:00:00+04:00)",
+                },
+                "end_iso": {
+                    "type": "string",
+                    "description": "Event end time in RFC3339 format",
+                },
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of attendee email addresses",
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Optional event location",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "If false (default), returns a preview for verification. "
+                        "If true, actually creates the event."
+                    ),
+                },
+            },
+            "required": ["title", "start_iso", "end_iso"],
+        },
+    },
+    {
+        "name": "move_calendar_event",
+        "description": (
+            "Move/reschedule an existing event. Without confirm=true this returns "
+            "a preview for the user to verify; on follow-up with confirm=true it "
+            "actually moves the event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Google Calendar event ID to move",
+                },
+                "new_start_iso": {
+                    "type": "string",
+                    "description": "New start time in RFC3339 format",
+                },
+                "new_end_iso": {
+                    "type": "string",
+                    "description": "New end time in RFC3339 format",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "If false (default), returns a preview for verification. "
+                        "If true, actually moves the event."
+                    ),
+                },
+            },
+            "required": ["id", "new_start_iso", "new_end_iso"],
+        },
+    },
 ]
 
 
@@ -1117,21 +1379,79 @@ def create_llm_service(config: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _local_iana_tz_for_prompt() -> str:
+    """Same detection logic as ``tools._local_iana_tz`` but inlined here so
+    pipecat_llm has no cross-module import dependency on tools.py. Returns
+    the IANA name (e.g. "Asia/Dubai") or "" if detection fails.
+    """
+    try:
+        tzinfo = datetime.datetime.now().astimezone().tzinfo
+        if tzinfo is not None and hasattr(tzinfo, "key"):
+            key = tzinfo.key  # type: ignore[attr-defined]
+            if isinstance(key, str) and "/" in key:
+                return key
+    except Exception:
+        pass
+    try:
+        import os
+        link = os.readlink("/etc/localtime")
+        if "zoneinfo/" in link:
+            return link.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return ""
+
+
 def _build_system_instruction(
     enriched_context: str,
     recalled_memories: str = "",
+    active_client_value: str | None = None,
 ) -> str:
     """Build the full system instruction string.
 
     Combines the Jarvis personality, current time, optional enriched
-    context, and recalled vector memories into a single system instruction
-    for the LLM.
-    """
-    now = datetime.datetime.now()
-    time_str = now.strftime("%A, %B %d %Y at %I:%M %p")
-    tz = now.astimezone().tzname()
+    context, recalled vector memories, and an optional persona overlay
+    into a single system instruction for the LLM.
 
-    parts = [JARVIS_SYSTEM, f"\n\n## Current Time\n{time_str} ({tz})"]
+    ``active_client_value`` is the result of ``active_client.get_active()``
+    (``"mac"`` or ``"mobile"``).  When ``"mobile"`` we prepend the Friday
+    persona addendum so the LLM reframes the turn as if Friday were
+    speaking on Jarvis's behalf.  When ``"mac"`` or ``None`` the prompt
+    stays the Jarvis-only flavour.
+    """
+    now_local = datetime.datetime.now().astimezone()
+    time_str = now_local.strftime("%A, %B %d %Y at %I:%M %p")
+    tz_short = now_local.tzname() or ""
+    # Numeric offset like "+0400" -> "+04:00" (RFC3339 canonical form).
+    raw_offset = now_local.strftime("%z")
+    offset = (raw_offset[:3] + ":" + raw_offset[3:]) if raw_offset else ""
+    iana = _local_iana_tz_for_prompt()
+    today_iso = now_local.strftime("%Y-%m-%d")
+    now_rfc3339 = now_local.strftime("%Y-%m-%dT%H:%M:%S") + offset
+    tomorrow_8am = (now_local.replace(hour=8, minute=0, second=0, microsecond=0)
+                    + datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S") + offset
+
+    # Pick a base persona prompt by interlocutor. Mobile turns swap to the
+    # standalone FRIDAY_SYSTEM rather than prepending an addendum to the
+    # Jarvis prompt -- the Jarvis body repeats "You are Jarvis" ~20 times
+    # and any add-on identity hint gets drowned out in practice.
+    base_prompt = (
+        FRIDAY_SYSTEM if active_client_value == "mobile" else JARVIS_SYSTEM
+    )
+
+    parts: list[str] = [base_prompt]
+    tz_block = (
+        f"\n\n## Current Time\n"
+        f"{time_str} ({tz_short})\n"
+        f"Today: {today_iso}\n"
+        f"IANA timezone: {iana or '(unknown — fall back to offset)'}\n"
+        f"UTC offset: {offset}\n"
+        f"Now (RFC3339): {now_rfc3339}\n"
+        f"Example — tomorrow 8 AM: {tomorrow_8am}\n"
+        f"Use these values verbatim for calendar timestamps. Never guess "
+        f"the year; never omit the offset."
+    )
+    parts.append(tz_block)
 
     if enriched_context:
         parts.append(
@@ -1171,6 +1491,7 @@ def update_system_instruction(
     llm: Any,
     enriched_context: str = "",
     recalled_memories: str = "",
+    active_client_value: str | None = None,
 ) -> None:
     """Update the system instruction on a running LLM service.
 
@@ -1182,22 +1503,47 @@ def update_system_instruction(
         llm: The ``AnthropicLLMService`` instance.
         enriched_context: Updated environment data string.
         recalled_memories: Recalled vector memory context string.
+        active_client_value: Optional ``"mac"`` / ``"mobile"`` override.
+            Defaults to ``None``.  When ``"mobile"`` the Friday persona
+            addendum is prepended to the prompt so the LLM reframes the
+            current turn through Friday's voice.  Production callers
+            should pass ``active_client.get_active()``.
     """
-    llm.settings.system_instruction = _build_system_instruction(
-        enriched_context, recalled_memories
+    new_instruction = _build_system_instruction(
+        enriched_context,
+        recalled_memories,
+        active_client_value=active_client_value,
+    )
+    llm.settings.system_instruction = new_instruction
+    logger.debug(
+        "Updated LLM system_instruction (active_client=%s, len=%d)",
+        active_client_value,
+        len(new_instruction),
     )
 
 
 def get_anthropic_tools() -> list[dict[str, Any]]:
     """Return tool definitions in Anthropic SDK format.
 
-    Returns a copy of the full 16-tool definitions list with rich
-    parameter descriptions, enum constraints, and optional params.
-    Suitable for passing to the LLM service or a Pipecat tool bridge.
-
-    Returns:
-        A list of tool definition dicts (Anthropic ``input_schema`` format).
+    Combines the rich TOOLS list defined in this module (verbose
+    descriptions, enums, optional params for the core 44 tools) with
+    the v0.3.0+ tool declarations registered in tools.py (spotify_*,
+    mac_*, etc.). Entries already present in TOOLS take precedence,
+    so the richer schema wins for any duplicate name.
     """
-    # Return a deep-ish copy so callers can't mutate the module constant.
-    # The dicts are nested but not deeply mutable in practice.
-    return [dict(tool) for tool in TOOLS]
+    tools_out = [dict(tool) for tool in TOOLS]
+    seen = {t["name"] for t in tools_out}
+
+    # Local import avoids a hard module dependency at import time and
+    # keeps the file usable in unit tests that stub out tools.py.
+    try:
+        from tools import get_anthropic_tools as _simple_anthropic_tools
+    except ImportError:
+        return tools_out
+
+    for extra in _simple_anthropic_tools():
+        if extra.get("name") in seen:
+            continue
+        tools_out.append(extra)
+        seen.add(extra["name"])
+    return tools_out

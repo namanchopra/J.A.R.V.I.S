@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/namanchopra/jarvis/internal/api"
 	"github.com/namanchopra/jarvis/internal/claude"
 	"github.com/namanchopra/jarvis/internal/config"
+	"github.com/namanchopra/jarvis/internal/gcal"
 	"github.com/namanchopra/jarvis/internal/jarvis"
 	"github.com/namanchopra/jarvis/internal/paths"
 	"github.com/namanchopra/jarvis/internal/permissions"
@@ -163,13 +165,23 @@ func (a *App) StartJarvis() error {
 	}
 
 	a.jarvisProcess = cmd.Process
+	a.jarvisGeneration++
+	gen := a.jarvisGeneration
 	// Do not reset jarvisRestarts here — the monitor goroutine manages restart count.
 
 	// Monitor the daemon in the background — restarts on unexpected exit.
-	go a.monitorJarvisDaemon(cmd)
+	// Pass the current generation so a stale monitor (from a superseded
+	// daemon) declines to restart when it notices a newer launch has
+	// happened. This is the fix for the dual-daemon race observed in the
+	// 16:21 trace: RestartJarvis killed the old proc, StartJarvis took the
+	// place; the old monitor's cmd.Wait() then returned and tried to
+	// restart again because a.jarvisProcess was no longer nil (the new
+	// proc had filled the slot).
+	go a.monitorJarvisDaemon(cmd, gen)
 
 	slog.Info("jarvis daemon launched",
 		"pid", cmd.Process.Pid,
+		"generation", gen,
 		"python", pythonPath,
 		"script", scriptPath,
 		"daemonVenv", paths.InstalledDaemonVenvPython() != "",
@@ -268,21 +280,41 @@ func (a *App) RestartJarvis() error {
 }
 
 // monitorJarvisDaemon waits for the daemon process to exit. If it exits
-// unexpectedly (i.e. a.jarvisProcess is still set), it attempts to restart
-// with exponential-ish back-off up to maxJarvisRestarts times.
-func (a *App) monitorJarvisDaemon(cmd *exec.Cmd) {
+// unexpectedly (i.e. a.jarvisProcess is still set AND we are still the
+// current generation), it attempts to restart with exponential-ish
+// back-off up to maxJarvisRestarts times.
+//
+// myGen is the generation counter captured at the moment this daemon was
+// launched. If a newer StartJarvis has bumped jarvisGeneration past
+// myGen, the daemon we were watching has been superseded by an explicit
+// restart (RestartJarvis) -- a stale monitor must NOT try to launch yet
+// another one.
+func (a *App) monitorJarvisDaemon(cmd *exec.Cmd, myGen uint64) {
 	err := cmd.Wait()
 
-	// If jarvisProcess was already cleared, StopJarvis was called — do not restart.
-	if a.jarvisProcess == nil {
+	a.jarvisMu.Lock()
+	// Two reasons to bail without restarting:
+	//   1. StopJarvis already cleared jarvisProcess.
+	//   2. A newer StartJarvis has bumped the generation past ours --
+	//      we are watching a superseded daemon, the live one belongs to
+	//      a different monitor.
+	if a.jarvisProcess == nil || a.jarvisGeneration != myGen {
+		slog.Info(
+			"jarvis monitor stale -- skipping restart",
+			"myGeneration", myGen,
+			"currentGeneration", a.jarvisGeneration,
+			"jarvisProcessNil", a.jarvisProcess == nil,
+		)
+		a.jarvisMu.Unlock()
 		return
 	}
 	a.jarvisProcess = nil
+	a.jarvisMu.Unlock()
 
 	if err != nil {
-		slog.Warn("jarvis daemon exited unexpectedly", "err", err)
+		slog.Warn("jarvis daemon exited unexpectedly", "err", err, "generation", myGen)
 	} else {
-		slog.Warn("jarvis daemon exited with status 0")
+		slog.Warn("jarvis daemon exited with status 0", "generation", myGen)
 	}
 
 	// Attempt restarts with increasing delay (max 1 restart to avoid spawn storms).
@@ -661,6 +693,37 @@ func (a *App) dispatchJarvisTool(name string, args map[string]interface{}) map[s
 	getStr := func(key string) string {
 		v, _ := args[key].(string)
 		return v
+	}
+
+	// Positional-arg helpers for Wails-direct calls. Python's _call_wails
+	// sends args as a JSON array; handleJarvisToolCall surfaces it under
+	// the "_positional" key (see handlers_jarvis_ws.go).
+	posList := func() []interface{} {
+		if pos, ok := args["_positional"].([]interface{}); ok {
+			return pos
+		}
+		return nil
+	}
+	posStr := func(i int) string {
+		pos := posList()
+		if i < len(pos) {
+			s, _ := pos[i].(string)
+			return s
+		}
+		return ""
+	}
+	posInt := func(i int) int {
+		pos := posList()
+		if i < len(pos) {
+			// JSON numbers decode as float64 in interface{} — handle both shapes.
+			switch v := pos[i].(type) {
+			case float64:
+				return int(v)
+			case int:
+				return v
+			}
+		}
+		return 0
 	}
 
 	slog.Info("dispatchJarvisTool", "name", name, "args", args)
@@ -1337,6 +1400,293 @@ func (a *App) dispatchJarvisTool(name string, args map[string]interface{}) map[s
 			return map[string]interface{}{"ok": false, "message": fmt.Sprintf("template launch failed: %v", err)}
 		}
 		return map[string]interface{}{"ok": true, "message": fmt.Sprintf("Launched sessions from template %s", templateID)}
+
+	// -------------------------------------------------------------------
+	// Wails-direct CamelCase methods (positional args via _call_wails).
+	// These match the Python daemon's tools.py executor branches 1:1.
+	// -------------------------------------------------------------------
+
+	case "SpotifySearchAndPlay":
+		query := posStr(0)
+		if query == "" {
+			query = getStr("query")
+		}
+		msg, err := a.SpotifySearchAndPlay(query)
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": msg}
+
+	case "SpotifyPause":
+		if err := a.SpotifyPause(); err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": "Paused Spotify"}
+
+	case "SpotifyResume":
+		if err := a.SpotifyResume(); err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": "Resumed Spotify"}
+
+	// -------------------------------------------------------------------
+	// Google Calendar (v0.3.0 TASK-008). Mirrors the Spotify dispatch
+	// pattern above: positional args via _call_wails (posStr/posInt),
+	// fallback to named args, gcal.ErrNotAuthenticated short-circuits
+	// with a voice-friendly "connect in Settings" prompt so the daemon
+	// never speaks a raw Go error to the user.
+	// -------------------------------------------------------------------
+
+	case "GoogleCalendarGetUpcomingEvents":
+		// No getInt helper in this file — JSON numbers decode as float64
+		// when they arrive via the named-args path, so handle both shapes.
+		limit := posInt(0)
+		if limit <= 0 {
+			if raw, ok := args["limit"]; ok {
+				switch v := raw.(type) {
+				case float64:
+					limit = int(v)
+				case int:
+					limit = v
+				case int64:
+					limit = int(v)
+				}
+			}
+		}
+		events, err := a.GoogleCalendarGetUpcomingEvents(limit)
+		if err != nil {
+			if errors.Is(err, gcal.ErrNotAuthenticated) {
+				return map[string]interface{}{"ok": false, "message": "I need you to connect Google Calendar first — open Settings → Connections."}
+			}
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		// Format the events as a natural-language summary in `message` so the
+		// voice LLM can narrate them directly. The daemon's _call_wails
+		// normalizer collapses the response to a single value (message/result)
+		// — anything we put in `data:` gets dropped, so the message MUST
+		// carry the event details or the LLM hallucinates them.
+		if len(events) == 0 {
+			return map[string]interface{}{"ok": true, "message": "No upcoming events."}
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "%d upcoming event(s):", len(events))
+		for _, e := range events {
+			start := e.Start.Format("Mon Jan 2, 3:04 PM")
+			end := e.End.Format("3:04 PM")
+			b.WriteString("\n- ")
+			b.WriteString(start)
+			b.WriteString("–")
+			b.WriteString(end)
+			b.WriteString(" ")
+			b.WriteString(e.Title)
+			if e.Location != "" {
+				b.WriteString(" (")
+				b.WriteString(e.Location)
+				b.WriteString(")")
+			}
+		}
+		return map[string]interface{}{"ok": true, "message": b.String()}
+
+	case "GoogleCalendarGetNextEvent":
+		snap, err := a.GoogleCalendarGetNextEvent()
+		if err != nil {
+			if errors.Is(err, gcal.ErrNotAuthenticated) {
+				return map[string]interface{}{"ok": false, "message": "I need you to connect Google Calendar first — open Settings → Connections."}
+			}
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		if snap == nil {
+			return map[string]interface{}{"ok": true, "data": nil, "message": "No upcoming events."}
+		}
+		return map[string]interface{}{"ok": true, "data": snap, "message": fmt.Sprintf("Next: %s (%s)", snap.Title, snap.RelativeTime)}
+
+	case "GoogleCalendarCreateEvent":
+		title := posStr(0)
+		if title == "" {
+			title = getStr("title")
+		}
+		startISO := posStr(1)
+		if startISO == "" {
+			startISO = getStr("start_iso")
+		}
+		endISO := posStr(2)
+		if endISO == "" {
+			endISO = getStr("end_iso")
+		}
+		// attendees: prefer positional[3] if it's a slice, else named "attendees".
+		// JSON arrays always decode as []interface{} on the wire.
+		var attendees []string
+		collect := func(raw interface{}) {
+			list, ok := raw.([]interface{})
+			if !ok {
+				return
+			}
+			for _, v := range list {
+				if s, ok := v.(string); ok && s != "" {
+					attendees = append(attendees, s)
+				}
+			}
+		}
+		if pos := posList(); len(pos) > 3 {
+			collect(pos[3])
+		}
+		if len(attendees) == 0 {
+			if raw, ok := args["attendees"]; ok && raw != nil {
+				collect(raw)
+			}
+		}
+		timeZone := posStr(4)
+		if timeZone == "" {
+			timeZone = getStr("timeZone")
+		}
+		if timeZone == "" {
+			timeZone = getStr("time_zone")
+		}
+		evt, err := a.GoogleCalendarCreateEvent(title, startISO, endISO, attendees, timeZone)
+		if err != nil {
+			if errors.Is(err, gcal.ErrNotAuthenticated) {
+				return map[string]interface{}{"ok": false, "message": "I need you to connect Google Calendar first — open Settings → Connections."}
+			}
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "data": evt, "message": fmt.Sprintf("Created: %s", evt.Title)}
+
+	case "GoogleCalendarMoveEvent":
+		id := posStr(0)
+		if id == "" {
+			id = getStr("id")
+		}
+		newStartISO := posStr(1)
+		if newStartISO == "" {
+			newStartISO = getStr("new_start_iso")
+		}
+		newEndISO := posStr(2)
+		if newEndISO == "" {
+			newEndISO = getStr("new_end_iso")
+		}
+		timeZone := posStr(3)
+		if timeZone == "" {
+			timeZone = getStr("timeZone")
+		}
+		if timeZone == "" {
+			timeZone = getStr("time_zone")
+		}
+		evt, err := a.GoogleCalendarMoveEvent(id, newStartISO, newEndISO, timeZone)
+		if err != nil {
+			if errors.Is(err, gcal.ErrNotAuthenticated) {
+				return map[string]interface{}{"ok": false, "message": "I need you to connect Google Calendar first — open Settings → Connections."}
+			}
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "data": evt, "message": fmt.Sprintf("Moved: %s", evt.Title)}
+
+	case "MacOpenApp":
+		out, err := a.MacOpenApp(posStr(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacQuitApp":
+		out, err := a.MacQuitApp(posStr(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacFocusWindow":
+		out, err := a.MacFocusWindow(posStr(0), posStr(1))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacSetVolume":
+		out, err := a.MacSetVolume(posInt(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacMute":
+		out, err := a.MacMute()
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacUnmute":
+		out, err := a.MacUnmute()
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacSetBrightness":
+		out, err := a.MacSetBrightness(posInt(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacToggleDND":
+		out, err := a.MacToggleDND()
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacOpenPath":
+		out, err := a.MacOpenPath(posStr(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacSpotlight":
+		out, err := a.MacSpotlight(posStr(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "result": out}
+
+	case "MacScreenshot":
+		out, err := a.MacScreenshot(posStr(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "result": out}
+
+	case "MacClipboardGet":
+		out, err := a.MacClipboardGet()
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "result": out}
+
+	case "MacClipboardSet":
+		out, err := a.MacClipboardSet(posStr(0))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "MacListShortcuts":
+		out, err := a.MacListShortcuts()
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "result": out}
+
+	case "MacRunShortcut":
+		out, err := a.MacRunShortcut(posStr(0), posStr(1))
+		if err != nil {
+			return map[string]interface{}{"ok": false, "message": err.Error()}
+		}
+		return map[string]interface{}{"ok": true, "message": out}
+
+	case "GetMacctlPolicy":
+		return map[string]interface{}{"ok": true, "result": a.GetMacctlPolicy()}
 
 	default:
 		return map[string]interface{}{"ok": false, "message": fmt.Sprintf("unknown tool: %s", name)}

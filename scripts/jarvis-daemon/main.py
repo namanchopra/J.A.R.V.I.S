@@ -28,11 +28,13 @@ import base64
 import datetime
 import json
 import logging
+import os
 import signal
 import sys
+import tempfile
 import time
 import uuid
-from typing import Any
+from typing import Any, Final
 
 # ---------------------------------------------------------------------------
 # Pipecat imports
@@ -53,8 +55,10 @@ try:
         TextFrame,
         TranscriptionFrame,
         InterimTranscriptionFrame,
+        TTSAudioRawFrame,
         TTSSpeakFrame,
         UserStartedSpeakingFrame,
+        UserStoppedSpeakingFrame,
     )
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.runner import PipelineRunner
@@ -126,10 +130,12 @@ from browser import BrowserController
 from mcp_client import MCPManager, load_mcp_configs
 from tool_bridge import ToolBridge, DeferredResultQueue
 from pipecat_llm import get_anthropic_tools, update_system_instruction, MODEL, JARVIS_SYSTEM as JARVIS_SYSTEM_FULL
-from pipecat_stt import LocalWhisperSTT
+from pipecat_stt import LocalWhisperSTT, MobileAudioRawFrame
 from pipecat_tts_cartesia import CartesiaTTSService
 from pipecat_tts_kokoro import KokoroTTSService
 from pipecat_tts_vibevoice import VibeVoiceTTSService
+from pipecat_tts_macos_say import MacOSSayTTSService
+import active_client
 import model_status
 
 # Pipecat ToolsSchema imports (required for LLMContext.set_tools in Pipecat 1.0)
@@ -230,7 +236,16 @@ async def send_tool_call(
 _context: dict[str, Any] = {}
 _tool_executor: ToolExecutor | None = None
 _has_greeted: bool = False
-_command_queue: asyncio.Queue[str] = asyncio.Queue()
+_command_queue: asyncio.Queue[Any] = asyncio.Queue()
+"""Queue carrying HUD-originated text commands and their full payload.
+
+Historically holds plain ``str`` (e.g. ``"__mute__"``). v0.3.0 / TASK-006
+widens it to ``Any`` so meeting commands can carry an optional ``title``
+field alongside the ``text``. ``_handle_command`` enqueues either a bare
+string (legacy callers) or a dict ``{"text": ..., "title": ..., ...}``
+(meeting commands). ``_command_loop`` normalises both shapes back to a
+``(text, data)`` pair so existing handlers keep working unchanged.
+"""
 _mobile_audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=200)
 
 # v6 subsystems -- set during pipeline init, used by processors.
@@ -239,6 +254,149 @@ _slack_poller: Any = None
 _research_agent: Any = None
 _briefing_system: Any = None
 _event_store: Any = None
+
+# v0.3.0 / Path A: handle to the running LLM service.  Populated by
+# ``create_pipeline_components`` so the ``mobile_active`` control frame
+# handler can flip the persona overlay immediately without waiting for
+# the 5-second context enricher tick.  ``None`` before the pipeline is
+# built.
+_llm_service_handle: AnthropicLLMService | None = None  # noqa: F821 -- forward ref OK
+
+# v0.3.0 / TASK-006: handle to the running PipelineTask so the PTT
+# handlers can inject UserStartedSpeakingFrame / UserStoppedSpeakingFrame
+# directly into the live pipeline without forking the LLM dispatch path.
+# Populated by ``create_pipeline_components`` and never cleared mid-run
+# (the next pipeline build overwrites it).  ``None`` before any pipeline
+# has been built, in which case the PTT handlers fall back to the
+# ``_ptt_active_flag`` toggle for the STT gate and log a debug warning
+# explaining that the turn-start/stop frame injection was skipped.
+_pipeline_task_handle: Any = None  # PipelineTask; Any to avoid forward-ref issues at module load.
+
+# v0.3.0 / TASK-006: PTT (push-to-talk) lifecycle state.  Tracks open PTT
+# windows so out-of-order frames can be detected and a stuck "active"
+# state can be auto-recovered if the release frame never arrives (e.g.
+# the user quits the app mid-hold).  Keys are arbitrary session ids; for
+# now only the Mac overlay surface ever sends PTT frames, so the single
+# key ``"mac"`` is used.  Values are wall-clock timestamps from
+# ``time.monotonic()``.
+_PTT_STATE: dict[str, float] = {}
+
+# Hard upper bound on a single PTT hold; after this the daemon force-
+# releases the gate even if no ``ptt_release`` frame arrived.  5 s is
+# long enough for normal voice commands but short enough that a stuck
+# overlay doesn't permanently brick the mic gate.
+_PTT_SAFETY_TIMEOUT_S: Final[float] = 5.0
+
+# Live asyncio.Task handle for the safety-timeout coroutine spawned by
+# ``_handle_ptt_active``.  Cancelled on ``_handle_ptt_release`` or when a
+# second ``ptt_active`` arrives.
+_ptt_safety_task: asyncio.Task[None] | None = None
+
+# Module-level flag that ``pipecat_stt`` and other gate-checking code can
+# consult to decide whether the local mic is currently in "force open"
+# (PTT hold) mode.  This is the documented fallback when frame injection
+# into the live pipeline is unavailable (no _pipeline_task_handle yet).
+# v0.3.0 keeps the flag as a public observable surface even when frames
+# are also injected -- callers that prefer a synchronous read get one,
+# while the pipeline gets the proper Pipecat turn-start/stop frames.
+_ptt_active_flag: bool = False
+
+# v0.3.0 / TASK-003: Meeting mode lifecycle state. TASK-006 owns the
+# state-machine logic that flips _MEETING_ACTIVE and populates the
+# buffer; TASK-007 reads the buffer to write the markdown notes file;
+# TASK-008 emits the spoken recap. This module owns ONLY the
+# declarations + the documented contract for what each field means.
+#
+# Why these are module-level rather than instance fields on a class:
+# the daemon's existing state (mute flags, PTT flags, pipeline task
+# handle, LLM service handle) all live at module scope so the WS
+# command-loop closure can read+write them without a `nonlocal`
+# dance. Meeting mode follows the same pattern for consistency.
+#
+# Failure-mode coverage: importing the module always reinitialises
+# these to their zero-value defaults, so a daemon crash mid-meeting
+# never bricks the next session into a phantom "active" state.
+
+_MEETING_ACTIVE: bool = False
+"""True while a meeting is in progress. Flipped by TASK-006's
+``__meeting_start__`` and ``__meeting_stop__`` HUD command handlers.
+Read by the user-turn-stop dispatcher to decide whether to dispatch
+the LLM (False -> normal flow, True -> buffer-and-skip)."""
+
+_MEETING_TITLE: str | None = None
+"""Human-readable title for the current meeting. Set by
+``__meeting_start__`` from the WS command payload's ``title`` field.
+Empty / missing -> ``"untitled"`` (handled by TASK-007's slugify)."""
+
+_MEETING_STARTED_AT: float | None = None
+"""``time.monotonic()`` timestamp at which the meeting began. Used
+by TASK-007 to compute meeting duration in the markdown header and
+by the safety-bounded buffer logic in TASK-006."""
+
+# Each buffer entry shape (set by TASK-006 transcript callback):
+#   {
+#     "ts":      "2026-05-27T14:30:00+00:00",   # ISO 8601
+#     "source":  "mic" | "system",              # which audio stream
+#     "speaker": "user" | "other" | "unknown",  # best-effort tag
+#     "text":    "Hi everyone, let's start.",
+#   }
+_MEETING_BUFFER: list[dict[str, Any]] = []
+"""Ordered list of transcript entries captured during the current
+meeting. Append-only during ``_MEETING_ACTIVE=True`` (with oldest-
+entry eviction when the rolling char count exceeds
+``_MEETING_BUFFER_CAP``). Cleared by ``__meeting_stop__`` after the
+markdown file is written."""
+
+_MEETING_BUFFER_CHARS: int = 0
+"""Rolling character count of all ``text`` fields in
+``_MEETING_BUFFER``. Used to enforce the cap without recomputing
+``sum(len(e["text"]) for e in _MEETING_BUFFER)`` on every append."""
+
+_MEETING_BUFFER_CAP: Final[int] = 100_000
+"""Hard upper bound on the meeting transcript buffer in characters.
+At ~5 chars per word that's ~20k words / ~3 hours of dense speech.
+TASK-006 evicts oldest entries when the cap is exceeded -- the
+``Summary`` and ``Action Items`` sections in TASK-007's output then
+reflect the surviving window, with a footnote in the markdown
+explaining the truncation. Documented here so the cap can be tuned
+without hunting through handler code."""
+
+_SUPPRESS_LLM_TURN: bool = False
+"""When True, the user-turn-stop event accumulates the transcript
+into ``_MEETING_BUFFER`` instead of dispatching the LLM. Flipped
+True by ``__meeting_start__`` and back to False by
+``__meeting_stop__``. NOT a synonym for ``_MEETING_ACTIVE``: future
+features may want LLM suppression without the full meeting state
+(e.g. a "silent listen" mode), so we keep the two flags separate."""
+
+_PRE_MEETING_STATE: dict[str, Any] | None = None
+"""Snapshot of the STT-gate / TTS-mute flags captured at
+``__meeting_start__`` so ``__meeting_stop__`` can restore them.
+Populated keys: ``stt_force_muted``, ``wake_gate_armed``,
+``ws_bridge_muted``, ``router_tts_muted``. ``None`` outside a
+meeting. Reset to ``None`` at the tail of ``__meeting_stop__`` so a
+subsequent start captures fresh state rather than the previous
+meeting's residue."""
+
+_LAST_SYSTEM_AUDIO_TS: float | None = None
+"""``time.monotonic()`` timestamp of the most recent ``system_audio``
+frame injected via :func:`_handle_system_audio`. The transcript
+finaliser in :class:`WSBridgeProcessor` consults this to tag the
+upstream source: if a transcript finalises within ~0.5s of the last
+system-audio inject, we attribute it to system audio (i.e. speakers
+playing remote meeting participants); otherwise it's mic-side speech.
+``None`` until the first ``system_audio`` frame arrives."""
+
+# v0.3.0 / TASK-007: cache of the recap text produced by the most-
+# recent ``generate_meeting_notes`` call. TASK-008's
+# ``__meeting_recap__`` handler reads this for replay-without-
+# re-summarising. None means no meeting has been finalised this
+# session (a recap before the first meeting ends is a no-op).
+_LAST_MEETING_RECAP: str | None = None
+"""Cached recap text from the most-recent ``generate_meeting_notes``
+call. TASK-008's ``__meeting_recap__`` handler reads this for replay-
+without-re-summarising. None means no meeting has been finalised this
+session."""
 
 # v0.1.5 pipeline-status cache. ``create_pipeline_components`` populates
 # this with the last payload it shipped over the WS so a late-mounting
@@ -268,44 +426,576 @@ def _handle_tool_result(data: dict[str, Any]) -> None:
 
 
 def _handle_command(data: dict[str, Any]) -> None:
-    """Handle a text command typed in the HUD input."""
+    """Handle a text command typed in the HUD input.
+
+    Some HUD clients forward control messages (e.g. ``request_pipeline_status``)
+    by wrapping the JSON inside a ``command`` envelope's ``text`` field instead
+    of sending it as a top-level WS message. If we don't catch that here, the
+    JSON ends up injected into the LLM context as a user turn and the model
+    starts talking to itself about pipeline status. Detect a JSON object with a
+    known ``type`` and route through the normal dispatcher.
+    """
     text = data.get("text", "").strip()
-    if text:
-        logger.info("Command from HUD: %s", text)
+    if not text:
+        return
+    logger.info("Command from HUD: %s", text)
+
+    if text.startswith("{") and text.endswith("}"):
         try:
+            inner = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            inner = None
+        if isinstance(inner, dict):
+            inner_type = inner.get("type")
+            handler = _MESSAGE_HANDLERS.get(inner_type) if inner_type else None
+            if handler is not None:
+                handler(inner)
+                return
+
+    # v0.3.0 / TASK-006: meeting-mode HUD commands may carry payload
+    # fields (e.g. ``title``) alongside ``text``. We forward the whole
+    # ``data`` dict to the command loop for those so the loop can read
+    # ``data.get("title")`` etc. Plain commands (mute, unmute,
+    # interrupt) keep the legacy bare-string path -- the command loop
+    # accepts both shapes for backwards compatibility.
+    _MEETING_COMMAND_TEXTS = (
+        "__meeting_start__",
+        "__meeting_stop__",
+        "__meeting_recap__",
+    )
+    try:
+        if text in _MEETING_COMMAND_TEXTS:
+            _command_queue.put_nowait(data)
+        else:
             _command_queue.put_nowait(text)
-        except asyncio.QueueFull:
-            pass
+    except asyncio.QueueFull:
+        pass
 
 
 def _handle_mobile_audio(data: dict[str, Any]) -> None:
-    """Handle base64-encoded PCM audio from mobile client.
+    """Handle base64-encoded mobile audio (CAF / M4A container, not raw PCM).
 
-    Decodes the audio and pushes raw PCM bytes onto the mobile audio queue
-    for injection into the STT pipeline by the mobile audio loop.
+    The mobile push-to-talk records into iOS .caf or Android .m4a and ships
+    the whole utterance as one blob on press release. Pipecat STT expects
+    raw 16-bit signed-LE PCM at 16kHz mono, so we queue the encoded bytes
+    here and let the async mobile audio loop transcode via ffmpeg before
+    pushing AudioRawFrame.
     """
     audio_b64 = data.get("data", "")
     if not audio_b64:
+        logger.info("Mobile audio frame has no 'data' field -- dropping")
         return
     try:
-        pcm_bytes = base64.b64decode(audio_b64)
-        _mobile_audio_queue.put_nowait(pcm_bytes)
-        logger.debug("Mobile audio queued: %d bytes", len(pcm_bytes))
+        encoded = base64.b64decode(audio_b64)
+        _mobile_audio_queue.put_nowait(encoded)
+        # INFO so we can see this even without --debug while diagnosing.
+        logger.info("Mobile audio queued (encoded): %d bytes", len(encoded))
     except Exception:
-        logger.debug("Failed to decode/queue mobile audio", exc_info=True)
+        logger.warning("Failed to decode/queue mobile audio", exc_info=True)
 
 
-async def send_mobile_tts(ws: ClientConnection, pcm_chunk: bytes) -> None:
+async def _ffmpeg_decode_to_pcm16le(encoded: bytes) -> bytes:
+    """Transcode a CAF / M4A blob to raw 16kHz mono s16le PCM via ffmpeg.
+
+    iOS .caf containers require seeking back to read the format header,
+    which fails when ffmpeg reads from a pipe. So we write the blob to a
+    temp file and feed that file path to ffmpeg. Returns empty bytes on
+    any failure -- the caller treats that as "drop this utterance".
+    """
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="jarvis-mobile-", suffix=".bin", delete=False
+        ) as tmp:
+            tmp.write(encoded)
+            tmp_path = tmp.name
+    except Exception:
+        logger.warning("Mobile audio: failed to write temp file", exc_info=True)
+        return b""
+
+    try:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-i", tmp_path,
+                "-f", "s16le",
+                "-acodec", "pcm_s16le",
+                "-ac", "1",
+                "-ar", "16000",
+                "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            logger.warning(
+                "Mobile audio: 'ffmpeg' not on PATH -- mobile STT will not work. "
+                "Install via 'brew install ffmpeg'."
+            )
+            return b""
+        except Exception:
+            logger.warning("Mobile audio: ffmpeg spawn failed", exc_info=True)
+            return b""
+
+        try:
+            stdout, stderr = await proc.communicate()
+        except Exception:
+            logger.warning("Mobile audio: ffmpeg communicate failed", exc_info=True)
+            return b""
+
+        if proc.returncode != 0:
+            logger.warning(
+                "Mobile audio: ffmpeg exited %s: %s",
+                proc.returncode,
+                stderr.decode("utf-8", errors="replace").strip(),
+            )
+            return b""
+        return stdout
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _handle_mobile_active(data: dict[str, Any]) -> None:
+    """Handle the ``mobile_active`` control frame from the Go bridge.
+
+    Sent by ``handlers_jarvis_mobile_ws.go`` immediately after every
+    forwarded ``mobile_audio`` chunk.  Flips the active-interlocutor
+    state to "mobile" for the upcoming turn so the TTS router picks the
+    Friday voice, the LLM persona overlay activates, and the local Mac
+    speaker is suppressed for the response.  Decays automatically after
+    ``active_client.MOBILE_GRACE_SECONDS`` of silence.
+
+    Also refreshes the LLM system instruction with the Friday persona
+    overlay immediately, without waiting for the next 5-second context
+    enricher tick -- otherwise the first few mobile turns could fire
+    before the prompt updates.
+    """
+    del data  # No payload fields today; the type alone is the signal.
+    active_client.set_mobile_active()
+    logger.debug("set_mobile_active() fired (mobile_active received)")
+
+    # Refresh the persona overlay on every mobile_active hit, not just the
+    # mac->mobile transition. The 5-second context enricher periodically
+    # rebuilds the system instruction and may drop the Friday addendum if
+    # ``active_client`` has decayed back to mac between turns. Refreshing on
+    # every press guarantees the upcoming turn always sees the Friday prompt.
+    if _llm_service_handle is not None:
+        try:
+            update_system_instruction(
+                _llm_service_handle, active_client_value="mobile"
+            )
+            logger.info("LLM persona overlay refreshed: Friday (mobile)")
+        except Exception:
+            logger.debug(
+                "Failed to refresh LLM system instruction for mobile",
+                exc_info=True,
+            )
+
+
+def _handle_system_audio(data: dict[str, Any]) -> None:
+    """Handle a ``system_audio`` control frame from the Go bridge.
+
+    Sent during meeting mode by the ScreenCaptureKit bridge (TASK-004)
+    forwarded via ``app_meeting.go`` (TASK-005). The ``data`` field is
+    base64-encoded 16-bit mono 16 kHz PCM (matches CanonicalAudioFormat
+    in ``internal/screencapture``). We decode it and inject as a
+    ``MobileAudioRawFrame``-style frame so the existing STT pipeline
+    picks it up as ordinary input.
+
+    Tagged with ``source="system"`` via the module-level
+    ``_LAST_SYSTEM_AUDIO_TS`` flag the transcript callback in
+    ``WSBridgeProcessor`` reads when appending to ``_MEETING_BUFFER``
+    -- that's how the markdown writer knows the entry came from
+    speakers rather than the mic.
+
+    No-op (with a debug log) when meeting mode is not active: a stale
+    frame arriving after ``__meeting_stop__`` should be dropped
+    silently rather than fed to the pipeline.
+    """
+    global _LAST_SYSTEM_AUDIO_TS
+
+    if not _MEETING_ACTIVE:
+        logger.debug("system_audio dropped: meeting not active")
+        return
+
+    b64 = data.get("data", "")
+    if not b64:
+        logger.warning("system_audio: missing data field")
+        return
+    try:
+        pcm = base64.b64decode(b64)
+    except Exception as exc:  # noqa: BLE001 -- defensive: bad frame must not crash
+        logger.warning("system_audio: base64 decode failed: %r", exc)
+        return
+
+    _LAST_SYSTEM_AUDIO_TS = time.monotonic()
+
+    # Inject as a MobileAudioRawFrame so STT consumes it on the same
+    # pipeline as the mic path. The mic + system streams mix into one
+    # transcript; the source tag on _MEETING_BUFFER entries is set by
+    # which flag was most-recently true when the transcript finalised
+    # (see WSBridgeProcessor.process_frame -> TranscriptionFrame).
+    _inject_pipeline_frames(
+        [MobileAudioRawFrame(audio=pcm, sample_rate=16000, num_channels=1)]
+    )
+
+
+async def _ptt_safety_timeout(key: str) -> None:
+    """Sleep ``_PTT_SAFETY_TIMEOUT_S`` and force-release if still active.
+
+    Spawned by ``_handle_ptt_active`` as an ``asyncio.Task`` so the
+    dispatcher stays synchronous.  Cancelled either by a real
+    ``ptt_release`` or by a subsequent ``ptt_active`` (which spawns a
+    fresh timeout).
+    """
+    try:
+        await asyncio.sleep(_PTT_SAFETY_TIMEOUT_S)
+    except asyncio.CancelledError:
+        return
+    if key in _PTT_STATE:
+        logger.warning(
+            "PTT safety timeout fired for %r after %.1fs -- force-releasing gate",
+            key,
+            _PTT_SAFETY_TIMEOUT_S,
+        )
+        _handle_ptt_release({})
+
+
+async def _speak_meeting_recap(text: str) -> None:
+    """TASK-008: Speak the given recap text via the existing TTS pipeline.
+
+    Reuses the pipeline task handle that TASK-006 already exposes
+    (``_pipeline_task_handle``) and the same frame-injection pattern PTT
+    and meeting handlers use elsewhere in the daemon. The frame class is
+    :class:`pipecat.frames.frames.TTSSpeakFrame` -- the same one the
+    daemon already uses for one-shot synthesis (auto-greeting,
+    LLM-failover notices, alerts; see e.g. the greeting block around
+    ``await task.queue_frames([TTSSpeakFrame(text=greeting)])``). The
+    ``RouterTTSService`` (around line ~1386) explicitly documents this
+    frame as the one-shot synthesis path, and ``TTSSpeakFrame`` is
+    already imported at module top-level alongside the other Pipecat
+    frame types.
+
+    No-op when ``_pipeline_task_handle`` is None (pipeline not yet
+    built). No-op when the recap text is empty / whitespace-only.
+
+    Recap text is read aloud in the user's configured voice; by the time
+    :func:`_dispatch_meeting_finalisation` reaches this call,
+    ``__meeting_stop__`` has already restored the
+    ``RouterTTSService.meeting_muted`` flag to its pre-meeting value
+    (see TASK-006's ``__meeting_stop__`` block which restores from
+    ``_PRE_MEETING_STATE`` BEFORE scheduling the finalisation task).
+    The recap therefore flows through TTS as an ordinary utterance.
+
+    Feedback-loop note: this emits a ``TTSSpeakFrame`` which causes the
+    pipeline to broadcast ``BotStartedSpeakingFrame`` /
+    ``BotStoppedSpeakingFrame``. The ``LocalWhisperSTT`` instance gates
+    its own input on ``_bot_speaking`` (see ``pipecat_stt.py`` -- the
+    flag flips True on ``BotStartedSpeakingFrame`` and the audio
+    pre-processor drops mic frames while it's True), so the recap
+    audio can't be picked up and re-transcribed as user input. Meeting
+    mode is also fully cleared by the time we get here, so even if the
+    recap somehow leaked into STT, ``_SUPPRESS_LLM_TURN`` is False and
+    ``_MEETING_ACTIVE`` is False -- the worst case is a stray
+    transcript, never a phantom meeting.
+
+    Failure-mode: pipeline injection raising must NOT propagate;
+    swallow + log so a recap-speak failure never crashes the WS
+    command-loop / finalisation task.
+    """
+    text = (text or "").strip()
+    if not text:
+        return
+    if _pipeline_task_handle is None:
+        logger.debug("recap speak skipped: pipeline task not yet built")
+        return
+    try:
+        await _pipeline_task_handle.queue_frames([TTSSpeakFrame(text=text)])
+    except Exception as exc:  # noqa: BLE001 -- defensive: never crash on TTS
+        logger.warning("recap speak failed: %r", exc)
+
+
+async def _dispatch_meeting_finalisation(
+    title: str,
+    buffer: list[dict[str, Any]],
+    ws: Any,
+) -> None:
+    """TASK-007 implementation: call generate_meeting_notes, cache the
+    recap for TASK-008, emit a ``meeting_notes_written`` WS event so
+    the Go ``StopMeeting`` binding (TASK-009) can resolve.
+
+    Scheduled via :func:`asyncio.create_task` from ``__meeting_stop__``
+    so the WS acknowledgement (``state=idle``) returns immediately and
+    a slow LLM summary call doesn't block the UI.
+
+    Failure handling: every external call (config load, LLM call, file
+    write, WS notify) is defensively wrapped so a failure at any layer
+    surfaces as a log warning rather than a daemon crash. The user
+    always gets *some* markdown file (raw-only fallback at minimum),
+    and the WS event is emitted on success so the Go side can resolve.
+    """
+    global _LAST_MEETING_RECAP
+
+    # Lazy import: meeting_notes.py is loaded only when a meeting
+    # actually ends, keeping the module-load graph shallow and letting
+    # TASK-013 mock the LLM cleanly without dragging in the daemon.
+    try:
+        from meeting_notes import generate_meeting_notes
+    except ImportError as exc:
+        logger.error("meeting_notes import failed: %r", exc)
+        return
+
+    cfg = _load_config_safe()
+    notes_dir_raw = cfg.get("meetingNotesDir") if isinstance(cfg, dict) else ""
+    notes_dir: str = notes_dir_raw if isinstance(notes_dir_raw, str) and notes_dir_raw else "~/.jarvis/meetings"
+
+    if _llm_service_handle is None:
+        logger.warning(
+            "meeting finalisation: LLM service not initialised; "
+            "using raw-only fallback"
+        )
+
+    try:
+        markdown_path, recap = await generate_meeting_notes(
+            title=title,
+            buffer=buffer,
+            llm_service=_llm_service_handle,
+            notes_dir=notes_dir,
+        )
+    except Exception as exc:  # noqa: BLE001 -- never crash the daemon
+        logger.exception("meeting finalisation failed: %r", exc)
+        return
+
+    _LAST_MEETING_RECAP = recap
+
+    # TASK-008: Speak the recap aloud if non-empty. Empty recap happens
+    # in the documented failure cases handled inside
+    # generate_meeting_notes (TASK-007):
+    #   - buffer was empty -> stub markdown + empty recap
+    #   - LLM summary call failed -> raw-only fallback + empty recap
+    # Both cases should NOT trigger an audible recap. The ``and buffer``
+    # guard is belt-and-braces against any future regression where
+    # TASK-007 returns a non-empty recap on an empty buffer.
+    if recap and buffer:
+        await _speak_meeting_recap(recap)
+
+    # Notify the Go side so StopMeeting can resolve. WS shape mirrors
+    # the established ``await ws.send(json.dumps(...))`` pattern used
+    # by send_state / send_transcript / send_response upthread.
+    try:
+        await ws.send(json.dumps({
+            "type": "meeting_notes_written",
+            "path": markdown_path,
+            "title": title,
+            "buffer_entries": len(buffer),
+        }))
+    except Exception as exc:  # noqa: BLE001 -- non-fatal; just a notify
+        logger.warning("meeting finalisation: ws notification failed: %r", exc)
+
+    logger.info(
+        "meeting finalisation complete: title=%r, path=%s, recap_chars=%d",
+        title,
+        markdown_path,
+        len(recap),
+    )
+
+
+def _load_config_safe() -> dict[str, Any]:
+    """Load ~/.jarvis/config.json defensively.
+
+    Returns an empty dict on any failure (missing file, malformed JSON,
+    permission error). The caller treats an empty dict as "use built-in
+    defaults" -- never crash the daemon on a missing or corrupt config.
+
+    Why inline JSON read instead of the ``config.load_config`` helper:
+    ``load_config()`` is synchronous and the daemon has a module-level
+    config import chain. This helper is the minimum surface needed by
+    the meeting finalisation task and avoids tangling that import graph
+    in case the TASK-006 → TASK-007 ordering ever moves around.
+    """
+    from pathlib import Path
+
+    try:
+        path = Path("~/.jarvis/config.json").expanduser()
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:  # noqa: BLE001 -- intentionally swallow
+        logger.debug("meeting finalisation: config load failed", exc_info=True)
+    return {}
+
+
+def _inject_pipeline_frames(frames: list[Any]) -> bool:
+    """Best-effort frame injection into the live PipelineTask.
+
+    Returns True if the frames were scheduled, False if no pipeline task
+    is available yet (cold start before ``create_pipeline_components``)
+    or if scheduling raised.  Callers should treat False as "the gate
+    flag will have to carry the turn" -- the LLM dispatch path is still
+    driven by the existing VAD machinery downstream.
+    """
+    if _pipeline_task_handle is None:
+        logger.debug(
+            "PTT: pipeline task not yet built; relying on _ptt_active_flag only"
+        )
+        return False
+    try:
+        asyncio.create_task(
+            _pipeline_task_handle.queue_frames(frames),
+            name=f"ptt-inject-{type(frames[0]).__name__ if frames else 'empty'}",
+        )
+        return True
+    except Exception:  # noqa: BLE001 -- defensive: never crash the dispatcher
+        logger.warning("PTT: failed to inject frames into pipeline", exc_info=True)
+        return False
+
+
+def _handle_ptt_active(data: dict[str, Any]) -> None:
+    """Handle a ``ptt_active`` control frame from the Go bridge.
+
+    Sent by ``handlers_jarvis_ws.go`` when the global PTT hotkey
+    (default ``Option+Space``) is pressed.  Opens the Mac STT input
+    gate, transitions the daemon's published state to ``listening``,
+    and injects a ``UserStartedSpeakingFrame`` into the live pipeline
+    so the LLM-context aggregator behaves exactly as it would for a
+    VAD-driven turn.
+
+    Idempotent: a second ``ptt_active`` without an intervening release
+    is logged at WARNING level and otherwise ignored -- the existing
+    window remains open and the safety timeout is NOT reset (a stuck
+    overlay can still self-recover after the original 5 s budget).
+    """
+    del data  # No payload fields today; the type alone is the signal.
+
+    global _ptt_active_flag, _ptt_safety_task
+
+    key = "mac"
+    if key in _PTT_STATE:
+        logger.warning(
+            "ptt_active received while already active for %r -- ignoring "
+            "(use ptt_release first); existing safety timeout retained",
+            key,
+        )
+        return
+
+    now = time.monotonic()
+    _PTT_STATE[key] = now
+    _ptt_active_flag = True
+
+    # Mark the Mac as the active interlocutor so TTS routing + persona
+    # overlay match the existing local-mic flow.
+    active_client.set_mac_active(now=now)
+
+    # Publish "listening" so connected UI clients render the orb in the
+    # right mode.  Scheduled as a background task because this dispatcher
+    # is synchronous; the WS handle lives in ``_pipeline_status_ws``
+    # which is populated by the same ``create_pipeline_components`` call
+    # that populates ``_pipeline_task_handle``.
+    ws = _pipeline_status_ws
+    if ws is not None:
+        try:
+            asyncio.create_task(
+                send_state(ws, "listening"),
+                name="ptt-active-state",
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("PTT: failed to schedule state=listening send", exc_info=True)
+
+    # Inject the same turn-start frame Pipecat's VAD path emits.  The
+    # LLM-context aggregator listens for this frame and opens a fresh
+    # user-turn boundary; no fork of the dispatch logic is needed.
+    _inject_pipeline_frames([UserStartedSpeakingFrame()])
+
+    # Schedule the safety timeout that force-releases if no release frame
+    # arrives within _PTT_SAFETY_TIMEOUT_S.  Cancel any leftover task from
+    # a previous mis-paired cycle defensively.
+    if _ptt_safety_task is not None and not _ptt_safety_task.done():
+        _ptt_safety_task.cancel()
+    safety_coro = _ptt_safety_timeout(key)
+    try:
+        _ptt_safety_task = asyncio.create_task(
+            safety_coro,
+            name="ptt-safety-timeout",
+        )
+    except RuntimeError:
+        # No running loop (e.g. in a unit test calling the handler
+        # synchronously).  Skip the timeout -- the test will drive
+        # release explicitly.  Close the unscheduled coroutine to avoid
+        # a "coroutine was never awaited" RuntimeWarning.
+        safety_coro.close()
+        _ptt_safety_task = None
+        logger.debug("PTT: no running loop; safety timeout not scheduled")
+
+    logger.info("PTT active (overlay hotkey pressed): gate open")
+
+
+def _handle_ptt_release(data: dict[str, Any]) -> None:
+    """Handle a ``ptt_release`` control frame from the Go bridge.
+
+    Sent by ``handlers_jarvis_ws.go`` when the PTT hotkey is released.
+    Closes the gate, finalizes the current transcription window via an
+    injected ``UserStoppedSpeakingFrame`` (the same frame VAD emits when
+    the user stops speaking), and lets the existing LLM-turn pipeline
+    do its job downstream.
+
+    Idempotent failure case: a ``ptt_release`` arriving without a prior
+    ``ptt_active`` is logged at WARNING level and returns without
+    raising.  This is the documented failure mode from TASK-006 acceptance
+    criteria (out-of-order frames must not crash the daemon).
+    """
+    del data  # No payload fields today.
+
+    global _ptt_active_flag, _ptt_safety_task
+
+    key = "mac"
+    if key not in _PTT_STATE:
+        logger.warning(
+            "ptt_release received without prior ptt_active for %r -- ignoring",
+            key,
+        )
+        return
+
+    # Cancel the safety timeout if still pending.
+    if _ptt_safety_task is not None and not _ptt_safety_task.done():
+        _ptt_safety_task.cancel()
+    _ptt_safety_task = None
+
+    _PTT_STATE.pop(key, None)
+    _ptt_active_flag = False
+
+    # Inject the matching turn-stop frame so the LLM aggregator flushes
+    # the user turn into the dispatch path used by the VAD-driven flow.
+    # The downstream STT processor finalizes any in-flight transcription
+    # and the LLM picks it up exactly as if VAD had ended the turn.
+    _inject_pipeline_frames([UserStoppedSpeakingFrame()])
+
+    logger.info("PTT release (overlay hotkey released): gate closed, turn dispatched")
+
+
+async def send_mobile_tts(
+    ws: ClientConnection,
+    pcm_chunk: bytes,
+    sample_rate: int = 16000,
+) -> None:
     """Send a TTS audio chunk to mobile clients via the WS bridge.
 
     The Go server forwards ``mobile_tts`` messages to connected mobile
-    WebSocket clients so they can play Jarvis audio remotely.
+    WebSocket clients so they can play Jarvis audio remotely. ``sample_rate``
+    must match the rate Pipecat is emitting (currently 16kHz for the
+    MacOSSayTTSService router target) -- a mismatch makes playback sound
+    slowed or sped on the phone.
     """
     try:
         await ws.send(json.dumps({
             "type": "mobile_tts",
             "data": base64.b64encode(pcm_chunk).decode(),
-            "sampleRate": 24000,
+            "sampleRate": sample_rate,
         }))
     except Exception:
         pass  # Don't crash on WS errors for audio streaming
@@ -373,6 +1063,10 @@ _MESSAGE_HANDLERS: dict[str, Any] = {
     "tool_result": _handle_tool_result,
     "command": _handle_command,
     "mobile_audio": _handle_mobile_audio,
+    "mobile_active": _handle_mobile_active,
+    "ptt_active": _handle_ptt_active,
+    "ptt_release": _handle_ptt_release,
+    "system_audio": _handle_system_audio,
     "retry_model_download": _handle_retry_model_download,
     "request_pipeline_status": _handle_request_pipeline_status,
     "request_model_setup": _handle_request_model_setup,
@@ -461,6 +1155,22 @@ class WSBridgeProcessor(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
+        # v0.3.0 / TASK-006: LLM suppression during meeting mode.
+        # ``__meeting_start__`` flips ``_SUPPRESS_LLM_TURN`` True so that
+        # user-turn-stop events feed the meeting buffer (see the
+        # TranscriptionFrame branch below) rather than dispatch an LLM
+        # response. The UserStoppedSpeakingFrame downstream of the
+        # aggregator is what kicks the LLM run, so swallowing it here is
+        # the simplest hook -- everything else (state, transcript
+        # broadcast) still flows because we run BEFORE the
+        # super().push_frame() call at the tail of the method.
+        if _SUPPRESS_LLM_TURN and isinstance(frame, UserStoppedSpeakingFrame):
+            logger.debug(
+                "WSBridge: meeting mode suppression -- swallowing "
+                "UserStoppedSpeakingFrame so the LLM does not dispatch"
+            )
+            return
+
         try:
             if isinstance(frame, InterimTranscriptionFrame):
                 # Partial transcript from STT.
@@ -473,6 +1183,18 @@ class WSBridgeProcessor(FrameProcessor):
                 if self.muted:
                     logger.debug("Muted — dropping transcript: %s", frame.text[:40])
                     return  # Do NOT push frame — prevent it reaching user_aggregator
+
+                # v0.3.0 / TASK-006: meeting buffer capture. When a
+                # meeting is active, accumulate transcripts into
+                # ``_MEETING_BUFFER`` with the source tag derived from
+                # how recently a ``system_audio`` frame landed. The
+                # transcript still flows downstream (we want the HUD to
+                # see live transcription during the meeting) but the LLM
+                # is gated off via the UserStoppedSpeakingFrame
+                # short-circuit at the top of this method.
+                if _MEETING_ACTIVE:
+                    self._append_meeting_buffer(frame.text)
+
                 text = frame.text.strip()
                 if text:
                     # v0.3.0/TASK-018 -- confirmation gate: yes/no replies
@@ -515,6 +1237,57 @@ class WSBridgeProcessor(FrameProcessor):
 
         # Always pass the frame through.
         await self.push_frame(frame, direction)
+
+    @staticmethod
+    def _append_meeting_buffer(text: str) -> None:
+        """Append a finalised transcript to the meeting transcript buffer.
+
+        Called from ``process_frame`` on every ``TranscriptionFrame``
+        while ``_MEETING_ACTIVE`` is True. The source tag is derived
+        from how recently a ``system_audio`` frame landed (see
+        :func:`_handle_system_audio`): within 0.5s -> ``"system"``
+        (speakers), otherwise ``"mic"``.
+
+        Implements the rolling-window cap: when the running
+        char-count exceeds ``_MEETING_BUFFER_CAP`` we pop entries from
+        the front until under the cap. This bounds memory on long
+        meetings without truncating the most recent (and most useful
+        for summarisation) speech.
+
+        Empty / whitespace-only text is dropped. The frame still flows
+        downstream so the HUD's live-transcript UI keeps updating
+        regardless of buffering policy.
+        """
+        global _MEETING_BUFFER_CHARS
+
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+
+        now = time.monotonic()
+        last_sys = _LAST_SYSTEM_AUDIO_TS
+        is_system = last_sys is not None and (now - last_sys) < 0.5
+        source = "system" if is_system else "mic"
+        speaker = "other" if is_system else "user"
+
+        entry: dict[str, Any] = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "source": source,
+            "speaker": speaker,
+            "text": cleaned,
+        }
+        _MEETING_BUFFER.append(entry)
+        _MEETING_BUFFER_CHARS += len(cleaned)
+
+        # Rolling-window eviction: drop oldest entries while we're over
+        # the cap. Keep at least one entry so a single oversized turn
+        # doesn't blank the buffer entirely.
+        while (
+            _MEETING_BUFFER_CHARS > _MEETING_BUFFER_CAP
+            and len(_MEETING_BUFFER) > 1
+        ):
+            evicted = _MEETING_BUFFER.pop(0)
+            _MEETING_BUFFER_CHARS -= len(evicted.get("text", ""))
 
     async def flush_response(self) -> None:
         """Send the accumulated response to Go and clear the buffer.
@@ -620,6 +1393,21 @@ class InterruptionHandler(FrameProcessor):
             if self._wake_gate is not None and self._wake_gate.armed:
                 self._wake_gate.rearm()
         elif isinstance(frame, UserStartedSpeakingFrame):
+            # Path A (v0.3.0): Mark the Mac as the active interlocutor when
+            # local-mic VAD fires.  We guard against clobbering a fresh
+            # mobile turn: ``mobile_active`` is forwarded with every mobile
+            # audio chunk, and that same audio also drives VAD through this
+            # same pipeline.  If the last mobile activity was within a
+            # 2-second window we assume this VAD tick is the mobile audio
+            # itself and skip the flip.  Outside that window (or never), the
+            # frame is genuine local-mic speech and we mark Mac active.
+            #
+            # Order matters: suppress phantom + bot-speaking cases FIRST so
+            # those VAD ticks never touch active_client.  Otherwise an
+            # acoustic blip during a mobile turn (or the bot's own TTS
+            # leaking into the Mac mic) would flip active_client to "mac"
+            # mid-response, re-routing Friday's voice onto the Mac speaker.
+
             # Suppress phantom VAD ticks during the LLM→TTS handoff window.
             within_grace = (
                 self._llm_responding
@@ -632,11 +1420,301 @@ class InterruptionHandler(FrameProcessor):
                 )
                 return  # don't push -- swallow the frame entirely
             if self._bot_speaking:
+                # Bot's own audio is hitting the Mac mic -- don't re-route
+                # the turn we're in the middle of.  Treat as interrupt only.
                 logger.info("User interrupted Jarvis -- stopping speech")
                 self._bot_speaking = False
                 await self.push_frame(BotStoppedSpeakingFrame(), FrameDirection.DOWNSTREAM)
                 if self._ws_bridge:
                     await self._ws_bridge._set_state("listening")
+            else:
+                # Genuine local-mic turn start: only now is it safe to flip
+                # active_client to "mac".  The fresh-mobile guard still
+                # applies so VAD picking up the phone's outgoing audio
+                # doesn't clobber the mobile turn that just kicked off.
+                _last_mobile = active_client.get_last_mobile_activity_at()
+                _fresh_mobile = (
+                    _last_mobile is not None
+                    and (time.monotonic() - _last_mobile) < 2.0
+                )
+                if not _fresh_mobile:
+                    active_client.set_mac_active()
+
+        await self.push_frame(frame, direction)
+
+
+# ---------------------------------------------------------------------------
+# Path A (v0.3.0): per-turn TTS routing
+# ---------------------------------------------------------------------------
+
+
+class RouterTTSService(FrameProcessor):
+    """Composite TTS service that delegates per-turn to one of two providers.
+
+    Owns a VibeVoice instance (the Mac "Jarvis" voice -- British male) and a
+    macOS ``say`` instance (the phone "Friday" voice -- British female).  At
+    the start of every turn the router consults ``active_client.get_active()``
+    and pins the chosen inner service for the remainder of that turn.
+
+    Routing decision points:
+
+      * ``TTSSpeakFrame``  -- one-shot synthesis (auto-greeting, alerts).
+        Pick the inner service immediately, route the frame, done.
+      * ``LLMFullResponseStartFrame`` -- streaming response from the LLM.
+        Pick the inner service for the whole response and remember it until
+        ``LLMFullResponseEndFrame`` so all the intermediate ``TextFrame``s
+        flow into the same provider (otherwise mid-sentence the voice would
+        flip and we'd get a Frankenvoice).
+
+    Non-routed frames (e.g. ``EndFrame``, pass-throughs) are forwarded
+    downstream unchanged; the router itself isn't a synthesiser, just a
+    multiplexer.
+
+    Why a multiplexer rather than ``task.set_processors(...)`` swapping?  The
+    pipeline holds references to processors at build time; swapping live
+    requires rebuilding the queue plumbing and racing in-flight frames.  A
+    single processor that picks downstream is mechanically simpler and keeps
+    Pipecat's StartFrame propagation intact for both inner services.
+    """
+
+    def __init__(
+        self,
+        mac_tts: FrameProcessor,
+        mobile_tts: FrameProcessor,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._mac_tts = mac_tts
+        self._mobile_tts = mobile_tts
+        # When we're inside an LLM response we keep routing every TextFrame
+        # to the same provider as the ``LLMFullResponseStartFrame``.
+        self._pinned_inner: FrameProcessor | None = None
+        self._started_inners: set[int] = set()
+        # v0.3.0 / TASK-006: meeting-mode TTS suppression. While True
+        # we drop TTS-synthesis-bearing frames (TTSSpeakFrame and the
+        # LLMFullResponseStart/Text/End trio that drive streaming
+        # synthesis) so Jarvis stays silent for the duration of the
+        # meeting. We deliberately do NOT swallow state frames
+        # (BotStartedSpeakingFrame, control frames, EndFrame, etc.)
+        # -- those still need to flow downstream so the HUD, the
+        # interruption handler, and pipeline teardown all see
+        # consistent state. ``__meeting_start__`` flips this True;
+        # ``__meeting_stop__`` restores the prior value from
+        # ``_PRE_MEETING_STATE``.
+        self.meeting_muted: bool = False
+
+    @property
+    def mac_tts(self) -> FrameProcessor:
+        return self._mac_tts
+
+    @property
+    def mobile_tts(self) -> FrameProcessor:
+        return self._mobile_tts
+
+    # ----- Side-channel hook setters -----------------------------------
+    # The voice_session() bootstrap accesses these via ``hasattr(tts, ...)``
+    # on the outer RouterTTSService; fan the assignment out to both inner
+    # services so audio_level / mobile_tts callbacks fire regardless of
+    # which provider speaks.
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        super().__setattr__(name, value)
+        if name in ("_audio_send_fn", "_mobile_tts_fn"):
+            mac = self.__dict__.get("_mac_tts")
+            mob = self.__dict__.get("_mobile_tts")
+            if mac is not None and hasattr(mac, name):
+                object.__setattr__(mac, name, value)
+            if mob is not None and hasattr(mob, name):
+                object.__setattr__(mob, name, value)
+
+    # ----- Pipeline linking -------------------------------------------
+
+    def link(self, processor: Any) -> None:
+        """Link this router AND both inner services to ``processor``.
+
+        When the inner services call ``push_frame()`` to emit
+        ``TTSAudioRawFrame`` / ``TTSStartedFrame`` / etc., Pipecat looks
+        up ``self._next`` -- which would normally be ``None`` because the
+        inners aren't in the pipeline graph.  We mirror the link onto
+        both inners so their emitted frames continue downstream to the
+        speaker transport / assistant aggregator as if the active inner
+        were the pipeline's TTS stage itself.
+        """
+        super().link(processor)
+        for inner in (self._mac_tts, self._mobile_tts):
+            try:
+                # Don't set processor._prev again; the router already owns
+                # the upstream side of the link.  We only want to wire
+                # _next so inner.push_frame() routes correctly.
+                inner._next = processor  # type: ignore[attr-defined]
+            except Exception:
+                logger.debug(
+                    "Failed to set _next on inner TTS %s",
+                    type(inner).__name__,
+                    exc_info=True,
+                )
+
+    # ----- Prewarm -----------------------------------------------------
+
+    async def prewarm(self) -> None:
+        """Prewarm both inner services so either is ready on first turn."""
+        for inner in (self._mac_tts, self._mobile_tts):
+            if hasattr(inner, "prewarm"):
+                try:
+                    await inner.prewarm()
+                except Exception:
+                    logger.debug(
+                        "Inner TTS prewarm failed for %s",
+                        type(inner).__name__,
+                        exc_info=True,
+                    )
+
+    # ----- Inner-service routing --------------------------------------
+
+    def _select_inner(self) -> FrameProcessor:
+        """Pick the inner service for a freshly starting turn."""
+        active = active_client.get_active()
+        if active == "mobile":
+            logger.info(
+                "RouterTTS: routing turn to MOBILE provider (%s)",
+                type(self._mobile_tts).__name__,
+            )
+            return self._mobile_tts
+        logger.info(
+            "RouterTTS: routing turn to MAC provider (%s)",
+            type(self._mac_tts).__name__,
+        )
+        return self._mac_tts
+
+    async def _ensure_started(self, inner: FrameProcessor, frame: Frame) -> None:
+        """Replay Pipecat's StartFrame to ``inner`` exactly once.
+
+        Inner services are added downstream of the router and would
+        normally receive their own StartFrame -- but because we shortcut
+        the pipeline and call inner.process_frame() directly, we have to
+        bootstrap them ourselves.  ``process_frame`` on FrameProcessor
+        rejects all frames before its first StartFrame, so we re-send the
+        router's own StartFrame to each inner the first time it's used.
+        """
+        ident = id(inner)
+        if ident in self._started_inners:
+            return
+        # Lazy import to avoid a circular reference at module load.
+        try:
+            from pipecat.frames.frames import StartFrame  # type: ignore
+        except Exception:
+            return
+        if isinstance(frame, StartFrame):
+            await inner.process_frame(frame, FrameDirection.DOWNSTREAM)
+            self._started_inners.add(ident)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+
+        # Propagate the pipeline StartFrame to both inner services so they
+        # accept subsequent frames.  Pipecat's base class rejects any
+        # non-StartFrame frame before its own internal start flag is set.
+        try:
+            from pipecat.frames.frames import StartFrame  # type: ignore
+        except Exception:
+            StartFrame = None  # type: ignore
+
+        if StartFrame is not None and isinstance(frame, StartFrame):
+            for inner in (self._mac_tts, self._mobile_tts):
+                try:
+                    await inner.process_frame(frame, direction)
+                    self._started_inners.add(id(inner))
+                except Exception:
+                    logger.debug(
+                        "Inner TTS StartFrame propagation failed for %s",
+                        type(inner).__name__,
+                        exc_info=True,
+                    )
+            await self.push_frame(frame, direction)
+            return
+
+        # v0.3.0 / TASK-006: meeting-mode TTS suppression. Drop the
+        # synthesis-bearing frames (TTSSpeakFrame + the LLM-response
+        # streaming trio) so neither inner provider speaks during a
+        # meeting. We deliberately do NOT swallow other frames -- state
+        # events (BotStarted/Stopped), control frames, EndFrame must
+        # still flow so the HUD, interruption handler, and pipeline
+        # teardown stay consistent. Mirrors the ``force_muted``
+        # short-circuit in ``pipecat_stt.LocalWhisperSTT``.
+        if self.meeting_muted and isinstance(
+            frame,
+            (
+                TTSSpeakFrame,
+                LLMFullResponseStartFrame,
+                TextFrame,
+                LLMFullResponseEndFrame,
+            ),
+        ):
+            # Reset any pinned inner on the end-of-response boundary so
+            # the next non-meeting turn picks the right provider afresh.
+            if isinstance(frame, LLMFullResponseEndFrame):
+                self._pinned_inner = None
+            logger.debug(
+                "RouterTTS: meeting_muted, dropping %s",
+                type(frame).__name__,
+            )
+            return
+
+        # One-shot synth: pick provider per-frame.
+        if isinstance(frame, TTSSpeakFrame):
+            inner = self._select_inner()
+            await self._ensure_started(inner, frame)
+            await inner.process_frame(frame, direction)
+            return
+
+        # Streaming response: pin the chosen provider for the whole response.
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._pinned_inner = self._select_inner()
+            await self._pinned_inner.process_frame(frame, direction)
+            return
+
+        if isinstance(frame, (TextFrame, LLMFullResponseEndFrame)):
+            inner = self._pinned_inner or self._select_inner()
+            await inner.process_frame(frame, direction)
+            if isinstance(frame, LLMFullResponseEndFrame):
+                self._pinned_inner = None
+            return
+
+        # Everything else flows through unchanged.
+        await self.push_frame(frame, direction)
+
+
+class ClientAwareTransportRouter(FrameProcessor):
+    """Gate audio frames to ``LocalAudioOutputTransport`` per active client.
+
+    Sits in the pipeline between the (Router)TTS service and the speaker
+    transport.  When the active client is ``"mobile"`` we drop
+    ``TTSAudioRawFrame`` so the Mac speaker stays silent while Friday's
+    voice plays only on the phone (the daemon's per-chunk
+    ``_mobile_tts_fn`` callback already streams those bytes to the mobile
+    WS).  When the active client is ``"mac"`` everything passes through
+    unchanged and the Mac speaker plays normally.
+
+    Bot-speaking state frames (``BotStartedSpeakingFrame`` /
+    ``BotStoppedSpeakingFrame``) are *not* dropped -- the HUD and
+    interruption handler still need accurate state regardless of which
+    speaker the audio actually plays through.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+
+        # Pipecat's TTSAudioRawFrame is the only audio payload reaching the
+        # speaker transport.  Drop it on mobile turns so the Mac stays silent.
+        if isinstance(frame, TTSAudioRawFrame):
+            if active_client.get_active() == "mobile":
+                # Audio for this turn is being broadcast to the phone via the
+                # TTS service's ``_mobile_tts_fn`` callback -- silence the
+                # Mac speaker by short-circuiting the frame here.
+                return
 
         await self.push_frame(frame, direction)
 
@@ -1444,7 +2522,44 @@ def create_pipeline_components(
     stt, stt_choice = _build_stt_service(config)
 
     # --- TTS service (v0.1.2: honor ttsProvider from config) ---
-    tts, tts_choice, voice_choice = _build_tts_service(config)
+    mac_tts, tts_choice, voice_choice = _build_tts_service(config)
+
+    # --- Path A (v0.3.0): Friday voice for mobile turns -----------------
+    # Wrap the Mac-side TTS (Jarvis voice -- VibeVoice male preset) and a
+    # second VibeVoice instance for Friday with a female preset.  Both
+    # speak through the same neural engine so the two voices sound equally
+    # natural.  The RouterTTSService picks per-turn based on
+    # ``active_client.get_active()``.
+    #
+    # ``fridayVoice`` config key:
+    #   * VibeVoice preset name (e.g. ``en-Alice_woman``) -- routes to a
+    #     VibeVoiceTTSService instance (natural neural voice). Default.
+    #   * Bare voice name like ``Fiona`` / ``Samantha`` -- routes to the
+    #     legacy MacOSSayTTSService (robotic but instantaneous).  Detected
+    #     by the absence of an ``en-`` prefix.
+    #
+    # ``mac_tts`` may be None on bootstrap (no provider available) -- in
+    # that case we skip the router entirely so the legacy "no TTS" path
+    # keeps working.
+    tts: FrameProcessor | None
+    if mac_tts is not None:
+        friday_voice = (config.get("fridayVoice") or "").strip() or "en-Emma_woman"
+        # Heuristic: VibeVoice presets are namespaced ``en-Name_gender``;
+        # macOS say voices are bare proper names ("Fiona", "Samantha").
+        if friday_voice.startswith("en-") and "_" in friday_voice:
+            mobile_tts_svc = VibeVoiceTTSService(voice=friday_voice)
+            mobile_provider_label = "VibeVoiceTTSService"
+        else:
+            mobile_tts_svc = MacOSSayTTSService(voice=friday_voice)
+            mobile_provider_label = "MacOSSayTTSService"
+        logger.info(
+            "TTS router: mac=%s (%s) / mobile=%s (voice=%s)",
+            type(mac_tts).__name__, voice_choice or "<default>",
+            mobile_provider_label, friday_voice,
+        )
+        tts = RouterTTSService(mac_tts=mac_tts, mobile_tts=mobile_tts_svc)
+    else:
+        tts = None
 
     # --- v0.1.5: explicit user pick from the Connections panel LLM dropdown ---
     # If ``cfg.llmModel`` is set to one of the four supported values, that is
@@ -1604,8 +2719,14 @@ def create_pipeline_components(
     # --- Assemble pipeline ---
     # The pipeline order:
     #   mic -> [wake_gate] -> [STT] -> ws_bridge -> user_aggregator
-    #   -> LLM -> [TTS] -> interruption_handler -> speaker
+    #   -> LLM -> [RouterTTS] -> interruption_handler
+    #   -> [ClientAwareTransportRouter] -> speaker
     #   -> assistant_aggregator -> response_flush
+    #
+    # The ClientAwareTransportRouter (v0.3.0/Path A) gates TTSAudioRawFrame
+    # so the Mac speaker stays silent during mobile turns -- Friday's voice
+    # is still synthesised but only streamed to the phone via the TTS
+    # service's _mobile_tts_fn callback.
     #
     # Context sanitization happens inside SanitizedLLMContext.get_messages()
     # which splits mixed tool_result/text user messages before the LLM reads them.
@@ -1624,6 +2745,7 @@ def create_pipeline_components(
         stages.append(tts)
 
     stages.append(interruption_handler)
+    stages.append(ClientAwareTransportRouter())
     stages.append(transport.output())
     stages.append(assistant_aggregator)
     stages.append(response_flush)
@@ -1685,6 +2807,21 @@ def create_pipeline_components(
         )
     except Exception:
         logger.warning("Failed to emit pipeline_status", exc_info=True)
+
+    # Path A (v0.3.0): expose the LLM handle so the mobile_active control
+    # frame handler can refresh the persona overlay immediately, without
+    # waiting for the context enricher's 5-second tick.
+    global _llm_service_handle
+    _llm_service_handle = llm
+
+    # v0.3.0 / TASK-006: expose the pipeline task so the PTT control-
+    # frame handlers can inject UserStartedSpeakingFrame /
+    # UserStoppedSpeakingFrame directly into the running pipeline.  This
+    # lets the overlay hotkey reuse the existing LLM dispatch path
+    # instead of forking it.  See ``_handle_ptt_active`` /
+    # ``_handle_ptt_release``.
+    global _pipeline_task_handle
+    _pipeline_task_handle = task
 
     return pipeline, task, transport, ws_bridge, context, llm, stt, wake_gate, tts
 
@@ -1814,8 +2951,16 @@ async def _context_enricher(
 
             # Update the LLM system instruction with enriched context
             # and recalled vector memories.
+            #
+            # Path A (v0.3.0): pass the current active_client so the Friday
+            # persona addendum is prepended when the phone is the active
+            # interlocutor.  Mac turns leave the prompt unmodified.
+            current_active = active_client.get_active()
             update_system_instruction(
-                llm, enriched, recalled_memories=recalled
+                llm,
+                enriched,
+                recalled_memories=recalled,
+                active_client_value=current_active,
             )
 
         except Exception:
@@ -1973,18 +3118,70 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
     )
 
     # --- Wire TTS audio level events to WS for orb animation ---
-    if tts is not None and hasattr(tts, '_audio_send_fn'):
+    # Same hasattr-trap as _mobile_tts_fn below: the RouterTTSService doesn't
+    # pre-init this attribute, so guarding on hasattr would silently skip the
+    # wiring and the orb would never animate. The Router's __setattr__ fans
+    # the assignment out to inner services that do declare it.
+    if tts is not None:
         async def _send_audio_level(level: float) -> None:
             await send_audio_level(ws, level)
         tts._audio_send_fn = _send_audio_level
         logger.info("TTS audio level events wired to WS for orb animation")
 
     # --- Wire TTS audio chunks to mobile clients ---
-    if tts is not None and hasattr(tts, '_mobile_tts_fn'):
+    # Path A (v0.3.0): suppress the mobile broadcast on Mac-active turns so
+    # Friday's voice doesn't leak onto the phone when Jarvis is replying via
+    # the Mac speaker.  When mobile is the active interlocutor the broadcast
+    # passes through normally so the phone receives Serena's audio.
+    #
+    # Note: we don't gate on ``hasattr(tts, '_mobile_tts_fn')`` because the
+    # RouterTTSService doesn't pre-initialise that attribute -- the inner
+    # MacOSSayTTSService does (set to None in its __init__).  The Router's
+    # __setattr__ fans the assignment out to both inner services, so blindly
+    # setting it here is safe and is the only way the inner Friday provider
+    # ever gets a non-None callback.
+    if tts is not None:
+        # Pull the rate from the mobile-side TTS service. The router exposes
+        # the mobile-leg processor via ``.mobile_tts``; fall back to a sane
+        # 16k default if the router shape ever changes.
+        mobile_tts_sr = 16000
+        try:
+            inner = getattr(tts, "mobile_tts", None)
+            inner_sr = getattr(inner, "_sample_rate", None)
+            if isinstance(inner_sr, int) and inner_sr > 0:
+                mobile_tts_sr = inner_sr
+        except Exception:
+            logger.debug(
+                "TTS mobile SR introspection failed -- defaulting to 16kHz",
+                exc_info=True,
+            )
+
+        _mobile_tts_diag = {"chunks": 0, "bytes": 0, "skipped_mac": 0}
+
         async def _send_mobile_tts_chunk(pcm_chunk: bytes) -> None:
-            await send_mobile_tts(ws, pcm_chunk)
+            active = active_client.get_active()
+            if active == "mac":
+                _mobile_tts_diag["skipped_mac"] += 1
+                if _mobile_tts_diag["skipped_mac"] in (1, 10, 100):
+                    logger.info(
+                        "Mobile TTS skipped (active=mac, count=%d)",
+                        _mobile_tts_diag["skipped_mac"],
+                    )
+                return
+            _mobile_tts_diag["chunks"] += 1
+            _mobile_tts_diag["bytes"] += len(pcm_chunk)
+            if _mobile_tts_diag["chunks"] in (1, 5, 25, 50):
+                logger.info(
+                    "Mobile TTS chunk sent (#%d, %d bytes, total=%d bytes, active=%s)",
+                    _mobile_tts_diag["chunks"], len(pcm_chunk),
+                    _mobile_tts_diag["bytes"], active,
+                )
+            await send_mobile_tts(ws, pcm_chunk, sample_rate=mobile_tts_sr)
         tts._mobile_tts_fn = _send_mobile_tts_chunk
-        logger.info("TTS mobile audio forwarding wired to WS")
+        logger.info(
+            "TTS mobile audio forwarding wired to WS (gated by active_client, sr=%d)",
+            mobile_tts_sr,
+        )
 
     # --- Prewarm TTS model so the first (interruptible) reply isn't blocked
     #     by a ~10s model load. Without this, a user speaking during the
@@ -2177,8 +3374,9 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
             _failover_in_flight = False
         asyncio.create_task(_clear_flag())
 
-    # Register all tool handlers (Go + MCP + local) with the Pipecat LLM.
-    tool_bridge.register_with_pipecat(llm_service)
+    # Register all tool handlers (Go + MCP + local + executor) with the Pipecat LLM.
+    # _tool_executor handles spotify_*/mac_* tools declared in tools.py.
+    tool_bridge.register_with_pipecat(llm_service, tool_executor=_tool_executor)
 
     # Add MCP tool definitions to the LLM so Claude knows they exist.
     mcp_tools = mcp_manager.get_anthropic_tools()
@@ -2216,6 +3414,13 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
         else:
             greeting = "Good evening, sir."
 
+        # Path A (v0.3.0): if the first interlocutor turned out to be the
+        # phone (mobile audio arrived during pipeline boot and flipped
+        # active_client to "mobile"), introduce Friday by name and the
+        # RouterTTSService will route this through ``say -v Serena``.
+        if active_client.get_active() == "mobile":
+            greeting = f"{greeting} Friday here."
+
         logger.info("Auto-greeting: %s", greeting)
         await task.queue_frames([TTSSpeakFrame(text=greeting)])
         await send_response(ws, greeting)
@@ -2226,8 +3431,34 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
 
     # --- Command loop: process HUD text commands ---
     async def _command_loop() -> None:
+        # v0.3.0 / TASK-006: declare all meeting-mode module-level state
+        # rebinding up-front. Python's ``global`` must precede any
+        # assignment to the named variables in the function body, and
+        # multiple branches below assign overlapping subsets -- one
+        # function-level declaration covers them all without the
+        # SyntaxError that nested ``global`` blocks would trigger.
+        global _MEETING_ACTIVE  # noqa: PLW0603
+        global _MEETING_TITLE  # noqa: PLW0603
+        global _MEETING_STARTED_AT  # noqa: PLW0603
+        global _SUPPRESS_LLM_TURN  # noqa: PLW0603
+        global _MEETING_BUFFER_CHARS  # noqa: PLW0603
+        global _PRE_MEETING_STATE  # noqa: PLW0603
+
         while True:
-            text = await _command_queue.get()
+            item = await _command_queue.get()
+
+            # v0.3.0 / TASK-006: meeting commands ride in as a dict so
+            # ``title`` can travel alongside ``text``. Plain mute /
+            # unmute / interrupt commands still arrive as a bare string
+            # (legacy producer path). Normalise both shapes here so the
+            # rest of the loop is shape-agnostic.
+            if isinstance(item, dict):
+                data: dict[str, Any] | None = item
+                text = str(item.get("text", "")).strip()
+            else:
+                data = None
+                text = str(item)
+
             logger.info("Processing HUD command: %s", text)
 
             # Handle mute/unmute — three layers:
@@ -2257,6 +3488,174 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
                 await send_state(ws, "idle")
                 continue
 
+            # v0.3.0 overlay (TASK-010 follow-up): explicit interrupt from the
+            # overlay's Stop button. Reuse the same machinery the speech-based
+            # interruption path uses by signalling a brief user-turn so the
+            # InterruptionHandler cancels in-flight TTS. We bracket the user
+            # turn with start+stop frames immediately so the LLM doesn't try
+            # to generate a response to "nothing".
+            if text == "__interrupt__":
+                logger.info("HUD interrupt — cancelling in-flight TTS")
+                try:
+                    await task.queue_frames([
+                        UserStartedSpeakingFrame(),
+                        UserStoppedSpeakingFrame(),
+                    ])
+                except Exception as exc:  # noqa: BLE001 — defensive log
+                    logger.warning("__interrupt__: frame queue failed: %r", exc)
+                continue
+
+            # v0.3.0 / TASK-006: meeting-mode lifecycle commands. Mirror
+            # the __mute__ / __unmute__ pattern -- inline blocks that
+            # mutate module-level + pipeline-component state and emit a
+            # ``state`` event to the HUD. The summarisation +
+            # spoken-recap pipeline is owned by TASK-007 / TASK-008 and
+            # lands via the ``_dispatch_meeting_finalisation`` hook.
+            if text == "__meeting_start__":
+                # ``global`` declarations live at the top of
+                # ``_command_loop`` -- Python compiles them function-wide,
+                # so a per-branch redeclaration after an earlier
+                # assignment in the function would raise SyntaxError.
+
+                # Idempotent: double-start logs WARNING and is otherwise a
+                # no-op so a flaky frontend can't reset state mid-meeting
+                # and lose the buffer.
+                if _MEETING_ACTIVE:
+                    logger.warning(
+                        "__meeting_start__ received while already active "
+                        "-- ignoring"
+                    )
+                    continue
+
+                # Title arrives via the outer command payload (the
+                # dispatcher hands us the parsed dict). Empty / missing
+                # falls back to "untitled" so downstream slugify in
+                # TASK-007 never sees a None.
+                title = (
+                    data.get("title") if isinstance(data, dict) else None
+                ) or "untitled"
+
+                _MEETING_ACTIVE = True
+                _MEETING_TITLE = title
+                _MEETING_STARTED_AT = time.monotonic()
+                _MEETING_BUFFER.clear()
+                _MEETING_BUFFER_CHARS = 0
+                _SUPPRESS_LLM_TURN = True
+
+                # Stash pre-meeting gate state so __meeting_stop__ can
+                # restore it. This handles the case where the user had
+                # muted Jarvis before starting the meeting -- we open
+                # the gates during the meeting, then return them to
+                # their prior values on stop.
+                _PRE_MEETING_STATE = {
+                    "stt_force_muted": stt.force_muted,
+                    "wake_gate_armed": (
+                        wake_gate.armed if wake_gate is not None else False
+                    ),
+                    "ws_bridge_muted": ws_bridge.muted,
+                    "router_tts_muted": getattr(tts, "meeting_muted", False),
+                }
+
+                # Force gates open so we capture continuously; suppress
+                # TTS so Jarvis stays quiet during the meeting.
+                stt.force_muted = False
+                if wake_gate is not None:
+                    wake_gate.armed = False
+                ws_bridge.muted = False
+                if tts is not None:
+                    tts.meeting_muted = True
+
+                logger.info(
+                    "Meeting started: title=%r at t=%.2f",
+                    title,
+                    _MEETING_STARTED_AT,
+                )
+                await send_state(ws, "meeting_active")
+                continue
+
+            if text == "__meeting_stop__":
+                # ``global`` declarations are at the top of
+                # ``_command_loop`` (see __meeting_start__ for context).
+                if not _MEETING_ACTIVE:
+                    logger.warning(
+                        "__meeting_stop__ received with no active meeting "
+                        "-- ignoring"
+                    )
+                    # Echo a state event so a frontend that thinks it's
+                    # recording gets corrected.
+                    await send_state(ws, "idle")
+                    continue
+
+                # Snapshot the buffer for the summary task BEFORE
+                # clearing state. TASK-007's generate_meeting_notes is
+                # async and we don't await it inline -- schedule it as
+                # a background task and acknowledge the stop event
+                # immediately so the UI doesn't hang on a slow LLM call.
+                buffer_snapshot = list(_MEETING_BUFFER)
+                title_snapshot = _MEETING_TITLE or "untitled"
+
+                # Restore stashed gates. If _PRE_MEETING_STATE is None
+                # (shouldn't happen given the idempotency check above,
+                # but defensively):
+                if _PRE_MEETING_STATE is not None:
+                    stt.force_muted = _PRE_MEETING_STATE["stt_force_muted"]
+                    if wake_gate is not None:
+                        wake_gate.armed = _PRE_MEETING_STATE["wake_gate_armed"]
+                    ws_bridge.muted = _PRE_MEETING_STATE["ws_bridge_muted"]
+                    if tts is not None:
+                        tts.meeting_muted = _PRE_MEETING_STATE[
+                            "router_tts_muted"
+                        ]
+                    _PRE_MEETING_STATE = None
+
+                _MEETING_ACTIVE = False
+                _MEETING_TITLE = None
+                _MEETING_STARTED_AT = None
+                _SUPPRESS_LLM_TURN = False
+                # TASK-008 reads from the snapshot, not the live buffer
+                _MEETING_BUFFER.clear()
+
+                logger.info(
+                    "Meeting stopped: title=%r, buffer_entries=%d",
+                    title_snapshot,
+                    len(buffer_snapshot),
+                )
+                await send_state(ws, "idle")
+
+                # TASK-007/TASK-008 hook: schedule background summary +
+                # recap. For TASK-006 this is a no-op pass-through.
+                asyncio.create_task(
+                    _dispatch_meeting_finalisation(
+                        title_snapshot, buffer_snapshot, ws
+                    ),
+                    name="meeting-finalisation",
+                )
+                continue
+
+            if text == "__meeting_recap__":
+                # TASK-008: replay the cached recap (set by
+                # ``_dispatch_meeting_finalisation`` after the most
+                # recent meeting ended) via the same TTS-injection
+                # helper used on initial speak. Reading
+                # ``_LAST_MEETING_RECAP`` does not require a ``global``
+                # declaration -- Python only needs ``global`` for
+                # assignment. ``None`` means no meeting has finalised
+                # this session, in which case the command is a debug
+                # no-op rather than an error (the user may have hit the
+                # "wrap up" affordance speculatively).
+                if _LAST_MEETING_RECAP:
+                    logger.info(
+                        "HUD recap replay: %d chars",
+                        len(_LAST_MEETING_RECAP),
+                    )
+                    await _speak_meeting_recap(_LAST_MEETING_RECAP)
+                else:
+                    logger.debug(
+                        "__meeting_recap__ received with no cached recap "
+                        "-- no-op"
+                    )
+                continue
+
             # Store HUD command in vector memory (user input via text).
             if vmem.available:
                 vmem.store(text, role="user")
@@ -2274,24 +3673,123 @@ async def voice_session(ws: ClientConnection, config: dict[str, Any]) -> None:
             except Exception:
                 logger.exception("Failed to inject HUD command into pipeline")
 
-    # --- Mobile audio loop: inject mobile PCM into STT pipeline ---
+    # --- Mobile audio loop: transcode + inject mobile PCM into STT pipeline ---
     async def _mobile_audio_loop() -> None:
-        """Read PCM audio chunks from mobile clients and push into pipeline.
+        """Drain encoded mobile audio from the queue, transcribe, inject to LLM.
 
-        Mobile audio arrives as base64-encoded PCM via the Go WS bridge,
-        decoded by ``_handle_mobile_audio`` and queued in ``_mobile_audio_queue``.
-        This loop drains the queue and injects ``AudioRawFrame`` into the
-        Pipecat pipeline so it flows through STT just like local mic audio.
+        Mobile sends one CAF (iOS) / M4A (Android) blob per push-to-talk
+        release. We ffmpeg-transcode to 16kHz mono s16le PCM, then run STT
+        synchronously and inject the resulting transcript directly into the
+        LLM context via ``LLMMessagesAppendFrame`` + ``LLMRunFrame`` -- the
+        same path the HUD text-command flow uses.
+
+        Why this bypasses the normal STT->VAD->TurnDetector chain:
+        push-to-talk is a one-shot utterance with no continuous audio after
+        release. The pipeline's turn-stop strategy is a SmartTurn analyzer
+        that needs streaming frames to detect end-of-turn. We already know
+        the turn ended (the phone released the button), so it's simpler and
+        deterministic to drive the LLM directly.
         """
+        import numpy as np
+
         while True:
             try:
-                pcm_bytes = await _mobile_audio_queue.get()
-                await task.queue_frames([AudioRawFrame(
-                    audio=pcm_bytes,
-                    sample_rate=16000,  # Mobile sends 16kHz mono PCM
-                    num_channels=1,
-                )])
-                logger.debug("Mobile audio: %d bytes pushed to STT", len(pcm_bytes))
+                encoded = await _mobile_audio_queue.get()
+                logger.info("Mobile audio loop: dequeued %d encoded bytes", len(encoded))
+                pcm_bytes = await _ffmpeg_decode_to_pcm16le(encoded)
+                if not pcm_bytes:
+                    logger.warning(
+                        "Mobile audio: ffmpeg transcode produced no PCM, dropping "
+                        "(%d encoded bytes in)", len(encoded),
+                    )
+                    continue
+
+                # Make sure the STT backend is loaded before we transcribe.
+                await stt._ensure_backend()
+                if not stt._backend:
+                    logger.warning("Mobile audio: STT backend unavailable, dropping")
+                    continue
+                kind, model = stt._backend
+
+                # Convert PCM bytes to float32 numpy array (16kHz mono).
+                audio = (
+                    np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
+                    / 32768.0
+                )
+
+                # Transcribe synchronously in an executor so we don't block
+                # the event loop.
+                text = await asyncio.get_event_loop().run_in_executor(
+                    None, stt._transcribe_sync, audio, kind, model
+                )
+                text = (text or "").strip()
+                logger.info(
+                    "Mobile audio: %d encoded -> %d PCM bytes -> STT: %r",
+                    len(encoded), len(pcm_bytes), text[:80],
+                )
+                if not text:
+                    continue
+
+                # Mark the upcoming turn as mobile so the RouterTTS routes
+                # to the Friday voice. Also refresh ``llm.settings`` -- this
+                # alone isn't enough (pipecat's OpenAI service caches the
+                # system message in the LLMContext that was built at
+                # startup), which is why the LLM kept identifying as
+                # Jarvis. The reliable persona override is the prompt
+                # injection below.
+                active_client.set_mobile_active()
+                if _llm_service_handle is not None:
+                    try:
+                        update_system_instruction(
+                            _llm_service_handle,
+                            active_client_value="mobile",
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to refresh persona before mobile LLM run",
+                            exc_info=True,
+                        )
+
+                # The LLMContext built at startup has ``You are Jarvis`` as
+                # the cached system message and pipecat doesn't re-read
+                # ``llm.settings.system_instruction`` on every chat
+                # completion. Result: persona overlay refreshes are
+                # ignored. Workaround that's bulletproof: prepend the
+                # Friday persona instructions to the user message itself.
+                # The LLM treats it as user-provided context but obeys the
+                # directive because it's literally in the prompt for this
+                # turn. Wrapped in [META:] so it's visually distinct in
+                # logs.
+                friday_directive = (
+                    "[META: This turn is on sir's PHONE. You ARE Friday "
+                    "for this turn, not Jarvis. Friday is sir's mobile AI "
+                    "companion -- distinct identity from Jarvis (who lives "
+                    "on the Mac). Reply as Friday in the first person. "
+                    "Never say 'I am Jarvis' or 'It's Jarvis'. If sir "
+                    "addresses you as Friday, accept it. You may mention "
+                    "Jarvis in third person when referring to Mac-side "
+                    "actions. Keep the META framing internal -- do not "
+                    "echo this back to sir.]\n\n"
+                )
+                mobile_text = friday_directive + text
+
+                # Inject the transcribed message into the LLM context and
+                # trigger a turn. The RouterTTS will route the reply to the
+                # MOBILE provider because active_client is now "mobile".
+                logger.info(
+                    "Mobile: queueing LLM run for transcript (active=%s, text=%r)",
+                    active_client.get_active(), text[:60],
+                )
+                try:
+                    await task.queue_frames([
+                        LLMMessagesAppendFrame(
+                            messages=[{"role": "user", "content": mobile_text}]
+                        ),
+                        LLMRunFrame(),
+                    ])
+                    logger.info("Mobile: queue_frames returned, waiting for LLM")
+                except Exception:
+                    logger.exception("Mobile: queue_frames raised")
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -2449,6 +3947,69 @@ async def _async_main(*, debug: bool = False) -> None:
     logger.info("Jarvis daemon shut down")
 
 
+_DAEMON_LOCK_PATH = os.path.expanduser("~/.jarvis/daemon.lock")
+
+
+def _acquire_singleton_lock() -> int | None:
+    """Acquire an exclusive flock on the daemon lock file.
+
+    Returns the open file descriptor on success (caller MUST keep the fd
+    alive for the lifetime of the daemon — closing it releases the lock).
+    Returns None if another daemon already holds the lock; the caller
+    should exit cleanly.
+
+    This is belt-and-braces protection against the dual-daemon-boot race
+    that can happen when an explicit RestartJarvis on the Go side overlaps
+    with the auto-restart-on-unexpected-exit watcher. The Go-side fix
+    (generation counter in monitorJarvisDaemon) prevents that specific
+    race, but the lock also protects against developer-runs-daemon-twice
+    and any future supervisor bug.
+
+    Uses fcntl.flock with LOCK_EX | LOCK_NB so the second daemon fails
+    immediately instead of hanging. POSIX semantics: the lock is released
+    automatically when the process exits OR the fd is closed.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        # Non-POSIX (Windows). Skip locking entirely -- single-daemon
+        # enforcement falls back to the Go-side generation counter.
+        return None
+
+    try:
+        os.makedirs(os.path.dirname(_DAEMON_LOCK_PATH), exist_ok=True)
+    except OSError:
+        return None  # ~/.jarvis missing and uncreatable; skip gracefully.
+
+    fd = os.open(_DAEMON_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        # Another daemon holds the lock. Read its PID for the error message.
+        existing_pid = ""
+        try:
+            with open(_DAEMON_LOCK_PATH, "r", encoding="utf-8") as f:
+                existing_pid = f.read().strip()
+        except OSError:
+            pass
+        os.close(fd)
+        print(
+            "[jarvis-daemon] FATAL: another daemon is already running "
+            f"(pid={existing_pid or 'unknown'}, lock={_DAEMON_LOCK_PATH}). "
+            "Refusing to start a second instance.",
+            file=sys.stderr,
+        )
+        return None
+
+    # Got the lock. Stamp our PID for diagnostics.
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, f"{os.getpid()}\n".encode())
+    except OSError:
+        pass  # Best-effort -- the lock is what matters, not the PID stamp.
+    return fd
+
+
 def main() -> None:
     """Parse arguments and run the async main loop."""
     parser = argparse.ArgumentParser(
@@ -2465,10 +4026,34 @@ def main() -> None:
 
     _setup_logging(debug=args.debug)
 
+    # Single-instance guard. Exit 0 on collision so the Go supervisor
+    # treats it as a graceful no-op and does not kick into restart loop.
+    lock_fd = _acquire_singleton_lock()
+    if lock_fd is None:
+        # Either we collided with a running daemon (message already
+        # printed) or we're on a non-POSIX platform. On collision we
+        # exit; on non-POSIX we keep going but without the lock guard.
+        import platform
+
+        if platform.system() != "Windows":
+            sys.exit(0)
+    # else: lock_fd stays open in this scope for the lifetime of main().
+    # Holding the variable is enough -- Python won't gc the fd while it's
+    # referenced. Explicit close happens implicitly on process exit, which
+    # releases the lock per POSIX flock semantics.
+
     try:
         asyncio.run(_async_main(debug=args.debug))
     except KeyboardInterrupt:
         logger.info("Interrupted, shutting down")
+    finally:
+        # Belt-and-braces: explicitly close the lock fd so the lock is
+        # released even if the OS is slow to reap our process.
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

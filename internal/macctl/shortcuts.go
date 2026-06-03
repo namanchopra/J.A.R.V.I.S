@@ -53,8 +53,38 @@ func (c *Controller) ListShortcuts() ([]string, error) {
 	return strings.Split(raw, "\n"), nil
 }
 
+// builtinShortcuts maps lowercased common shortcut names to native
+// osascript commands. Lets voice commands like "lock my screen" or
+// "sleep the mac" work without the user having to import a `.shortcut`
+// file into Shortcuts.app first. The system prompt advertises these
+// names, so they need to actually do something.
+//
+// Keys are lowercased and stripped of punctuation for matching; values
+// are osascript snippets that don't need stdin input.
+var builtinShortcuts = map[string]string{
+	"lock screen":          `tell application "System Events" to keystroke "q" using {control down, command down}`,
+	"lock":                 `tell application "System Events" to keystroke "q" using {control down, command down}`,
+	"sleep":                `tell application "System Events" to sleep`,
+	"sleep mac":            `tell application "System Events" to sleep`,
+	"open downloads":       `tell application "Finder" to open folder "Downloads" of (path to home folder)`,
+	"downloads":            `tell application "Finder" to open folder "Downloads" of (path to home folder)`,
+	"empty trash":          `tell application "Finder" to empty trash`,
+	"show desktop":         `tell application "System Events" to key code 103`,
+	"mission control":      `tell application "System Events" to key code 160`,
+	"toggle do not disturb": `tell application "System Events" to keystroke "d" using {option down, command down}`,
+	"toggle dnd":           `tell application "System Events" to keystroke "d" using {option down, command down}`,
+}
+
 // RunShortcut runs the named Shortcut, optionally piping `input` to its
 // stdin. Returns the shortcut's stdout (trimmed).
+//
+// Resolution order:
+//  1. If `name` matches a built-in (Lock Screen, Sleep, etc.), run the
+//     equivalent osascript. This avoids the user having to import a
+//     `.shortcut` file into Shortcuts.app before basic system actions
+//     become voice-controllable.
+//  2. Otherwise shell `shortcuts run <name>` and let Shortcuts.app
+//     resolve it against the user's installed library.
 //
 // When input is empty we omit --input-path entirely; passing "" + stdin
 // would make the shortcut read an empty payload, which is subtly
@@ -69,6 +99,17 @@ func (c *Controller) RunShortcut(name, input string) (string, error) {
 	}
 	if d := c.policy.Check("mac_run_shortcut"); d == DecisionDeny {
 		return "", ErrPolicyDeny
+	}
+	// Built-in path: voice-friendly shortcuts that don't require the
+	// user to have anything imported into Shortcuts.app. Input is
+	// ignored here since these are parameterless system actions.
+	if script, ok := builtinShortcuts[strings.ToLower(strings.TrimSpace(name))]; ok {
+		out, err := exec.Command("osascript", "-e", script).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("RunShortcut(%q) builtin: %s: %w",
+				name, strings.TrimSpace(string(out)), err)
+		}
+		return strings.TrimSpace(string(out)), nil
 	}
 	args := []string{"run", name}
 	if input != "" {

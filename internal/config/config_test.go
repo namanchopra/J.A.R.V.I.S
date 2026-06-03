@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -507,3 +508,373 @@ func TestExistingLiveKitConfigPreserved(t *testing.T) {
 // internal/spotify/store_test.go in v0.3.0 when Spotify creds were split
 // out of config.Config into ~/.jarvis/spotify.json. See the package doc
 // in internal/spotify/store.go for the rationale.
+
+// TestDefaultConfigOverlayDefaults verifies the v0.3.0 TASK-001 acceptance:
+// DefaultConfig() ships sane overlay defaults so a fresh install gets the
+// feature enabled with a working hotkey, in the top-right corner, no
+// transcript chip.
+func TestDefaultConfigOverlayDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if !cfg.OverlayEnabled {
+		t.Errorf("OverlayEnabled: got false, want true")
+	}
+	if cfg.OverlayHotkey != "alt+space" {
+		t.Errorf("OverlayHotkey: got %q, want %q", cfg.OverlayHotkey, "alt+space")
+	}
+	if cfg.OverlayPosition != "top-right" {
+		t.Errorf("OverlayPosition: got %q, want %q", cfg.OverlayPosition, "top-right")
+	}
+	if cfg.OverlayShowTranscript {
+		t.Errorf("OverlayShowTranscript: got true, want false")
+	}
+}
+
+// TestOverlayDefaultsPreservedWhenKeysAbsent simulates the production load
+// path: start from DefaultConfig(), then unmarshal a JSON payload that has
+// no overlay* keys. Because json.Unmarshal only touches fields present in
+// the input, the four overlay defaults must survive. This is the v0.3.0
+// TASK-001 acceptance:
+//
+//	"Loading an existing ~/.jarvis/config.json that has none of the four
+//	 overlay keys yields OverlayEnabled=true, OverlayHotkey=alt+space,
+//	 OverlayPosition=top-right, OverlayShowTranscript=false."
+func TestOverlayDefaultsPreservedWhenKeysAbsent(t *testing.T) {
+	// A pre-v0.3.0 config file: real shape, zero overlay keys.
+	preV040JSON := `{
+		"defaultAgent": "claude-code",
+		"scanIntervalSeconds": 5,
+		"defaultCommand": "claude",
+		"mobileAPIPort": 4422,
+		"jarvisEnabled": true
+	}`
+
+	cfg := DefaultConfig()
+	if err := json.Unmarshal([]byte(preV040JSON), cfg); err != nil {
+		t.Fatalf("unmarshal pre-v0.3.0 config: %v", err)
+	}
+
+	if !cfg.OverlayEnabled {
+		t.Errorf("OverlayEnabled: got false, want true (default should survive missing key)")
+	}
+	if cfg.OverlayHotkey != "alt+space" {
+		t.Errorf("OverlayHotkey: got %q, want %q (default should survive missing key)", cfg.OverlayHotkey, "alt+space")
+	}
+	if cfg.OverlayPosition != "top-right" {
+		t.Errorf("OverlayPosition: got %q, want %q (default should survive missing key)", cfg.OverlayPosition, "top-right")
+	}
+	if cfg.OverlayShowTranscript {
+		t.Errorf("OverlayShowTranscript: got true, want false (default should survive missing key)")
+	}
+}
+
+// TestOverlayConfigRoundTrip verifies the v0.3.0 TASK-001 acceptance:
+// "Saving then reloading a config round-trips all four fields exactly."
+// We exercise json.Marshal/Unmarshal directly (the same codec Save/Load use)
+// against non-default values to confirm both the JSON tags and the in-memory
+// types match.
+func TestOverlayConfigRoundTrip(t *testing.T) {
+	orig := Config{
+		OverlayEnabled:        false,
+		OverlayHotkey:         "cmd+shift+j",
+		OverlayPosition:       "bottom-left",
+		OverlayShowTranscript: true,
+	}
+
+	data, err := json.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.OverlayEnabled != orig.OverlayEnabled {
+		t.Errorf("OverlayEnabled: got %v, want %v", got.OverlayEnabled, orig.OverlayEnabled)
+	}
+	if got.OverlayHotkey != orig.OverlayHotkey {
+		t.Errorf("OverlayHotkey: got %q, want %q", got.OverlayHotkey, orig.OverlayHotkey)
+	}
+	if got.OverlayPosition != orig.OverlayPosition {
+		t.Errorf("OverlayPosition: got %q, want %q", got.OverlayPosition, orig.OverlayPosition)
+	}
+	if got.OverlayShowTranscript != orig.OverlayShowTranscript {
+		t.Errorf("OverlayShowTranscript: got %v, want %v", got.OverlayShowTranscript, orig.OverlayShowTranscript)
+	}
+
+	// Sanity-check the on-the-wire camelCase keys. We pin the exact JSON
+	// fragments because downstream React code reads them by name.
+	outStr := string(data)
+	for _, want := range []string{
+		`"overlayEnabled":false`,
+		`"overlayHotkey":"cmd+shift+j"`,
+		`"overlayPosition":"bottom-left"`,
+		`"overlayShowTranscript":true`,
+	} {
+		if !strings.Contains(outStr, want) {
+			t.Errorf("marshaled JSON missing %q:\n%s", want, outStr)
+		}
+	}
+}
+
+// TestLoadEmptyOverlayHotkeyFallsBack verifies the v0.3.0 TASK-001 failure
+// case: a config file where OverlayHotkey is the empty string "" must be
+// normalized to "alt+space" by Load() — otherwise the global hotkey
+// registration would brick on an unparseable spec.
+//
+// This test exercises the real Load() path (not just json.Unmarshal) by
+// pointing $HOME at a temp dir, writing a config file with overlayHotkey:""
+// to ~/.jarvis/config.json, then asserting Load() applies the normalizer.
+func TestLoadEmptyOverlayHotkeyFallsBack(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	jarvisDir := tmpHome + "/.jarvis"
+	if err := os.MkdirAll(jarvisDir, 0o755); err != nil {
+		t.Fatalf("mkdir jarvis home: %v", err)
+	}
+
+	// Write a config file with the failure shape: overlayHotkey empty.
+	cfgJSON := `{
+		"defaultAgent": "claude-code",
+		"overlayEnabled": true,
+		"overlayHotkey": "",
+		"overlayPosition": "top-right",
+		"overlayShowTranscript": false
+	}`
+	if err := os.WriteFile(jarvisDir+"/config.json", []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	// Reset the package-level cache so Load() doesn't short-circuit.
+	mu.Lock()
+	current = nil
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		current = nil
+		mu.Unlock()
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.OverlayHotkey != "alt+space" {
+		t.Errorf("OverlayHotkey: got %q, want %q (empty string should be normalized)", cfg.OverlayHotkey, "alt+space")
+	}
+}
+
+// TestLoadPreservesOverlayPositionUnknownValue verifies the v0.3.0 TASK-001
+// design note: Load() does NOT normalize OverlayPosition to a known corner.
+// Unknown values are passed through verbatim so the frontend can render them
+// as the documented fallback ("top-right") without the Go side silently
+// rewriting user-supplied data on disk.
+func TestLoadPreservesOverlayPositionUnknownValue(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	jarvisDir := tmpHome + "/.jarvis"
+	if err := os.MkdirAll(jarvisDir, 0o755); err != nil {
+		t.Fatalf("mkdir jarvis home: %v", err)
+	}
+
+	cfgJSON := `{"overlayPosition": "some-future-corner"}`
+	if err := os.WriteFile(jarvisDir+"/config.json", []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mu.Lock()
+	current = nil
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		current = nil
+		mu.Unlock()
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.OverlayPosition != "some-future-corner" {
+		t.Errorf("OverlayPosition: got %q, want %q (unknown values must be preserved verbatim)", cfg.OverlayPosition, "some-future-corner")
+	}
+}
+
+// TestDefaultConfigMeetingDefaults verifies the v0.3.0 meeting-mode TASK-001
+// acceptance: DefaultConfig() returns the three documented meeting field
+// defaults exactly. Downstream tasks (TASK-006 daemon handlers, TASK-011
+// auto-suggest banner, TASK-012 settings panel) read these.
+func TestDefaultConfigMeetingDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.MeetingNotesDir != "~/.jarvis/meetings" {
+		t.Errorf("MeetingNotesDir: got %q, want %q", cfg.MeetingNotesDir, "~/.jarvis/meetings")
+	}
+
+	wantKeywords := []string{"call", "sync", "1:1", "meeting", "standup", "review", "interview"}
+	if len(cfg.MeetingKeywords) != len(wantKeywords) {
+		t.Fatalf("MeetingKeywords: got %d entries (%v), want %d (%v)",
+			len(cfg.MeetingKeywords), cfg.MeetingKeywords, len(wantKeywords), wantKeywords)
+	}
+	for i, want := range wantKeywords {
+		if cfg.MeetingKeywords[i] != want {
+			t.Errorf("MeetingKeywords[%d]: got %q, want %q", i, cfg.MeetingKeywords[i], want)
+		}
+	}
+
+	if !cfg.MeetingAutoSuggest {
+		t.Errorf("MeetingAutoSuggest: got false, want true")
+	}
+}
+
+// TestMeetingFieldsRoundTrip verifies the v0.3.0 meeting-mode TASK-001
+// acceptance: round-tripping a Config with custom meeting values through
+// json.Marshal/Unmarshal preserves them exactly. Pins the on-the-wire
+// camelCase JSON keys because downstream React code reads them by name.
+func TestMeetingFieldsRoundTrip(t *testing.T) {
+	orig := Config{
+		MeetingNotesDir:    "/tmp/meetings",
+		MeetingKeywords:    []string{"1:1", "scrum"},
+		MeetingAutoSuggest: false,
+	}
+
+	data, err := json.Marshal(&orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.MeetingNotesDir != orig.MeetingNotesDir {
+		t.Errorf("MeetingNotesDir: got %q, want %q", got.MeetingNotesDir, orig.MeetingNotesDir)
+	}
+	if len(got.MeetingKeywords) != len(orig.MeetingKeywords) {
+		t.Fatalf("MeetingKeywords: got %v, want %v", got.MeetingKeywords, orig.MeetingKeywords)
+	}
+	for i, want := range orig.MeetingKeywords {
+		if got.MeetingKeywords[i] != want {
+			t.Errorf("MeetingKeywords[%d]: got %q, want %q", i, got.MeetingKeywords[i], want)
+		}
+	}
+	if got.MeetingAutoSuggest != orig.MeetingAutoSuggest {
+		t.Errorf("MeetingAutoSuggest: got %v, want %v", got.MeetingAutoSuggest, orig.MeetingAutoSuggest)
+	}
+
+	// Pin the on-the-wire keys.
+	outStr := string(data)
+	for _, want := range []string{
+		`"meetingNotesDir":"/tmp/meetings"`,
+		`"meetingKeywords":["1:1","scrum"]`,
+		`"meetingAutoSuggest":false`,
+	} {
+		if !strings.Contains(outStr, want) {
+			t.Errorf("marshaled JSON missing %q:\n%s", want, outStr)
+		}
+	}
+}
+
+// TestLoadEmptyMeetingKeywordsFallsBack verifies the v0.3.0 meeting-mode
+// TASK-001 failure case: a config file where MeetingKeywords is an empty
+// slice must be normalised back to the default seven-entry list by Load().
+// Without this fallback, the auto-suggest banner would never match any
+// calendar event.
+//
+// Mirrors the existing TestLoadEmptyOverlayHotkeyFallsBack pattern: redirect
+// $HOME to a temp dir, write the failure-shape JSON to ~/.jarvis/config.json,
+// call Load(), assert. Resets the package-level `current` cache via Cleanup.
+func TestLoadEmptyMeetingKeywordsFallsBack(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	jarvisDir := tmpHome + "/.jarvis"
+	if err := os.MkdirAll(jarvisDir, 0o755); err != nil {
+		t.Fatalf("mkdir jarvis home: %v", err)
+	}
+
+	// Failure shape: meetingKeywords explicitly set to an empty array.
+	cfgJSON := `{
+		"defaultAgent": "claude-code",
+		"meetingNotesDir": "/tmp/meetings",
+		"meetingKeywords": [],
+		"meetingAutoSuggest": true
+	}`
+	if err := os.WriteFile(jarvisDir+"/config.json", []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mu.Lock()
+	current = nil
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		current = nil
+		mu.Unlock()
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	wantKeywords := []string{"call", "sync", "1:1", "meeting", "standup", "review", "interview"}
+	if len(cfg.MeetingKeywords) != len(wantKeywords) {
+		t.Fatalf("MeetingKeywords: got %d entries (%v), want %d (%v) — empty slice should be normalised to default",
+			len(cfg.MeetingKeywords), cfg.MeetingKeywords, len(wantKeywords), wantKeywords)
+	}
+	for i, want := range wantKeywords {
+		if cfg.MeetingKeywords[i] != want {
+			t.Errorf("MeetingKeywords[%d]: got %q, want %q (default should be restored)", i, cfg.MeetingKeywords[i], want)
+		}
+	}
+}
+
+// TestLoadMeetingNotesDirEmptyFallsBack verifies the v0.3.0 meeting-mode
+// TASK-001 failure case: a config file where MeetingNotesDir is the empty
+// string "" must be normalised back to "~/.jarvis/meetings" by Load().
+// Without this fallback the markdown writer would have no destination.
+func TestLoadMeetingNotesDirEmptyFallsBack(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	jarvisDir := tmpHome + "/.jarvis"
+	if err := os.MkdirAll(jarvisDir, 0o755); err != nil {
+		t.Fatalf("mkdir jarvis home: %v", err)
+	}
+
+	cfgJSON := `{
+		"defaultAgent": "claude-code",
+		"meetingNotesDir": "",
+		"meetingKeywords": ["standup"],
+		"meetingAutoSuggest": true
+	}`
+	if err := os.WriteFile(jarvisDir+"/config.json", []byte(cfgJSON), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	mu.Lock()
+	current = nil
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		current = nil
+		mu.Unlock()
+	})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.MeetingNotesDir != "~/.jarvis/meetings" {
+		t.Errorf("MeetingNotesDir: got %q, want %q (empty string should be normalised)", cfg.MeetingNotesDir, "~/.jarvis/meetings")
+	}
+}

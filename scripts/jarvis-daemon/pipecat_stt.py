@@ -22,6 +22,7 @@ import logging
 import os
 import tempfile
 import time
+from dataclasses import dataclass
 from typing import Final
 
 import numpy as np
@@ -32,6 +33,7 @@ from pipecat.frames.frames import (
     BotStoppedSpeakingFrame,
     EndFrame,
     Frame,
+    InputAudioRawFrame,
     InterimTranscriptionFrame,
     TranscriptionFrame,
     UserStartedSpeakingFrame,
@@ -40,6 +42,23 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 logger: Final = logging.getLogger("jarvis-daemon.pipecat_stt")
+
+
+@dataclass
+class MobileAudioRawFrame(InputAudioRawFrame):
+    """Marker subclass for audio sourced from the mobile WS bridge.
+
+    Inherits from ``InputAudioRawFrame`` (not bare ``AudioRawFrame``) so the
+    Pipecat ``Frame`` metadata fields (``id``, ``transport_destination``,
+    ``broadcast_sibling_id``, etc.) are initialised properly.
+
+    The HUD mute (``force_muted``) and the bot-speaking gate exist to keep
+    the Mac mic from capturing echo or background noise while Jarvis is
+    talking. Mobile audio arrives via push-to-talk -- the user has made an
+    explicit intent gesture, so neither gate should silence it. STT
+    distinguishes mobile frames via this subclass and bypasses both gates.
+    """
+
 
 SAMPLE_RATE: Final[int] = 16000
 TRANSCRIBE_INTERVAL_S: Final[float] = 0.5
@@ -302,8 +321,12 @@ class LocalWhisperSTT(FrameProcessor):
             return
 
         if isinstance(frame, AudioRawFrame):
-            # Skip audio while bot is speaking or hard-muted
-            if self._bot_speaking or self.force_muted:
+            # Skip audio while bot is speaking or hard-muted, EXCEPT for
+            # mobile push-to-talk audio -- the phone user has made an
+            # explicit press-and-hold gesture, so the HUD mute (Mac-mic
+            # gate) and the bot-speaking gate must not silence them.
+            is_mobile = isinstance(frame, MobileAudioRawFrame)
+            if (self._bot_speaking or self.force_muted) and not is_mobile:
                 await self.push_frame(frame, direction)
                 return
 

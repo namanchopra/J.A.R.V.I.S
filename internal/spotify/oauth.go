@@ -70,6 +70,27 @@ const pkceVerifierLength = 48
 // bounded — protects against a user who walks away mid-flow.
 const pkceFlowTimeout = 5 * time.Minute
 
+// CallbackPort is the loopback port the OAuth callback server binds.
+//
+// Pinned to a single value (rather than a random kernel-assigned port)
+// because Spotify's developer dashboard rejects auth requests whose
+// redirect_uri doesn't EXACTLY match a registered URI — port included.
+// With a random port, the user would have to register every possible
+// port up front, which isn't viable.
+//
+// The exact value (53682) is arbitrary, chosen high enough to avoid
+// privileged-port territory and uncommon enough to not collide with
+// well-known dev-server ports (3000, 5173, 8080, 8443, etc.). The
+// matching CallbackURI constant is what users paste into their Spotify
+// Developer app's "Redirect URIs" field.
+const CallbackPort = 53682
+
+// CallbackURI is the redirect URI Jarvis builds the Spotify authorize
+// URL with. Users must paste this verbatim into their Spotify Developer
+// app's "Redirect URIs" list — the UI surfaces it as copyable text in
+// the Settings → Connections → Spotify card.
+const CallbackURI = "http://127.0.0.1:53682/callback"
+
 // callbackHTMLSuccess is rendered to the browser after a successful auth
 // code arrives. Plain HTML — no external assets — so it works fully offline.
 const callbackHTMLSuccess = `<!doctype html><html><head><meta charset="utf-8">` +
@@ -443,13 +464,13 @@ func RunPKCEFlow(clientID string, openBrowser func(url string) error, cfg *model
 		return fmt.Errorf("spotify: RunPKCEFlow: openBrowser is required")
 	}
 
-	port, err := pickFreePort()
-	if err != nil {
-		return fmt.Errorf("spotify: RunPKCEFlow: %w", err)
-	}
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	// Fixed loopback port — see CallbackPort doc for why we don't pick
+	// a random one. If 53682 is already in use, StartCallbackServer's
+	// net.Listen will surface an "address already in use" error on
+	// errCh, which the select below catches.
+	redirectURI := CallbackURI
 
-	codeCh, errCh, closeFn := StartCallbackServer(port)
+	codeCh, errCh, closeFn := StartCallbackServer(CallbackPort)
 	defer closeFn()
 
 	authURL, verifier, expectedState, err := BuildAuthURLWithRedirect(clientID, DefaultScopes, redirectURI)

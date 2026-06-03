@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-## [0.3.0] - 2026-05-21
+## [0.3.0] - 2026-06-03
 
 ### Added
 - **Spotify control.** AppleScript local driver + OAuth PKCE + Web API search. 9 tools (`search_and_play`, `pause`, `resume`, `skip`, `previous`, `what_is_playing`, `set_volume`, `like_current`, `queue`).
@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Voice confirmation gate.** When a tool's policy is `ask`, the daemon emits `confirmation_required`, speaks the question ("Quit Slack?"), and awaits "yes"/"no" from the user. 30s timeout defaults to deny.
 - **Settings → Permissions tab.** Per-tool allow/ask/deny segmented controls for all 24 tools (9 Spotify + 15 Mac).
 - **Bundled Shortcuts.** 7 placeholder `.shortcut` files bundled under `Resources/shortcuts/` with a first-run installer Wails binding. Real exports replace placeholders later.
+- **Mac overlay widget.** Frameless 320×420 always-on-top panel that morphs the main Wails window via a CGO ObjC bridge toggling `NSWindowStyleMask`. Default toggle hotkey `⌥ + Space` (configurable). Separate global PTT hotkey `⌃ + Space` so you can talk to Jarvis without the overlay needing focus. Full JarvisOrb (Three.js) for visual parity with the main HUD. Five-icon control row: mute · PTT · interrupt · meeting-record · back-to-main. Drag anywhere outside controls to move; ESC to dismiss.
+- **Google Calendar integration.** OAuth + token storage, IANA timezone resolution, `HudCalendarPanel` (right-column next-event + upcoming list with 60s polling), `HudMeetingBanner` (top-center auto-suggest when an event matches keywords + starts within 2 minutes), `CalendarChip` on Friday (top-center on mobile dashboard), "next event" stat tile with imminent-warning accent.
+- **Meeting mode.** Passive meeting note-taking with ScreenCaptureKit (macOS 13+) capturing both mic + system audio (16 kHz mono int16), 100k-char transcript buffer with oldest-eviction, LLM suppression during meetings, automatic Markdown notes + spoken 2-sentence recap on stop. Notes land at `~/.jarvis/meetings/<YYYY-MM-DD-HH-MM>-<slug>.md` (configurable). Activated three ways: overlay 5th icon (red ●), always-visible chip in `HudCalendarPanel`, or calendar auto-suggest banner. Auto-stop fires when a banner-started meeting's calendar event ends (manually-started meetings never auto-stop). First-launch Screen Recording permission probe via `ProbeMeetingPermission`. Settings → Meeting tab with notes directory, keyword editor, auto-suggest toggle, and Open Folder button.
+- **Meeting recall tools.** `recall_meeting(filename?)` — reads the most-recent meeting markdown, or a specific file by name. `list_recent_meetings(limit?=10)` — returns up to 50 most-recent meetings with filename + ISO timestamp + size + extracted H1 title. Back-compat alias `recall_last_meeting` preserved. Path-traversal hardened (`..`, `/`, `\` rejected). `TriggerMeetingRecap` Wails binding + `⟳` Replay button next to the HUD chip — re-speaks the cached recap on demand.
 - **Friday mobile companion.** React Native app distributable via Expo Go (zero App Store friction):
   - Orb-first UX matching the Mac HUD (cyan #00ffcc particle ring, monospace LLM/STT/TTS/SESSIONS labels)
   - Push-to-talk button — hold to record, release to send
@@ -36,11 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Mobile app rebuilt from scratch — old tabs UI (tasks/sessions/repos/approvals lists) replaced with orb-first single-screen flow. LiveKit + react-native-webrtc removed (incompatible with Expo Go).
-- Daemon `TOOL_DEFINITIONS` extended with 24 new tool declarations.
+- Mobile dashboard redesigned around the orb: name banner ("Friday"), state bar, calendar chip near top, next-event stat tile in bottom row, tap-to-settings affordances on multiple stat tiles. OrbView reworked for higher fidelity to the Mac HUD.
+- Daemon `TOOL_DEFINITIONS` extended with 26 new tool declarations (9 Spotify + 15 Mac + 2 meeting recall).
+- Daemon now caches `_LAST_MEETING_RECAP` in memory across the daemon's lifetime so `__meeting_recap__` (and the `⟳` button) can replay without re-querying the LLM.
 
 ### Notes
 - Spotify Web API requires Premium for playback control; Free works for AppleScript-only commands.
 - Permissions UI ships with safe defaults: read-only tools allow, destructive tools ask, no deny defaults.
+- Meeting mode requires macOS 13+ for ScreenCaptureKit and Screen Recording permission. On macOS 12 and below, system-audio capture is disabled but mic-only recording still works as a degraded path.
+- Long meetings: the transcript buffer is hard-capped at 100k chars; oldest entries are evicted when over. For a 60+ minute meeting expect to see only the most recent ~30-40 minutes of raw transcript in the notes file. The summary covers the full duration regardless.
+- Continuous STT during a 60+ min meeting is battery-intensive. Plug in for long sessions; v2 will add a low-power STT mode.
 
 ## [0.2.12] - 2026-05-20
 
