@@ -77,6 +77,8 @@ export function FocusTerminalWindow(arg1:string):Promise<void>;
 
 export function ForkSession(arg1:string):Promise<model.Session>;
 
+export function GenerateMobilePairingQR():Promise<string>;
+
 export function GetActiveSessions():Promise<Array<model.Session>>;
 
 export function GetActivityFeed(arg1:number,arg2:string):Promise<Array<model.ActivityEvent>>;
@@ -111,9 +113,13 @@ export function GetJarvisHistory():Promise<Array<jarvis.Message>>;
 
 export function GetJarvisState():Promise<string>;
 
+export function GetMacctlPolicy():Promise<Record<string, string>>;
+
 export function GetMicPermissionStatus():Promise<string>;
 
 export function GetMobileConnectionInfo():Promise<main.MobileConnectionInfo>;
+
+export function GetNextCalendarEvent():Promise<model.NextEventSnapshot>;
 
 export function GetPendingApprovals():Promise<Array<model.ApprovalRequest>>;
 
@@ -189,6 +195,22 @@ export function GitStashDrop(arg1:string,arg2:number):Promise<void>;
 
 export function GitStashList(arg1:string):Promise<Array<git.StashEntry>>;
 
+export function GoogleCalendarCreateEvent(arg1:string,arg2:string,arg3:string,arg4:Array<string>,arg5:string):Promise<model.CalendarEvent>;
+
+export function GoogleCalendarGetNextEvent():Promise<model.NextEventSnapshot>;
+
+export function GoogleCalendarGetUpcomingEvents(arg1:number):Promise<Array<model.CalendarEvent>>;
+
+export function GoogleCalendarIsConnected():Promise<boolean>;
+
+export function GoogleCalendarMoveEvent(arg1:string,arg2:string,arg3:string,arg4:string):Promise<model.CalendarEvent>;
+
+export function GoogleCalendarSetCredentials(arg1:string,arg2:string):Promise<void>;
+
+export function GoogleCalendarSignIn():Promise<string>;
+
+export function GoogleCalendarSignOut():Promise<void>;
+
 export function ImportConfig(arg1:string,arg2:boolean):Promise<void>;
 
 export function IsCMuxAvailable():Promise<boolean>;
@@ -197,9 +219,15 @@ export function IsFirstRun():Promise<boolean>;
 
 export function IsJarvisDaemonConnected():Promise<boolean>;
 
+export function IsMeetingActive():Promise<boolean>;
+
 export function IsOllamaRunning():Promise<boolean>;
 
 export function IsSetupComplete():Promise<boolean>;
+
+export function JarvisInstallBundledShortcuts():Promise<string>;
+
+export function JarvisSendTestPush():Promise<string>;
 
 export function LaunchFromTemplate(arg1:string):Promise<void>;
 
@@ -221,6 +249,36 @@ export function ListSessions(arg1:string):Promise<Array<model.Session>>;
 
 export function ListWorkspaces():Promise<Array<workspace.Workspace>>;
 
+export function MacClipboardGet():Promise<string>;
+
+export function MacClipboardSet(arg1:string):Promise<string>;
+
+export function MacFocusWindow(arg1:string,arg2:string):Promise<string>;
+
+export function MacListShortcuts():Promise<Array<string>>;
+
+export function MacMute():Promise<string>;
+
+export function MacOpenApp(arg1:string):Promise<string>;
+
+export function MacOpenPath(arg1:string):Promise<string>;
+
+export function MacQuitApp(arg1:string):Promise<string>;
+
+export function MacRunShortcut(arg1:string,arg2:string):Promise<string>;
+
+export function MacScreenshot(arg1:string):Promise<string>;
+
+export function MacSetBrightness(arg1:number):Promise<string>;
+
+export function MacSetVolume(arg1:number):Promise<string>;
+
+export function MacSpotlight(arg1:string):Promise<string>;
+
+export function MacToggleDND():Promise<string>;
+
+export function MacUnmute():Promise<string>;
+
 export function MarkFirstRunComplete():Promise<void>;
 
 export function OpenApp(arg1:string):Promise<void>;
@@ -237,13 +295,27 @@ export function OpenURL(arg1:string):Promise<void>;
 
 export function OpenWorkspaceInTerminal(arg1:string):Promise<void>;
 
+export function OverlayHide():Promise<void>;
+
+export function OverlayPTTPress():Promise<void>;
+
+export function OverlayPTTRelease():Promise<void>;
+
+export function OverlayShow():Promise<void>;
+
+export function OverlayToggle():Promise<void>;
+
 export function PreviewVoice(arg1:string,arg2:string):Promise<void>;
+
+export function ProbeMeetingPermission():Promise<void>;
 
 export function QueueSession(arg1:string,arg2:string,arg3:string,arg4:Array<string>,arg5:string):Promise<model.Session>;
 
 export function ReadFromCMux(arg1:string):Promise<string>;
 
 export function ReadFromTerminal(arg1:string):Promise<string>;
+
+export function RebindOverlayHotkey(arg1:string):Promise<void>;
 
 export function RegenerateMobileToken():Promise<void>;
 
@@ -291,11 +363,29 @@ export function SetDotClaudeSource(arg1:string):Promise<void>;
 
 export function SetJarvisConfig(arg1:jarvis.JarvisConfig):Promise<void>;
 
+export function SetMacctlPolicy(arg1:string,arg2:string):Promise<void>;
+
+export function SpotifyIsConnected():Promise<boolean>;
+
+export function SpotifyPause():Promise<void>;
+
+export function SpotifyResume():Promise<void>;
+
+export function SpotifySearchAndPlay(arg1:string):Promise<string>;
+
+export function SpotifySignIn():Promise<string>;
+
+export function SpotifySignOut():Promise<void>;
+
 export function StartJarvis():Promise<void>;
+
+export function StartMeeting(arg1:string):Promise<void>;
 
 export function StopAllWatchers():Promise<void>;
 
 export function StopJarvis():Promise<void>;
+
+export function StopMeeting():Promise<string>;
 
 export function StopSession(arg1:string):Promise<void>;
 
@@ -304,6 +394,8 @@ export function StopWatchingOutput(arg1:string):Promise<void>;
 export function SuggestWorkflows():Promise<Array<main.WorkflowSuggestion>>;
 
 export function SyncDotClaude():Promise<number>;
+
+export function TriggerMeetingRecap():Promise<void>;
 
 export function UpdateSessionTodo(arg1:string,arg2:string):Promise<void>;
 

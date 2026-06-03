@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -17,18 +18,28 @@ import (
 
 // Server is the mobile API HTTP server. It is safe for concurrent use.
 type Server struct {
-	echo             *echo.Echo
-	token            atomic.Value // stores string for lock-free hot-swap
-	port             int
-	pushHandler      *PushHandler
-	jarvisConn       *JarvisDaemonConn // active Jarvis daemon WebSocket (may be nil)
-	mobileBroadcaster *MobileBroadcaster
+	echo                 *echo.Echo
+	token                atomic.Value // stores string for lock-free hot-swap
+	port                 int
+	pushHandler          *PushHandler
+	jarvisConn           *JarvisDaemonConn // active Jarvis daemon WebSocket (may be nil)
+	mobileBroadcaster    *MobileBroadcaster
+	stopStatsBroadcaster func() // stop fn for the periodic stats push goroutine
 }
 
 // JarvisConn returns the active Jarvis daemon WebSocket connection wrapper, or nil
 // if WireRoutes has not been called yet.
 func (s *Server) JarvisConn() *JarvisDaemonConn {
 	return s.jarvisConn
+}
+
+// PushHandler exposes the registered push notification handler, or nil if
+// WireRoutes has not been called yet. Used by the Wails-bound
+// JarvisSendTestPush binding (app_push.go) to fan a manual test push out to
+// every registered device. Safe to call from any goroutine -- callers must
+// nil-check before invoking handler methods.
+func (s *Server) PushHandler() *PushHandler {
+	return s.pushHandler
 }
 
 // New creates a new Server that will listen on the given port and require the
@@ -172,6 +183,8 @@ func (s *Server) WireRoutes(
 	repos RepoProvider,
 	repoResolve RepoPathResolver,
 	jarvisEmitFn JarvisEventEmitter,
+	stats StatsProvider,
+	calendar CalendarProvider,
 ) {
 	g := s.echo.Group("")
 	RegisterSessionRoutes(g, sessions)
@@ -181,6 +194,7 @@ func (s *Server) WireRoutes(
 	RegisterSettingsRoutes(g, settings)
 	RegisterRepoRoutes(g, repos, repoResolve)
 	RegisterLiveKitRoutes(g, settings)
+	RegisterCalendarRoutes(g, calendar)
 
 	tokenFn := func() string {
 		t, _ := s.token.Load().(string)
@@ -203,6 +217,16 @@ func (s *Server) WireRoutes(
 
 	// Jarvis mobile WebSocket — auth via ?token= query param.
 	s.mobileBroadcaster = RegisterJarvisMobileWSRoute(g, tokenFn, s.jarvisConn)
+
+	// Periodic dashboard-stats push for mobile clients. iOS Expo Go's
+	// ATS blocks plain http:// fetches from RN so REST polling fails;
+	// pushing the snapshot over the already-authorised WS sidesteps it
+	// entirely. 5s cadence matches the Mac HUD's poll loop.
+	if stats != nil {
+		s.stopStatsBroadcaster = s.mobileBroadcaster.StartStatsBroadcaster(
+			stats, 5*time.Second,
+		)
+	}
 
 	// Jarvis chat endpoint — uses the daemon WS for request/response.
 	RegisterJarvisChatRoute(g, s.jarvisConn)

@@ -44,11 +44,14 @@ The DMG is signed with an Apple Developer ID and notarized — no Gatekeeper war
 ## Features
 
 - 🎤 **"Hey Jarvis" wake word.** Always-listening, local, low-power wake detection via openWakeWord (with an optional Picovoice backend for users who prefer it). No cloud round-trip to start a conversation, no push-to-talk button to hunt for.
+- **Spotify control.** Voice-driven Spotify playback. Local AppleScript playback for any Spotify Free user with the desktop client running; Spotify Web API search for "play X by name". Tools: `spotify_search_and_play`, `spotify_pause`, `spotify_resume`, `spotify_skip`, `spotify_previous`, `spotify_what_is_playing`, `spotify_set_volume`, `spotify_like_current`, `spotify_queue`.
+- **Mac control.** System-wide voice control via 15 `macctl` tools: open/quit/focus apps, set volume/brightness, take screenshots, clipboard, run Shortcuts.app shortcuts. Per-tool permissions (`allow` / `ask` / `deny`) gate destructive actions; the daemon asks confirmation via voice when policy = `ask`.
+- **Friday mobile companion.** Expo-Go-scannable React Native app that relays voice to the Mac's Jarvis. Push-to-talk on the orb, WebSocket transport, QR pairing. No App Store, no developer signing — install Expo Go, scan a QR, done. See [/friday](https://jarvis.namanchopra.dev/friday) for the install QR.
 - **Multi-agent session management.** Launch and supervise sessions across five agents — **Claude Code**, **Kiro**, **Gemini CLI**, **Codex**, and **Aider** — side by side. Each agent has its own adapter (`internal/agent/<name>.go`) implementing a uniform `Launch / SendMessage / Stop / IsAvailable` interface, so the rest of the app treats them interchangeably.
 - **Cross-session conflict detection (impact warnings).** Jarvis runs `git diff --name-only HEAD` for every active session in the background and raises three classes of warning: *shared-dependency* (two agents both modify `package.json` or `go.mod`), *shared-file* (overlap inside `shared/` or `common/` directories), and *API contract* (concurrent edits under `/api/` or `/routes/` directories). You see the conflict before the merge does.
 - **Workspace virtualization.** Spin up a virtual monorepo at `~/.jarvis/workspaces/<name>/` that symlinks several real repos together, auto-generates a `CLAUDE.md` describing the workspace and cross-repo guidelines, and launches a single Claude Code session with `--add-dir` for every repo. One conversation, multiple codebases, no manual juggling.
 - **Terminal integration.** Focus, send keystrokes, and read output from CMux workspaces, iTerm2 windows, and Terminal.app windows interchangeably — Jarvis picks the right provider automatically or honors the `preferredTerminal` config override.
-- **Mobile companion (in progress).** A Bearer-token-authenticated HTTP and WebSocket API is already live in the desktop build (Echo server on port 4422 by default) — the Expo mobile client that consumes it ships separately.
+- **Mobile companion (Friday).** Friday is the v0.3 phone client: a Bearer-token-authenticated HTTP and WebSocket bridge to the Mac (Echo server on port 4422 by default) plus an Expo Go React Native app you install by scanning a QR. See the **Friday Mobile** section below.
 - **Local-first voice pipeline.** STT via `mlx-whisper` running on Apple Silicon Metal and TTS via Microsoft VibeVoice Realtime 0.5B, both bundled into the DMG, both running entirely on your machine. No audio leaves the device.
 - **Ollama path for fully offline operation.** Point Jarvis at a local Ollama instance (e.g. `ollama:qwen3:4b`) and the assistant can run end-to-end with zero external network calls — STT, LLM, and TTS all local.
 - **Process auto-detection.** Jarvis scans the OS process table every five seconds (configurable) and auto-creates task records for any running agent process it recognizes, marking them done when the process exits.
@@ -67,6 +70,14 @@ The Settings view is a full UI replacement for hand-editing `~/.jarvis/config.js
 
 <!-- TODO: capture docs/settings-walkthrough.png once Settings UI work (TASK-016..023) lands -->
 
+## Friday Mobile
+
+Friday is the v0.3 phone companion. Press-and-hold the orb to talk; release to send. Audio relays over WebSocket to the Mac's Jarvis daemon — the phone is a mic + speaker, the brain stays on your Mac.
+
+**Install:** open https://jarvis.namanchopra.dev/friday on a computer, scan the QR with Expo Go on your phone, done. No Apple Developer account, no Play Store listing.
+
+**Pair:** in Jarvis on the Mac, Settings → Connections → "Connect Friday phone". Scan the resulting QR with Friday. Pairing persists.
+
 ## What works today
 
 Everything in the **Features** list above is live:
@@ -84,7 +95,7 @@ Everything in the **Features** list above is live:
 ## Known limitations
 
 - **Apple Silicon only.** Intel Macs are not supported and the binary refuses to start under Rosetta 2.
-- **Mobile companion is not yet wired.** The Bearer-token HTTP API and WebSocket terminal stream are in the desktop build, but the Expo client ships separately.
+- **Friday mobile is push-to-talk only.** No wake-word on the phone in v0.3 — you press the orb to record, release to send. Wake-word relay over WebSocket is on the roadmap.
 - **No auto-update.** No Sparkle integration yet — new versions are downloaded manually from Releases. On the roadmap.
 - **No telemetry.** Jarvis does not phone home. This is intentional; an opt-in error reporter may land later.
 

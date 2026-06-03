@@ -109,6 +109,12 @@ class VibeVoiceTTSService(FrameProcessor):
         # Mobile TTS callback — sends raw PCM chunks to mobile clients via WS.
         self._mobile_tts_fn: Callable[[bytes], Coroutine[Any, Any, None]] | None = None
         self._audio_chunk_counter: int = 0
+        # Expose the output sample rate so the Router/mobile broadcast wiring
+        # in main.py can pick the right ``sampleRate`` for the WS message.
+        # VibeVoice outputs at 24000 Hz; without this attribute the wiring
+        # falls back to its 16000 default and the phone's WAV header is wrong,
+        # making playback sound slowed-down and droning.
+        self._sample_rate: int = SAMPLE_RATE
 
     async def prewarm(self) -> None:
         """Eagerly load the VibeVoice model in the background.

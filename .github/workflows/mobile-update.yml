@@ -1,0 +1,39 @@
+name: Mobile EAS Update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/mobile-update.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-update-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish to EAS Update (production channel)
+    runs-on: ubuntu-22.04
+    if: ${{ vars.EAS_PROJECT_ID != '' && secrets.EXPO_TOKEN != '' }}  # guard: skip if not configured
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Expo CLI
+        run: npm install -g eas-cli@latest
+
+      - name: Install dependencies
+        working-directory: mobile
+        run: bun install --frozen-lockfile || npm install
+
+      - name: Publish update
+        working-directory: mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: eas update --channel production --message "${{ github.event.head_commit.message }}" --non-interactive

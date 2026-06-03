@@ -132,6 +132,41 @@ export interface LiveKitToken {
 }
 
 // ---------------------------------------------------------------------------
+// Google Calendar -- mirrors internal/model/gcal.go and the responses
+// shipped by internal/api/handlers_calendar.go. Connected is the
+// authoritative "is the Mac signed into Google?" flag so the mobile UI
+// can render a connect-CTA when needed without inferring from null.
+// ---------------------------------------------------------------------------
+
+export interface CalendarEvent {
+  id?: string;
+  title?: string;
+  start?: string;        // RFC3339
+  end?: string;
+  attendees?: string[];
+  location?: string;
+  htmlLink?: string;
+  timeZone?: string;
+}
+
+export interface NextEventSnapshot {
+  title?: string;
+  start?: string;
+  relativeTime?: string;  // server-formatted: "in 14m" / "now" / "in 2h"
+  location?: string;
+}
+
+export interface NextCalendarResponse {
+  connected: boolean;
+  event: NextEventSnapshot | null;
+}
+
+export interface UpcomingCalendarResponse {
+  connected: boolean;
+  events: CalendarEvent[];
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -165,6 +200,12 @@ function isNetworkError(err: unknown): boolean {
   return err instanceof TypeError && (err as TypeError).message === 'Network request failed';
 }
 
+// One-shot logger -- only the first request per app launch logs the URL it
+// resolved to. Removes the noise of 5-second poll spam while giving us a
+// single diagnostic line we can use to confirm the pair record made it
+// into ``getServerUrl()`` correctly.
+let _diagFirstRequestLogged = false;
+
 async function request<T>(
   method: string,
   path: string,
@@ -173,6 +214,16 @@ async function request<T>(
   const serverUrl = await storage.getServerUrl();
   const url = `${serverUrl}${path}`;
   const headers = await buildHeaders();
+  if (!_diagFirstRequestLogged) {
+    _diagFirstRequestLogged = true;
+    console.log('[api] first request resolved', {
+      serverUrl,
+      hasAuthHeader: Boolean(headers['Authorization']),
+      authHeaderPrefix: headers['Authorization']
+        ? headers['Authorization'].slice(0, 16) + '...'
+        : '(missing)',
+    });
+  }
 
   const init: RequestInit = { method, headers };
   if (body !== undefined) {
@@ -304,6 +355,14 @@ export const awmApi = {
   // Jarvis chat
   jarvisChat: (message: string): Promise<JarvisChatResponse> =>
     post<JarvisChatResponse>('/jarvis/chat', { message }),
+
+  // Google Calendar -- read-only views. The Mac side owns the OAuth flow;
+  // mobile only sees the pre-computed snapshots.
+  getNextCalendarEvent: (): Promise<NextCalendarResponse> =>
+    get<NextCalendarResponse>('/calendar/next'),
+
+  getUpcomingCalendarEvents: (limit = 10): Promise<UpcomingCalendarResponse> =>
+    get<UpcomingCalendarResponse>(`/calendar/upcoming?limit=${limit}`),
 
   // LiveKit token (spike — used by Voice screen to join the same room as the daemon)
   getLiveKitToken: (identity = 'phone'): Promise<LiveKitToken> =>

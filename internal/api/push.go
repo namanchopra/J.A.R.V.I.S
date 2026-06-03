@@ -33,7 +33,8 @@ type PushProvider interface {
 type PushHandler struct {
 	app        PushProvider
 	mu         sync.RWMutex
-	pushToken  string
+	pushToken  string   // Latest registered token (kept for backward compatibility).
+	pushTokens []string // All distinct tokens we've seen (TASK-028 — multi-device fan-out).
 	httpClient *http.Client
 
 	// prevSessionStates tracks the last-seen status for each managed session
@@ -47,8 +48,13 @@ type PushHandler struct {
 }
 
 // pushTokenRequest is the expected JSON body for POST /push-token.
+//
+// `Platform` is optional and informational (TASK-028 — mobile/lib/push.ts
+// sends "ios" / "android" so a future dedupe-by-platform path doesn't need a
+// schema bump). The handler treats it as a hint, not a key.
 type pushTokenRequest struct {
-	Token string `json:"token"`
+	Token    string `json:"token"`
+	Platform string `json:"platform,omitempty"`
 }
 
 // RegisterPushRoutes mounts push-notification endpoints on the provided Echo
@@ -84,10 +90,63 @@ func (h *PushHandler) registerToken(c echo.Context) error {
 
 	h.mu.Lock()
 	h.pushToken = req.Token
+	// TASK-028: maintain a de-duped list of all known tokens so the test-push
+	// binding (JarvisSendTestPush) and any future fan-out logic can target
+	// every registered device, not just the most recent one. Linear scan is
+	// fine — token cardinality stays in the single digits (one per paired
+	// phone) and the registration path is cold.
+	found := false
+	for _, t := range h.pushTokens {
+		if t == req.Token {
+			found = true
+			break
+		}
+	}
+	if !found {
+		h.pushTokens = append(h.pushTokens, req.Token)
+	}
 	h.mu.Unlock()
 
-	slog.Info("push token registered", "token_prefix", truncateToken(req.Token))
+	slog.Info("push token registered",
+		"token_prefix", truncateToken(req.Token),
+		"platform", req.Platform,
+	)
 	return c.JSON(http.StatusOK, map[string]bool{"ok": true})
+}
+
+// PushTokens returns a snapshot of all distinct Expo push tokens currently
+// registered with this handler. Used by the Wails-bound JarvisSendTestPush
+// binding (app_push.go) to fan a test notification out to every paired
+// device. Returns an empty slice (never nil) when no tokens have been
+// registered, so the caller can length-check without a nil guard.
+func (h *PushHandler) PushTokens() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.pushTokens) == 0 {
+		return []string{}
+	}
+	out := make([]string, len(h.pushTokens))
+	copy(out, h.pushTokens)
+	return out
+}
+
+// SendExpoPushToAll fans out a notification with the same payload to every
+// registered push token. Returns the count of sends that landed with a 2xx
+// or non-5xx response from the Expo push service. Used by the
+// JarvisSendTestPush Wails binding (app_push.go) to surface a manual
+// "Test push" button in Settings -> Permissions. Errors per-token are
+// logged but do not abort the fan-out.
+func (h *PushHandler) SendExpoPushToAll(title, body string, data map[string]interface{}) int {
+	tokens := h.PushTokens()
+	sent := 0
+	for _, t := range tokens {
+		if err := h.sendExpoPush(t, title, body, data); err != nil {
+			slog.Warn("push fan-out: send failed", "err", err, "token_prefix", truncateToken(t))
+			continue
+		}
+		sent++
+	}
+	return sent
 }
 
 // StartPushPoller begins a background goroutine that polls for sessions needing

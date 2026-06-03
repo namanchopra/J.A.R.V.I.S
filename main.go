@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"log"
@@ -13,6 +14,8 @@ import (
 	"github.com/namanchopra/jarvis/internal/arch"
 	"github.com/namanchopra/jarvis/internal/cli"
 	"github.com/namanchopra/jarvis/internal/cmux"
+	"github.com/namanchopra/jarvis/internal/config"
+	"github.com/namanchopra/jarvis/internal/hotkey"
 	"github.com/namanchopra/jarvis/internal/paths"
 	"github.com/namanchopra/jarvis/internal/scanner"
 	"github.com/namanchopra/jarvis/internal/store"
@@ -23,6 +26,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 //go:embed all:frontend/dist
@@ -178,8 +182,30 @@ func launchDesktop(s *store.Store) {
 				Message: "AI Voice Companion",
 			},
 		},
-		OnStartup:  app.startup,
-		OnShutdown: app.shutdown,
+		// OnStartup wraps app.startup with the v0.3.0 global PTT hotkey
+		// wiring (TASK-005). The lib's hk.Register MUST be invoked from
+		// the macOS main thread; Wails runs OnStartup on the main goroutine
+		// (which is the locked main thread), so this is the correct seam.
+		// A registration failure (Accessibility denied, hotkey conflict)
+		// logs a warning and emits "overlay:hotkey_error" — the app still
+		// starts so the rest of the surface (HUD, mobile API) keeps working.
+		OnStartup: func(ctx context.Context) {
+			app.startup(ctx)
+			wireOverlayHotkey(ctx, app)
+		},
+		OnShutdown: func(ctx context.Context) {
+			if app.hotkeyManager != nil {
+				if err := app.hotkeyManager.Close(); err != nil {
+					slog.Warn("overlay hotkey: close error", "err", err)
+				}
+			}
+			if app.hotkeyPTTManager != nil {
+				if err := app.hotkeyPTTManager.Close(); err != nil {
+					slog.Warn("overlay PTT hotkey: close error", "err", err)
+				}
+			}
+			app.shutdown(ctx)
+		},
 		Bind: []interface{}{
 			app,
 		},
@@ -189,4 +215,77 @@ func launchDesktop(s *store.Store) {
 		slog.Error("wails.Run error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// wireOverlayHotkey constructs the hotkey.Manager, attaches it to the App,
+// and registers the configured global PTT hotkey (default "alt+space").
+//
+// The macOS Carbon EventHotKey APIs (called transitively from hk.Register)
+// require execution on the main thread. Wails invokes OnStartup on the
+// main goroutine which it has runtime.LockOSThread'd to the OS main
+// thread, so this function runs on the right thread by virtue of being
+// called from OnStartup. Receiving on the lib's Keydown / Keyup channels
+// from the watch goroutine is safe off-thread (see internal/hotkey for
+// the lifecycle docs).
+//
+// Failure handling is non-fatal: an OS-denied registration (Accessibility
+// not granted, or another app owns the combo) is logged at Warn level and
+// the "overlay:hotkey_error" Wails event is emitted so the Settings panel
+// (TASK-009) can surface a "grant Accessibility access" CTA. The rest of
+// the app continues to start.
+func wireOverlayHotkey(ctx context.Context, app *App) {
+	cfg, err := config.Load()
+	spec := ""
+	if err != nil {
+		slog.Warn("overlay hotkey: config load failed, falling back to default", "err", err)
+	} else {
+		spec = cfg.OverlayHotkey
+	}
+	// Defensive: an empty spec on a degraded config load would brick the
+	// binding; fall back to the documented default. config.Load already
+	// has its own empty-spec defence (TASK-001) but mirroring it here
+	// keeps this wiring robust against future config-loading regressions.
+	if spec == "" {
+		spec = "alt+space"
+	}
+
+	app.hotkeyManager = hotkey.NewManager()
+	if err := app.hotkeyManager.Register(
+		spec,
+		app.hotkeyPressCallback(),
+		app.hotkeyReleaseCallback(),
+	); err != nil {
+		slog.Warn("overlay hotkey: registration failed (Accessibility permission?)",
+			"spec", spec, "err", err)
+		// Emit on the Wails event bus so the Settings panel can render
+		// the "grant Accessibility access" inline warning. The frontend
+		// is responsible for displaying it; we just publish the signal.
+		wailsruntime.EventsEmit(ctx, "overlay:hotkey_error", err.Error())
+		// Continue startup -- the feature is degraded but the app still
+		// works (HUD, mobile API, all other Wails bindings unaffected).
+		// (Don't return: still try to register the PTT hotkey -- one
+		// failing doesn't necessarily mean the other will.)
+	} else {
+		slog.Info("overlay hotkey: registered", "spec", spec)
+	}
+
+	// Second hotkey: global push-to-talk (default ctrl+space). Press =
+	// OverlayShow + send ptt_active; release = send ptt_release. Lets the
+	// user talk to Jarvis from any app without first focusing the overlay.
+	pttSpec := "ctrl+space"
+	if cfg != nil && cfg.OverlayPTTHotkey != "" {
+		pttSpec = cfg.OverlayPTTHotkey
+	}
+	app.hotkeyPTTManager = hotkey.NewManager()
+	if err := app.hotkeyPTTManager.Register(
+		pttSpec,
+		app.hotkeyPTTPressCallback(),
+		app.hotkeyPTTReleaseCallback(),
+	); err != nil {
+		slog.Warn("overlay PTT hotkey: registration failed",
+			"spec", pttSpec, "err", err)
+		wailsruntime.EventsEmit(ctx, "overlay:hotkey_error", err.Error())
+		return
+	}
+	slog.Info("overlay PTT hotkey: registered", "spec", pttSpec)
 }

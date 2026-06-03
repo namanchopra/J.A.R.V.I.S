@@ -16,6 +16,55 @@ import (
 // communication. No authentication is required because the daemon runs on
 // the same machine.
 // ---------------------------------------------------------------------------
+//
+// PTT (push-to-talk) control frames — added by TASK-006 for the Mac overlay
+// hotkey flow (TASK-005).
+//
+// The Go bridge sends these frames to the daemon WS in response to global
+// hotkey events from internal/hotkey:
+//
+//	{ "type": "ptt_active"  } — sent on hotkey press;   opens daemon STT gate.
+//	{ "type": "ptt_release" } — sent on hotkey release; finalizes the turn.
+//
+// Both frames travel on the existing /ws/jarvis connection (no new endpoint).
+// The daemon side is implemented in scripts/jarvis-daemon/main.py
+// (_handle_ptt_active / _handle_ptt_release); it injects pipecat
+// UserStartedSpeakingFrame / UserStoppedSpeakingFrame into the live pipeline
+// so the LLM dispatch path is reused, not forked.
+//
+// Out-of-order frames (ptt_release without a prior ptt_active) are logged
+// and dropped by the daemon — they do NOT raise. A 5-second safety timeout
+// in the daemon force-closes a stuck "active" gate if no release arrives
+// (e.g. the user quits the app mid-hold).
+//
+// Callers: internal/hotkey/Manager invokes SendPTTActive / SendPTTRelease
+// via the App struct's overlay bindings. See app_overlay.go (TASK-005).
+//
+// ---------------------------------------------------------------------------
+// Meeting-mode system_audio frames — added by v0.3.0 meeting-mode TASK-005
+// alongside the overlay+PTT plumbing above.
+//
+// The Go bridge captures speakers / system-audio output via the macOS
+// ScreenCaptureKit wrapper (internal/screencapture, TASK-002/TASK-004) and
+// pushes each PCM chunk to the daemon WS as:
+//
+//	{ "type": "system_audio", "data": "<base64 PCM>" }
+//
+// data is base64-encoded 16-bit mono 16 kHz PCM matching
+// screencapture.CanonicalAudioFormat. The daemon handler
+// (scripts/jarvis-daemon/main.py:_handle_system_audio, TASK-006) decodes the
+// payload and injects it as a MobileAudioRawFrame-style frame into the
+// existing STT pipeline so meeting-mode transcripts include both the user's
+// mic AND the system audio output. Frames received while meeting mode is
+// inactive are silently dropped by the daemon — the Go side never enforces
+// that gate; the daemon is the source of truth for meeting lifecycle.
+//
+// Callers: app_meeting.go (TASK-005) wires the screencapture AudioCallback
+// directly to SendSystemAudioFrame; that callback fires on a serial dispatch
+// queue from the macOS bridge, NOT the Go main goroutine. SendSystemAudioFrame
+// inherits Send's per-conn mutex, so concurrent invocation from the dispatch
+// queue and other goroutines is safe.
+// ---------------------------------------------------------------------------
 
 // JarvisEventEmitter is called whenever the daemon sends state, transcript,
 // response, or audio_level messages. The implementation should forward these
@@ -63,6 +112,51 @@ func (d *JarvisDaemonConn) Connected() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.conn != nil
+}
+
+// SendPTTActive pushes a ``ptt_active`` control frame to the daemon WS,
+// signalling that the user pressed and is holding the global PTT hotkey.
+// The daemon opens its STT gate, transitions to the "listening" state, and
+// injects a UserStartedSpeakingFrame into the live pipecat pipeline.
+//
+// Returns an error only if the WS is disconnected (ErrJarvisDaemonNotConnected)
+// or the underlying JSON marshal / WriteMessage fails. Calling this on a stuck
+// "active" gate is safe — the daemon de-duplicates on its side and logs a
+// warning. See the contract comment block at the top of this file.
+func (d *JarvisDaemonConn) SendPTTActive() error {
+	return d.Send(map[string]string{"type": "ptt_active"})
+}
+
+// SendPTTRelease pushes a ``ptt_release`` control frame to the daemon WS,
+// signalling that the user released the global PTT hotkey. The daemon
+// closes its STT gate and injects a UserStoppedSpeakingFrame, which the
+// existing LLM-aggregator path picks up to dispatch the turn.
+//
+// Returns an error only if the WS is disconnected (ErrJarvisDaemonNotConnected)
+// or the underlying JSON marshal / WriteMessage fails. A release with no prior
+// active is logged and dropped by the daemon (failure case documented in
+// TASK-006); this helper does not attempt to track that locally — the daemon
+// is the source of truth for PTT lifecycle state.
+func (d *JarvisDaemonConn) SendPTTRelease() error {
+	return d.Send(map[string]string{"type": "ptt_release"})
+}
+
+// SendSystemAudioFrame pushes a system_audio control frame to the daemon
+// WS carrying base64-encoded PCM audio captured by the macOS
+// ScreenCaptureKit bridge (internal/screencapture). The daemon handler
+// (scripts/jarvis-daemon/main.py:_handle_system_audio) decodes the data
+// field and injects it as a MobileAudioRawFrame-style frame into the
+// existing STT pipeline so meeting-mode transcripts include both the
+// user's mic AND system audio output.
+//
+// data must be base64-encoded 16-bit mono 16 kHz PCM, matching
+// screencapture.CanonicalAudioFormat. The daemon will silently drop
+// frames received while meeting mode is not active.
+//
+// Returns ErrJarvisDaemonNotConnected if the WS is down or
+// the underlying Send fails (JSON marshal / WriteMessage).
+func (d *JarvisDaemonConn) SendSystemAudioFrame(data string) error {
+	return d.Send(map[string]string{"type": "system_audio", "data": data})
 }
 
 // set replaces the active connection. Any previously held connection is
@@ -236,6 +330,20 @@ func handleJarvisWS(c echo.Context, dc *JarvisDaemonConn, emitFn JarvisEventEmit
 			}
 			emitJarvisEvent(emitFn, payload)
 
+		case "meeting_notes_written":
+			// v0.3.0 meeting-mode TASK-009: the daemon emits this event
+			// once _dispatch_meeting_finalisation has written the markdown
+			// file. Forward the full payload (type / path / title /
+			// buffer_entries) to the Wails frontend AND to mobile clients
+			// via the wrapped emitter chain. The Wails-side App listens
+			// via the jarvisEmitFn registered in app.go:startMobileAPI to
+			// resolve the StopMeeting() binding's pending await.
+			var payload map[string]interface{}
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				payload = map[string]interface{}{"type": msg.Type}
+			}
+			emitJarvisEvent(emitFn, payload)
+
 		default:
 			logger.Warn("jarvis ws: unknown message type", "type", msg.Type)
 		}
@@ -271,13 +379,18 @@ func SetJarvisToolDispatcher(d ToolDispatcher) {
 func handleJarvisToolCall(ws *websocket.Conn, msg JarvisIncoming, logger *slog.Logger) {
 	logger.Info("jarvis ws: tool_call", "id", msg.ID, "name", msg.Name, "args", string(msg.Args))
 
-	var args map[string]interface{}
+	// The Python daemon sends args in two shapes:
+	//   - Jarvis intent tools (snake_case names like "approve_session"): JSON object {"name":"maya"}
+	//   - Wails-direct calls (CamelCase names from _call_wails): JSON array ["query string"]
+	// Try map first; on failure, decode as positional array and stuff into "_positional".
+	args := map[string]interface{}{}
 	if len(msg.Args) > 0 {
 		if err := json.Unmarshal(msg.Args, &args); err != nil {
-			args = map[string]interface{}{}
+			var posArgs []interface{}
+			if posErr := json.Unmarshal(msg.Args, &posArgs); posErr == nil {
+				args = map[string]interface{}{"_positional": posArgs}
+			}
 		}
-	} else {
-		args = map[string]interface{}{}
 	}
 
 	var resultData map[string]interface{}

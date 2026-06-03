@@ -1,0 +1,159 @@
+package macctl
+
+import (
+	"errors"
+	"os/exec"
+)
+
+// ErrNotImplemented is returned by stub methods until their real
+// implementation lands. Pinning the error type lets tests distinguish
+// "feature not built yet" from "real failure" without parsing strings.
+//
+// TASK-011..014 will replace each stub below with a real osascript /
+// exec invocation; until then this sentinel is the canonical signal
+// that a Controller method has not yet been wired up.
+var ErrNotImplemented = errors.New("macctl: not implemented")
+
+// ErrPolicyDeny is returned when a tool's policy decision is deny.
+// The caller MUST surface this as a user-facing message rather than
+// a generic failure (the daemon's tool executor knows how to render it
+// into a spoken response like "I'm not permitted to quit apps").
+var ErrPolicyDeny = errors.New("macctl: tool denied by policy")
+
+// ErrWindowNotFound is returned by FocusWindow when no window matches
+// the (app, title) pair. Distinguished from a generic osascript failure
+// so the caller can offer a "did you mean..." style fallback instead of
+// surfacing a raw AppleScript error.
+var ErrWindowNotFound = errors.New("macctl: window not found")
+
+// ErrToolUnavailable is returned when a required external tool
+// (e.g. the optional `brightness` CLI consumed by SetBrightness) is
+// not installed on the host. The Controller degrades gracefully — it
+// returns this typed error so callers can prompt the user to install
+// the missing dependency rather than reporting a generic exec failure.
+var ErrInvalidArg = errors.New("macctl: invalid argument")
+var ErrToolUnavailable = errors.New("macctl: required tool unavailable")
+
+// osascriptFn is a test seam — production passes a closure that shells
+// exec.Command("osascript", "-e", script). Tests substitute a recorder
+// so they can assert which scripts get issued without actually invoking
+// the real osascript binary (which would mutate the host's state).
+//
+// Kept unexported so callers outside the package cannot override it;
+// in-package tests swap c.osascript = recorder directly on the struct.
+type osascriptFn func(script string) (string, error)
+
+// defaultOsascript is the production osascript invoker. Shells out to
+// /usr/bin/osascript with a -e flag; returns the stdout as a string.
+// Errors from exec.Command are passed through verbatim — TASK-011..014
+// will add context-wrapping (fmt.Errorf("OpenApp: %w", err)) once they
+// inspect the failure mode for each tool.
+func defaultOsascript(script string) (string, error) {
+	out, err := exec.Command("osascript", "-e", script).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// Controller is the public façade for system-wide Mac control — app
+// launch/focus, audio/display tunables, clipboard I/O, screenshots,
+// and macOS Shortcuts invocation. Each method is a tool the Jarvis
+// daemon's LLM can call via the daemon ⇄ Wails tool bridge.
+//
+// The Controller does NOT enforce policy itself; it holds a reference
+// to a *Policy so subsequent tasks (TASK-011..014) can gate each
+// invocation through controller.policy.Check(toolName) and return
+// ErrPolicyDeny when denied.
+//
+// All 15 method stubs below return (zero, ErrNotImplemented). Real
+// implementations land in TASK-011..014.
+type Controller struct {
+	// policy is the persisted per-tool permission map. Nil is rejected
+	// by NewController; methods may assume policy != nil.
+	policy *Policy
+
+	// osascript is the test seam described above. Production callers
+	// receive defaultOsascript via NewController; tests overwrite it
+	// in-place with a recorder.
+	osascript osascriptFn
+}
+
+// NewController returns a Controller wired with the production osascript
+// invoker and the given policy. The policy argument is required — a nil
+// policy would silently allow every destructive tool, so callers must
+// pass NewDefaultPolicy() (or a Load()-restored *Policy) explicitly.
+//
+// Returning a pointer keeps the test seam mutable from in-package tests:
+//
+//	c := NewController(NewDefaultPolicy())
+//	c.osascript = recorder
+func NewController(policy *Policy) *Controller {
+	return &Controller{
+		policy:    policy,
+		osascript: defaultOsascript,
+	}
+}
+
+// Policy returns the *Policy this Controller was constructed with.
+//
+// Exposed so the Wails-side Settings UI (TASK-017) can read and mutate
+// the per-tool decisions without reaching into the unexported field via
+// reflection. Returning the pointer (rather than a snapshot) is by design:
+// the *Policy guards its own Decisions map with an RWMutex, so callers can
+// safely Snapshot / Set / Check across goroutines without coordinating
+// with the Controller. The Controller does not cache decisions, so a
+// change made via the returned *Policy takes effect on the very next
+// tool call.
+func (c *Controller) Policy() *Policy {
+	return c.policy
+}
+
+// --- Apps + windows (TASK-011) ---
+// Implementations live in apps.go (OpenApp, QuitApp) and windows.go
+// (FocusWindow).
+
+// --- Audio + display (TASK-012) ---
+
+// SetVolume sets the system output volume to pct (0..100). TASK-012 will
+// shell `osascript -e "set volume output volume <pct>"`. Values outside
+// 0..100 will be rejected with a typed error.
+
+// Mute sets the output-muted property to true. TASK-012 will use
+// `set volume with output muted`. Idempotent — muting a muted device
+// is a no-op.
+
+// Unmute sets the output-muted property to false. Counterpart to Mute.
+
+// SetBrightness sets the display brightness to pct (0..100). TASK-012
+// will shell the `brightness` CLI; if not installed it returns
+// ErrToolUnavailable rather than crashing.
+
+// ToggleDND toggles macOS Do Not Disturb. TASK-012 will route through
+// the built-in "Set Focus" Shortcuts.app shortcut to avoid private-API
+// danger (Apple removed the public defaults-write recipe in Monterey).
+
+// --- Files + clipboard + screenshots (TASK-013) ---
+
+// OpenPath shells `open <path>`. Handles both filesystem paths and URLs
+// (the `open` command treats both uniformly). TASK-013 will surface a
+// clear error if the path doesn't exist rather than letting `open`
+// silently succeed.
+
+// Spotlight runs `mdfind <query>` and returns up to 20 matching paths,
+// newline-separated. Read-only by policy default.
+
+// Screenshot shells `screencapture` with the appropriate flag for the
+// target. Valid targets: "screen" (full), "window" (interactive window
+// picker), "selection" (drag rectangle). TASK-013 will write the output
+// to ~/.jarvis/screenshots/<timestamp>.png and return the file path.
+
+// ClipboardGet shells `pbpaste` and returns the current clipboard text.
+// Returns "" + nil when the clipboard is empty (not an error condition).
+
+// ClipboardSet shells `pbcopy` and writes text to the clipboard.
+// Destructive (overwrites whatever the user had copied); gated on
+// policy.Check("mac_clipboard_set").
+
+// --- Shortcuts (TASK-014) ---
+// Implementations live in shortcuts.go (ListShortcuts, RunShortcut).

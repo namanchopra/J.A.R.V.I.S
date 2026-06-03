@@ -126,6 +126,29 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Copy bundled Shortcuts.app exports (TASK-016)
+#
+# These are the .shortcut files + manifest.json that the first-run installer
+# (JarvisInstallBundledShortcuts, see app_shortcuts_installer.go) imports via
+# `shortcuts import` on macOS. Files starting with JARVIS_PLACEHOLDER_SHORTCUT
+# are skipped by the installer; real Shortcuts.app exports go in over them.
+# ---------------------------------------------------------------------------
+if [[ -d "${REPO_ROOT}/build/shortcuts" ]]; then
+    DEST="${RESOURCES}/shortcuts"
+    if command -v rsync >/dev/null 2>&1; then
+        echo "post-build: rsync build/shortcuts/ -> Resources/shortcuts/"
+        rsync -a --delete "${REPO_ROOT}/build/shortcuts/" "${DEST}/"
+    else
+        echo "post-build: cp -R build/shortcuts/ -> Resources/shortcuts/"
+        rm -rf "${DEST}"
+        mkdir -p "${DEST}"
+        cp -R "${REPO_ROOT}/build/shortcuts/." "${DEST}/"
+    fi
+else
+    echo "post-build: WARN: build/shortcuts/ not found; skipping bundled-shortcuts copy" >&2
+fi
+
+# ---------------------------------------------------------------------------
 # Codesign the ENTIRE .app bundle LAST (after all resources are in place).
 # Must be the final step — any file change after this invalidates the seal.
 # ---------------------------------------------------------------------------

@@ -21,15 +21,18 @@ import (
 	"github.com/namanchopra/jarvis/internal/claude"
 	"github.com/namanchopra/jarvis/internal/cmux"
 	"github.com/namanchopra/jarvis/internal/config"
+	"github.com/namanchopra/jarvis/internal/hotkey"
 	"github.com/namanchopra/jarvis/internal/impact"
 	"github.com/namanchopra/jarvis/internal/discovery"
 	"github.com/namanchopra/jarvis/internal/nlquery"
 	"github.com/namanchopra/jarvis/internal/git"
+	"github.com/namanchopra/jarvis/internal/macctl"
 	"github.com/namanchopra/jarvis/internal/model"
 	"github.com/namanchopra/jarvis/internal/notify"
 	"github.com/namanchopra/jarvis/internal/paths"
 	"github.com/namanchopra/jarvis/internal/recording"
 	"github.com/namanchopra/jarvis/internal/scanner"
+	"github.com/namanchopra/jarvis/internal/screencapture"
 	"github.com/namanchopra/jarvis/internal/store"
 	"github.com/namanchopra/jarvis/internal/terminal"
 	"github.com/namanchopra/jarvis/internal/jarvis"
@@ -65,6 +68,13 @@ type App struct {
 	jarvisProcess  *os.Process
 	jarvisRestarts int
 	jarvisMu       sync.Mutex
+	// jarvisGeneration bumps on every successful StartJarvis. The
+	// monitorJarvisDaemon goroutine captures the value at launch time and
+	// only restarts on unexpected exit if the generation still matches --
+	// otherwise it knows another StartJarvis has already happened (e.g.
+	// from RestartJarvis) and the new daemon has taken its place, so this
+	// stale monitor must NOT spawn yet another one. Guarded by jarvisMu.
+	jarvisGeneration uint64
 
 	// apiServer is the mobile API HTTP server. May be nil if startup fails.
 	apiServer *api.Server
@@ -78,6 +88,62 @@ type App struct {
 	// Cached for 60s to avoid log spam from sessions without CMux workspaces.
 	approvalFailCache map[int]time.Time
 	approvalFailMu    sync.RWMutex
+
+	// macctlOnce + macctlController back the lazy macctl.Controller singleton
+	// returned by App.macctl(). The Controller is constructed once on first
+	// use (rather than in NewApp) so policy file I/O failures don't break
+	// startup -- a Wails call that never uses macctl shouldn't pay the cost
+	// of reading ~/.jarvis/policy.json. See app_macctl.go for the accessor.
+	macctlOnce       sync.Once
+	macctlController *macctl.Controller
+
+	// overlayMu guards overlayState. The overlay state is the saved size +
+	// position + fullscreen flag captured by OverlayShow so OverlayHide can
+	// restore the main window to its prior geometry. See app_overlay.go
+	// (v0.3.0 TASK-004) for the struct definition and the three bindings
+	// (OverlayShow / OverlayHide / OverlayToggle) that read & mutate this
+	// field. The zero value of overlayState means "no saved geometry" --
+	// OverlayHide treats that as a soft no-op (logs a warning, returns nil).
+	overlayMu    sync.Mutex
+	overlayState overlayGeometry
+
+	// hotkeyManager owns the OVERLAY-TOGGLE global hotkey lifecycle.
+	// Default binding: alt+space. Press once to show the overlay; press
+	// again to hide. Created on the macOS main thread in main.go's
+	// OnStartup. nil if startup never wired it -- Wails bindings guard on
+	// nil so a degraded startup doesn't crash. Released in OnShutdown.
+	hotkeyManager *hotkey.Manager
+
+	// hotkeyPTTManager owns the global PUSH-TO-TALK hotkey lifecycle.
+	// Default binding: ctrl+space. Press-and-hold to start a turn (mic
+	// opens + overlay appears); release to send. Works from any app, no
+	// overlay-window focus required. Same construction/teardown rules as
+	// hotkeyManager above.
+	hotkeyPTTManager *hotkey.Manager
+
+	// meetingCapturer owns the ScreenCaptureKit lifecycle while a meeting
+	// is active. nil before the first start. Constructed lazily on the
+	// first startMeetingCapture() call; left in place across stop/start
+	// cycles (the Capturer itself is reusable per its TASK-004 contract).
+	// TASK-009's StartMeeting/StopMeeting Wails bindings drive this via
+	// the app_meeting.go helpers.
+	meetingCapturer screencapture.Capturer
+
+	// meetingMu guards meetingActive and the meetingCapturer field. The
+	// SCK callback fires on a serial dispatch queue (NOT the Go main
+	// goroutine) -- meetingActive is consulted there to drop post-stop
+	// frames; meetingCapturer is read/written from the binding methods.
+	meetingMu     sync.Mutex
+	meetingActive bool
+
+	// meetingNotesCh receives the markdown file path emitted by the
+	// daemon's ``meeting_notes_written`` WS event (see TASK-007 in
+	// scripts/jarvis-daemon/main.py:_dispatch_meeting_finalisation).
+	// StopMeeting() (TASK-009) blocks on this channel with a 30s
+	// timeout to return the path to the caller. Buffered 1 so the
+	// daemon-event emitter never blocks even if no one is awaiting --
+	// stale notifications are simply dropped on the next push.
+	meetingNotesCh chan string
 }
 
 // NewApp creates a new App with the given Store, optional Scanner, optional
@@ -91,6 +157,11 @@ func NewApp(s *store.Store, sc *scanner.Scanner, sm *agent.SessionManager, cc *c
 		termMgr:        tm,
 		activeWatchers:    make(map[string]context.CancelFunc),
 		approvalFailCache: make(map[int]time.Time),
+		// meetingNotesCh is buffered 1 so the daemon WS event handler
+		// can push the path without blocking even when StopMeeting()
+		// is not currently awaiting. The drop-on-full pattern is
+		// applied at the push site (app.go:startMobileAPI emitter).
+		meetingNotesCh: make(chan string, 1),
 	}
 }
 
@@ -212,11 +283,27 @@ func (a *App) startMobileAPI() {
 	srv := api.New(cfg.MobileAPIPort, cfg.MobileAPIToken)
 
 	// Jarvis daemon events are forwarded to the Wails frontend via EventsEmit.
+	// We also peek at the event to route the v0.3.0 meeting-mode
+	// ``meeting_notes_written`` notification onto a.meetingNotesCh so the
+	// StopMeeting() binding (TASK-009) can resolve. The forward-to-frontend
+	// path is unchanged for every other event type.
 	jarvisEmitFn := api.JarvisEventEmitter(func(event interface{}) {
+		if payload, ok := event.(map[string]interface{}); ok {
+			if t, _ := payload["type"].(string); t == "meeting_notes_written" {
+				path, _ := payload["path"].(string)
+				select {
+				case a.meetingNotesCh <- path:
+				default:
+					// Channel full -- previous notification not consumed.
+					// Drop rather than block the daemon WS read loop.
+					slog.Warn("meeting_notes_written: dropping (channel full)", "path", path)
+				}
+			}
+		}
 		runtime.EventsEmit(a.ctx, "jarvis", event)
 	})
 
-	srv.WireRoutes(a, a, a, a, a, a, a, a, a.resolveProjectPath, jarvisEmitFn)
+	srv.WireRoutes(a, a, a, a, a, a, a, a, a.resolveProjectPath, jarvisEmitFn, a, a)
 	if err := srv.Start(); err != nil {
 		slog.Warn("mobile API: server failed to start", "err", err)
 		return
@@ -3153,4 +3240,12 @@ func (a *App) ExecuteWorkflow(phases []WorkflowPhase) error {
 		})
 	}
 	return nil
+}
+
+// GetNextCalendarEvent satisfies api.StatsProvider for the mobile
+// stats broadcaster. Delegates straight to GoogleCalendarGetNextEvent
+// — the 60s in-memory cache in app_gcal.go ensures the 5s broadcaster
+// tick doesn't hammer the Calendar API.
+func (a *App) GetNextCalendarEvent() (*model.NextEventSnapshot, error) {
+	return a.GoogleCalendarGetNextEvent()
 }

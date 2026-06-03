@@ -464,17 +464,38 @@ class ToolBridge:
             logger.exception("Tool execution failed: %s", name)
             return {"ok": False, "error": str(e)}
 
-    def register_with_pipecat(self, llm_service: Any) -> None:
+    def register_with_pipecat(
+        self, llm_service: Any, tool_executor: Any = None
+    ) -> None:
         """Register all tool handlers with a Pipecat AnthropicLLMService.
 
         Pipecat uses ``llm.register_function(name, handler)`` to wire up
         tool call execution.
+
+        ``tool_executor`` is the ``tools.ToolExecutor`` used to dispatch
+        any tools declared only in ``tools.py:TOOL_DEFINITIONS`` (spotify_*,
+        mac_*). Without it, those tools end up in the advertised LLM schema
+        with no handler registered, and Pipecat rejects the call at runtime
+        with "tool X has no registered handler".
         """
         all_tools = set(GO_TOOLS) | set(LOCAL_TOOLS)
 
         if self._mcp:
             for tool in self._mcp.get_all_tools():
                 all_tools.add(tool["name"])
+
+        # Pull in spotify_*/mac_*/etc. from tools.py so they get handlers
+        # too. These dispatch via ToolExecutor.execute, not handle_tool_call.
+        executor_tools: set[str] = set()
+        if tool_executor is not None:
+            try:
+                from tools import TOOL_DEFINITIONS as _EXTRA_DEFS
+                for defn in _EXTRA_DEFS:
+                    nm = defn.get("name")
+                    if nm and nm not in all_tools:
+                        executor_tools.add(nm)
+            except ImportError:
+                logger.debug("tools.py not importable — skipping executor tools")
 
         for tool_name in all_tools:
             # Pipecat 1.0 passes FunctionCallParams as the first arg to handlers.
@@ -501,7 +522,44 @@ class ToolBridge:
             except Exception:
                 logger.debug("Failed to register tool %s with Pipecat", tool_name)
 
-        logger.info("Registered %d tools with Pipecat LLM service", len(all_tools))
+        # Register tools.py-only tools (spotify_*/mac_*) with a handler that
+        # dispatches through ToolExecutor.execute. Same FunctionCallParams
+        # unwrapping pattern as above.
+        for tool_name in executor_tools:
+            async def _exec_handler(
+                params, _tn: str = tool_name, _exec: Any = tool_executor
+            ) -> Any:
+                if hasattr(params, "function_name"):
+                    name = params.function_name
+                    args = params.arguments or {}
+                elif hasattr(params, "name"):
+                    name = params.name
+                    args = getattr(params, "arguments", {}) or {}
+                else:
+                    name = _tn
+                    args = params if isinstance(params, dict) else {}
+                logger.info("Tool call (executor): %s(%s)", name, str(args)[:80])
+                try:
+                    result = await _exec.execute(name, args)
+                except Exception as exc:
+                    logger.exception("Executor tool failed: %s", name)
+                    result = {"ok": False, "error": str(exc)}
+                if hasattr(params, "result_callback") and params.result_callback:
+                    await params.result_callback(result)
+                return result
+
+            try:
+                llm_service.register_function(tool_name, _exec_handler)
+            except Exception:
+                logger.debug(
+                    "Failed to register executor tool %s with Pipecat", tool_name
+                )
+
+        total = len(all_tools) + len(executor_tools)
+        logger.info(
+            "Registered %d tools with Pipecat LLM service (%d via bridge, %d via executor)",
+            total, len(all_tools), len(executor_tools),
+        )
 
 
 # ---------------------------------------------------------------------------
