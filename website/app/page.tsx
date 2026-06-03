@@ -19,6 +19,10 @@ const RELEASES_URL = `${REPO_URL}/releases/latest`
 // tag ships; `fetchLatestVersion` will override it on every cache miss.
 const FALLBACK_VERSION = '0.3.0'
 
+// v0.3.0 is the current release — overlay widget + Google Calendar +
+// meeting mode + recall tools + Friday dashboard redesign on top of the
+// originally scoped Spotify + Mac control + Friday mobile companion.
+
 /** Latest release tag (e.g. "0.2.12"), fetched at request time. */
 async function fetchLatestVersion(): Promise<string> {
   try {
@@ -305,7 +309,22 @@ const FEATURES: Feature[] = [
   {
     glyph: '◎',
     title: 'Friday phone companion.',
-    body: 'Press-and-hold the orb on your phone to talk to the Mac\'s Jarvis. Audio streams over WebSocket; the brain stays on your Mac. Distributed via Expo Go — install the app, scan a QR, done. No App Store, no developer signing.',
+    body: 'Press-and-hold the orb on your phone to talk to the Mac\'s Jarvis. Audio streams over WebSocket; the brain stays on your Mac. Calendar chip + next-event tile on the home screen. Distributed via Expo Go — install the app, scan a QR, done. No App Store, no developer signing.',
+  },
+  {
+    glyph: '◐',
+    title: 'Overlay widget.',
+    body: 'Frameless 320×420 always-on-top panel. Toggle with ⌥+Space from anywhere; talk via push-to-talk without leaving your editor. Dedicated ⌃+Space global PTT also works without the overlay visible. Five-icon control row: mute, PTT, interrupt, meeting record, back-to-main.',
+  },
+  {
+    glyph: '⌖',
+    title: 'Google Calendar.',
+    body: 'Next event in the HUD, on Friday, and in the bottom stat row. 2 minutes before a meeting on your calendar matching keywords like "sync" or "1:1", a banner asks if you want Jarvis to start taking notes. One tap, no setup.',
+  },
+  {
+    glyph: '●',
+    title: 'Meeting mode.',
+    body: 'Captures both your mic and your Mac\'s system audio via ScreenCaptureKit. Suppresses Jarvis\'s voice so it doesn\'t talk over the room. On stop, writes a Markdown file with summary, key points, action items, and raw transcript — and speaks a 2-sentence recap. Ask "Jarvis, what were the action items?" and it reads them back to you.',
   },
   {
     glyph: '✦',
@@ -352,7 +371,11 @@ const INSTALL_STEPS = [
     body: 'A short modal walks you through choosing an LLM provider (or local Ollama), pasting an API key if applicable, and previewing a voice. Say "Hey Jarvis" to begin.',
   },
   {
-    title: 'Open https://jarvis.namanchopra.dev/friday on your computer to install Friday on your phone (optional).',
-    body: 'Friday is the v0.3 phone companion — press-and-hold the orb to talk to your Mac\'s Jarvis from anywhere on the same Wi-Fi. Install Expo Go from the App Store, scan the QR on the /friday page, then pair via Settings → Connections → "Connect Friday phone" in Jarvis.',
+    title: 'Install Friday on your phone (optional).',
+    body: 'Friday is the v0.3 phone companion — press-and-hold the orb to talk to your Mac\'s Jarvis from anywhere on the same Wi-Fi. Open https://jarvis.namanchopra.dev/friday for the full setup walkthrough: install Expo Go, scan the project QR, then pair via Settings → Connections → "Connect Friday phone" in Jarvis. Android users can also sideload a signed APK from the GitHub release.',
+  },
+  {
+    title: 'Grant Screen Recording (only if you want meeting mode).',
+    body: 'System Settings → Privacy & Security → Screen Recording → enable Jarvis. Required for the meeting mode feature to capture system audio (the people on the call). Mic-only recording works without it on macOS 12 and below.',
   },
 ]
