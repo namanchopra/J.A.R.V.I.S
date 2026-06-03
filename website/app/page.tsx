@@ -94,6 +94,12 @@ export default async function Page() {
             >
               Docs
             </a>
+            <a
+              href="/friday"
+              className="hidden sm:inline label-mono hover:text-jarvis-cyan-bright transition-colors"
+            >
+              Friday
+            </a>
             <StarButton />
             <a href={RELEASES_URL} className="jarvis-btn-primary">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -257,14 +263,23 @@ export default async function Page() {
                 The DMG ships at ~35 MB. On first launch a full-screen progress UI installs a portable Python runtime + daemon venv into <code className="text-jarvis-cyan">~/.jarvis/</code> and fetches ~2.4 GB of VibeVoice + Whisper weights to <code className="text-jarvis-cyan">~/.cache/huggingface/</code> — ~10–15 min, one time. After first launch, Jarvis runs fully offline except your chosen cloud LLM.
               </p>
             </div>
-            <a href={dmgUrl} className="jarvis-btn-primary">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 3v12" />
-                <path d="m6 9 6 6 6-6" />
-                <path d="M5 21h14" />
-              </svg>
-              <span>Get the DMG</span>
-            </a>
+            <div className="flex flex-wrap gap-3">
+              <a href={dmgUrl} className="jarvis-btn-primary">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="m6 9 6 6 6-6" />
+                  <path d="M5 21h14" />
+                </svg>
+                <span>Get the DMG</span>
+              </a>
+              <a href="/friday" className="jarvis-btn-primary">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="7" y="2" width="10" height="20" rx="2" />
+                  <path d="M11 18h2" />
+                </svg>
+                <span>Get Friday (phone)</span>
+              </a>
+            </div>
           </div>
         </div>
       </section>
@@ -277,6 +292,7 @@ export default async function Page() {
             <span>J.A.R.V.I.S. · APACHE-2.0 · STATUS: PUBLIC ALPHA</span>
           </div>
           <div className="flex items-center gap-5">
+            <a href="/friday" className="hover:text-jarvis-cyan transition-colors">FRIDAY</a>
             <a href={REPO_URL} target="_blank" rel="noreferrer noopener" className="hover:text-jarvis-cyan transition-colors">GITHUB</a>
             <a href={RELEASES_URL} target="_blank" rel="noreferrer noopener" className="hover:text-jarvis-cyan transition-colors">RELEASES</a>
             <a href={`${REPO_URL}/issues`} target="_blank" rel="noreferrer noopener" className="hover:text-jarvis-cyan transition-colors">ISSUES</a>
