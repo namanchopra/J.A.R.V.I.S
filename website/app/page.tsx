@@ -23,23 +23,50 @@ const FALLBACK_VERSION = '0.3.0'
 // meeting mode + recall tools + Friday dashboard redesign on top of the
 // originally scoped Spotify + Mac control + Friday mobile companion.
 
-/** Latest release tag (e.g. "0.2.12"), fetched at request time. */
+/**
+ * Compare two semver strings (no pre-release tags). Returns 1 if a > b,
+ * -1 if a < b, 0 if equal. Kept simple — the codebase only ships
+ * MAJOR.MINOR.PATCH tags, no -beta / -rc suffixes.
+ */
+function semverCompare(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0)
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return 1
+    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return -1
+  }
+  return 0
+}
+
+/**
+ * Latest visible version. Prefers FALLBACK_VERSION when GitHub's
+ * /releases/latest endpoint returns an OLDER tag — this happens during
+ * the window between a tag push and `gh release create` finishing
+ * inside release.yml (~30-40 min for the notarize + DMG build). Without
+ * this guard the homepage shows the previous version until the workflow
+ * completes; with it, bumping FALLBACK_VERSION before tagging makes the
+ * site show the new version immediately.
+ *
+ * Once release.yml publishes and the GitHub API returns >= FALLBACK,
+ * the live GitHub answer wins (and continues to win on future patch
+ * releases until someone bumps FALLBACK again).
+ */
 async function fetchLatestVersion(): Promise<string> {
   try {
     const res = await fetch(
       'https://api.github.com/repos/namanchopra/J.A.R.V.I.S/releases/latest',
       {
         headers: { Accept: 'application/vnd.github+json' },
-        // Short revalidate so a new tag is reflected on the site within
-        // a minute of publish, without hitting GitHub's API on every
-        // request from every visitor.
         next: { revalidate: 60 },
       },
     )
     if (!res.ok) return FALLBACK_VERSION
     const data = (await res.json()) as { tag_name?: string }
-    // GitHub returns tag like "v0.2.12"; strip the leading v.
-    return data.tag_name?.replace(/^v/, '') ?? FALLBACK_VERSION
+    const apiVersion = data.tag_name?.replace(/^v/, '')
+    if (!apiVersion) return FALLBACK_VERSION
+    // Whichever is newer wins. During the release.yml build window the
+    // FALLBACK is ahead; once published the API catches up and stays so.
+    return semverCompare(apiVersion, FALLBACK_VERSION) >= 0 ? apiVersion : FALLBACK_VERSION
   } catch {
     return FALLBACK_VERSION
   }
