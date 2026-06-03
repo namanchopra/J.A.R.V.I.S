@@ -39,6 +39,7 @@ import {
   View,
 } from 'react-native'
 import { useRouter } from 'expo-router'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { colors, fontFamilies, spacing } from '../lib/hud-tokens'
 import {
@@ -69,6 +70,11 @@ const PING_PATH = '/ping'
 
 export default function SettingsScreen(): React.ReactElement {
   const router = useRouter()
+  // Safe-area insets: settings is a regular scroll view, so we feed
+  // paddingTop/paddingBottom directly into the contentContainerStyle so
+  // the first row clears the Dynamic Island and the back button clears
+  // the home indicator.
+  const insets = useSafeAreaInsets()
   const [conn, setConn] = useState<ConnState>('unknown')
   const [latencyMs, setLatencyMs] = useState<number | null>(null)
   // Pairing payload loaded from SecureStore. `undefined` = still loading,
@@ -162,7 +168,18 @@ export default function SettingsScreen(): React.ReactElement {
   return (
     <ScrollView
       style={styles.container}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[
+        styles.content,
+        // Inline overrides win over styles.content.paddingTop /
+        // paddingBottom. The original `content.paddingTop` had a
+        // hard-coded `+20` fudge for the status bar; useSafeAreaInsets
+        // replaces that with the accurate per-device value (Dynamic
+        // Island vs notch vs no notch all differ).
+        {
+          paddingTop: insets.top + spacing.lg,
+          paddingBottom: insets.bottom + spacing.lg,
+        },
+      ]}
       testID="settings-scroll"
     >
       <Text style={styles.title}>FRIDAY ↗ SETTINGS</Text>

@@ -25,6 +25,7 @@ import {
   Text,
   View,
 } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import { colors, fontFamilies, spacing } from '../lib/hud-tokens'
 import { parsePairingQR, savePairing } from '../lib/pairing'
@@ -47,6 +48,12 @@ const SCAN_COOLDOWN_MS = 1500
 export default function PairScreen(): React.ReactElement {
   const router = useRouter()
   const [permission, requestPermission] = useCameraPermissions()
+  // Safe-area insets: pair screen renders full-bleed camera + chrome over
+  // it (header, viewfinder, footer, toast). Without insets the header
+  // sits under the iPhone notch / Dynamic Island. We apply them via
+  // padding on the root container so the absolutely-positioned chrome
+  // children inherit the safe area through their own offsets.
+  const insets = useSafeAreaInsets()
 
   // Toast state: `null` = no toast. Stored as a string so we can change the
   // message on subsequent failures (e.g. "Invalid QR" vs "Save failed").
@@ -101,7 +108,13 @@ export default function PairScreen(): React.ReactElement {
   // resolves to denied/granted we route accordingly.
   if (!permission) {
     return (
-      <View style={styles.container} testID="pair-loading">
+      <View
+        style={[
+          styles.container,
+          { paddingTop: insets.top, paddingBottom: insets.bottom },
+        ]}
+        testID="pair-loading"
+      >
         <Text style={styles.footerDim}>REQUESTING CAMERA…</Text>
       </View>
     )
@@ -109,7 +122,13 @@ export default function PairScreen(): React.ReactElement {
 
   if (!permission.granted) {
     return (
-      <View style={styles.container} testID="pair-permission-gate">
+      <View
+        style={[
+          styles.container,
+          { paddingTop: insets.top, paddingBottom: insets.bottom },
+        ]}
+        testID="pair-permission-gate"
+      >
         <Text style={styles.title}>FRIDAY :: PAIRING</Text>
         <Text style={styles.bodyDim}>
           Camera access is required to scan the pairing QR from your Mac.
@@ -129,6 +148,12 @@ export default function PairScreen(): React.ReactElement {
   }
 
   // ---- Render --------------------------------------------------------
+  // The camera scan branch is full-bleed (CameraView fills the screen),
+  // so we can NOT apply paddingTop/paddingBottom on the root -- that
+  // would shrink the camera viewport and break the QR scan. Instead we
+  // shift the chrome (header, footer, toast) by the safe-area inset
+  // values via inline offsets so they clear the notch / home indicator
+  // without affecting the camera feed.
 
   return (
     <View style={styles.container} testID="pair-screen">
@@ -155,21 +180,44 @@ export default function PairScreen(): React.ReactElement {
         </View>
       </View>
 
-      {/* Top header label -- matches OrbView corner label style */}
-      <View style={styles.header} pointerEvents="none">
+      {/* Top header label -- matches OrbView corner label style. The
+          base top offset (spacing.xxl + spacing.lg = 48) is added to
+          insets.top so the header clears the iPhone notch. */}
+      <View
+        style={[
+          styles.header,
+          { top: insets.top + spacing.lg },
+        ]}
+        pointerEvents="none"
+      >
         <Text style={styles.headerTitle}>FRIDAY :: PAIRING</Text>
       </View>
 
-      {/* Footer instruction in dim cyan monospace */}
-      <View style={styles.footer} pointerEvents="none">
+      {/* Footer instruction in dim cyan monospace, lifted above the
+          home indicator. */}
+      <View
+        style={[
+          styles.footer,
+          { bottom: insets.bottom + spacing.xl },
+        ]}
+        pointerEvents="none"
+      >
         <Text style={styles.footerDim}>
           POINT CAMERA AT QR FROM JARVIS SETTINGS
         </Text>
       </View>
 
-      {/* Error toast (inline, not a Modal -- avoids stealing focus) */}
+      {/* Error toast (inline, not a Modal -- avoids stealing focus).
+          Bottom offset is lifted further so the toast sits ABOVE the
+          footer regardless of inset depth. */}
       {toast ? (
-        <View style={styles.toast} testID="pair-toast">
+        <View
+          style={[
+            styles.toast,
+            { bottom: insets.bottom + spacing.xxl * 2 },
+          ]}
+          testID="pair-toast"
+        >
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       ) : null}

@@ -27,6 +27,42 @@
 
 import { loadPairing } from './pairing'
 
+// ---- Base64 helper -------------------------------------------------------
+// Hermes exposes a global `atob`, but tests run under Vitest where `atob`
+// is also present (Node 20+). Falling back to a manual decode keeps the
+// module portable to any environment we might lift it into. Internal-only;
+// not exported.
+
+const B64_ALPHABET =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+function decodeBase64ToUint8(b64: string): Uint8Array {
+  const g = globalThis as { atob?: (s: string) => string }
+  if (typeof g.atob === 'function') {
+    const bin = g.atob(b64)
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 0xff
+    return out
+  }
+  // Manual decode (vanilla loop, no Buffer dep -- RN doesn't ship Buffer).
+  const cleaned = b64.replace(/[^A-Za-z0-9+/=]/g, '')
+  const padded = cleaned.replace(/=+$/, '')
+  const outLen = (padded.length * 3) >> 2
+  const out = new Uint8Array(outLen)
+  let oi = 0
+  for (let i = 0; i < padded.length; i += 4) {
+    const c0 = B64_ALPHABET.indexOf(padded.charAt(i))
+    const c1 = B64_ALPHABET.indexOf(padded.charAt(i + 1))
+    const c2 = B64_ALPHABET.indexOf(padded.charAt(i + 2))
+    const c3 = B64_ALPHABET.indexOf(padded.charAt(i + 3))
+    const triplet = (c0 << 18) | (c1 << 12) | ((c2 & 63) << 6) | (c3 & 63)
+    out[oi++] = (triplet >> 16) & 0xff
+    if (i + 2 < padded.length) out[oi++] = (triplet >> 8) & 0xff
+    if (i + 3 < padded.length) out[oi++] = triplet & 0xff
+  }
+  return out
+}
+
 // ---- Public types --------------------------------------------------------
 
 export type WSState = 'disconnected' | 'connecting' | 'connected' | 'error'
@@ -48,10 +84,63 @@ export interface JarvisWSEvents {
   transcript: (payload: { role: 'user' | 'assistant'; text: string }) => void
   /** TTS RMS level in [0..1] for the orb's ring animation. */
   ttsAudioLevel: (level: number) => void
-  /** A single binary TTS chunk. The AudioPlayer (TASK-026) will append these. */
-  ttsAudioChunk: (chunk: Uint8Array) => void
+  /**
+   * A single TTS audio chunk. `sampleRate` is the daemon-advertised rate
+   * for the chunk (currently 16kHz from MacOSSayTTSService); when absent
+   * the chunk came in as a raw binary frame and callers should assume the
+   * default 16kHz. Subscribers must adapt their player's sample rate to
+   * match, otherwise playback will be slowed/sped.
+   */
+  ttsAudioChunk: (chunk: Uint8Array, sampleRate?: number) => void
+  /**
+   * Periodic dashboard snapshot pushed by the Go server. Replaces REST
+   * polling because Expo Go on the latest SDK no longer auto-bypasses iOS
+   * App Transport Security for plain http:// fetches.
+   */
+  statsSnapshot: (stats: StatsSnapshot) => void
   /** Low-level transport error -- logged + surfaced to the connection UI. */
   error: (err: Error) => void
+}
+
+/**
+ * Shape of the ``stats_snapshot`` WS message payload. Mirrors MobileStats in
+ * internal/api/handlers_jarvis_mobile_ws.go -- keep field names in lockstep.
+ */
+export interface StatsSnapshot {
+  activeSessions: number
+  pendingApprovals: number
+  runningTasks: number
+  eventsToday: number
+  latestActivity: string
+  /**
+   * Next upcoming Google Calendar event, or null when none is queued
+   * (calendar empty, not connected, or upstream error). The server
+   * omits the field from the payload in those cases; we coerce missing
+   * to `null` so consumers can use a single null-check.
+   */
+  nextEvent: NextEventSnapshot | null
+}
+
+export interface NextEventSnapshot {
+  title: string
+  startIso: string
+  relativeTime: string
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function coerceNextEvent(raw: unknown): NextEventSnapshot | null {
+  if (!raw || typeof raw !== 'object') return null
+  const obj = raw as Record<string, unknown>
+  const title = typeof obj.title === 'string' ? obj.title : ''
+  const startIso = typeof obj.startIso === 'string' ? obj.startIso : ''
+  const relativeTime = typeof obj.relativeTime === 'string' ? obj.relativeTime : ''
+  // If every field is empty after coercion the payload was malformed --
+  // treat as no-event rather than rendering an empty tile.
+  if (!title && !startIso && !relativeTime) return null
+  return { title, startIso, relativeTime }
 }
 
 // ---- Implementation ------------------------------------------------------
@@ -128,6 +217,22 @@ export class JarvisWS {
    * Throws (and emits `error`) if the device is not yet paired.
    */
   async connect(): Promise<void> {
+    // Idempotent: if a socket is already open or being opened, don't start
+    // a second one. The FridayRoot effect re-runs under React StrictMode
+    // and Expo's Fast Refresh -- without this guard each remount would
+    // race a second WebSocket onto the daemon, producing the duplicate
+    // `mobile client connected` lines + backoff flapping observed on Mac.
+    if (this.ws) {
+      if (
+        this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING
+      ) {
+        // Re-arm in case a prior explicit disconnect set it; the open
+        // socket is still fine.
+        this.explicitlyDisconnected = false
+        return
+      }
+    }
     const pairing = await loadPairing()
     if (!pairing) {
       const err = new Error('Not paired')
@@ -166,10 +271,20 @@ export class JarvisWS {
    * branch only fires on race conditions during reconnect.
    */
   sendAudio(chunk: Uint8Array): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    const rs = this.ws ? this.ws.readyState : -1
+    console.log('[JarvisWS] sendAudio called', {
+      bytes: chunk.byteLength,
+      readyState: rs,
+      open: rs === WebSocket.OPEN,
+    })
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.warn('[JarvisWS] sendAudio DROPPED -- socket not OPEN', { readyState: rs })
+      return
+    }
     // RN's WebSocket.send accepts ArrayBufferView directly; passing the
     // Uint8Array as-is is the canonical form.
     this.ws.send(chunk)
+    console.log('[JarvisWS] sendAudio: bytes sent to ws')
   }
 
   /**
@@ -246,6 +361,44 @@ export class JarvisWS {
         if (typeof level === 'number') {
           this.emit('ttsAudioLevel', level)
         }
+        return
+      }
+      if (type === 'stats_snapshot') {
+        const raw = msg.stats as Record<string, unknown> | undefined
+        console.log('[JarvisWS] stats_snapshot received', { raw })
+        if (raw && typeof raw === 'object') {
+          // Coerce defensively -- bad JSON from a future server version
+          // shouldn't break the home screen.
+          const snap: StatsSnapshot = {
+            activeSessions: numberOr(raw.activeSessions, 0),
+            pendingApprovals: numberOr(raw.pendingApprovals, 0),
+            runningTasks: numberOr(raw.runningTasks, 0),
+            eventsToday: numberOr(raw.eventsToday, 0),
+            latestActivity:
+              typeof raw.latestActivity === 'string' ? raw.latestActivity : '',
+            nextEvent: coerceNextEvent(raw.nextEvent),
+          }
+          this.emit('statsSnapshot', snap)
+        }
+        return
+      }
+      if (type === 'mobile_tts') {
+        // The daemon ships PCM as base64 inside a JSON envelope (not a raw
+        // binary frame) so the Go bridge can broadcast through its
+        // text-message path. Decode here and fan out as ttsAudioChunk so
+        // the AudioPlayer subscriber doesn't need to know the wire format.
+        const dataB64 = msg.data
+        if (typeof dataB64 !== 'string' || dataB64.length === 0) return
+        let bytes: Uint8Array
+        try {
+          bytes = decodeBase64ToUint8(dataB64)
+        } catch {
+          // Malformed base64 -- drop the chunk silently. The next chunk
+          // will likely be fine; spamming `error` would mask real issues.
+          return
+        }
+        const sr = typeof msg.sampleRate === 'number' ? msg.sampleRate : undefined
+        this.emit('ttsAudioChunk', bytes, sr)
         return
       }
       // Unknown message types are intentionally ignored so adding new

@@ -105,15 +105,21 @@ export class AudioPlayer {
   }
 
   /**
-   * Configure the device's audio session for simultaneous record+play (so the
-   * Friday push-to-talk mic doesn't get blocked while the orb is speaking).
-   * Safe to call multiple times.
+   * Configure the device's audio session for playback through the main
+   * loudspeaker (or connected headphones / Bluetooth).
+   *
+   * Note: we deliberately set ``allowsRecordingIOS: false`` here. iOS's
+   * PlayAndRecord category routes audio output to the earpiece by default,
+   * which makes Friday's TTS reply inaudible at arm's length. The press-
+   * to-talk button flips this to ``true`` only for the duration of an
+   * active recording, then flips it back on release. Safe to call multiple
+   * times.
    */
   async start(): Promise<void> {
     this.stopped = false;
     this.endOfStream = false;
     await Audio.setAudioModeAsync({
-      allowsRecordingIOS: true,
+      allowsRecordingIOS: false,
       playsInSilentModeIOS: true,
       staysActiveInBackground: false,
       shouldDuckAndroid: true,

@@ -19,7 +19,10 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Jarvis needs the microphone so you can talk to him.",
         "NSCameraUsageDescription": "Jarvis needs the camera to scan the QR pairing code from your Mac.",
-        "UIBackgroundModes": ["audio", "voip"]
+        "UIBackgroundModes": ["audio", "voip"],
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
       }
     },
     "android": {

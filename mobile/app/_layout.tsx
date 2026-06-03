@@ -20,6 +20,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { Redirect, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { colors } from '../lib/hud-tokens';
 import { loadPairing } from '../lib/pairing';
@@ -101,7 +102,7 @@ export default function RootLayout() {
   // lets the redirect target resolve correctly.
   if (!paired) {
     return (
-      <>
+      <SafeAreaProvider>
         <StatusBar style="light" />
         <Stack
           screenOptions={{
@@ -110,12 +111,12 @@ export default function RootLayout() {
           }}
         />
         <Redirect href="/pair" />
-      </>
+      </SafeAreaProvider>
     );
   }
 
   return (
-    <>
+    <SafeAreaProvider>
       <StatusBar style="light" />
       <Stack
         screenOptions={{
@@ -123,6 +124,6 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: colors.bg },
         }}
       />
-    </>
+    </SafeAreaProvider>
   );
 }

@@ -277,26 +277,25 @@ export function PushToTalkButton(
     }
 
     try {
+      console.log('[PTT] stopRecording: calling stopAndUnloadAsync')
       await rec.stopAndUnloadAsync()
       const uri = rec.getURI()
+      console.log('[PTT] stopRecording: uri =', uri)
       if (uri && props.onAudioChunk) {
-        // Read the file off disk as bytes. We use fetch(uri) rather than
-        // expo-file-system because:
-        //   1. We don't want to import expo-file-system here just for one
-        //      read (audio-playback.ts already pays that cost for
-        //      playback); fetch on a file:// URI is in the RN runtime.
-        //   2. The Response.arrayBuffer() result is directly Uint8Array-
-        //      compatible, no base64 round-trip needed.
-        // For very large clips (>10MB this could matter) we should switch
-        // to expo-file-system's streamed read -- but a single push-to-talk
-        // utterance maxes out around 30 seconds = ~300KB at 64kbps. Safe.
         const response = await fetch(uri)
         const buffer = await response.arrayBuffer()
+        console.log('[PTT] stopRecording: buffer bytes =', buffer.byteLength)
         try {
           await props.onAudioChunk(new Uint8Array(buffer))
+          console.log('[PTT] stopRecording: onAudioChunk completed OK')
         } catch (err) {
           console.warn('PushToTalkButton: onAudioChunk error', err)
         }
+      } else {
+        console.warn('[PTT] stopRecording: no uri or no onAudioChunk handler', {
+          uri,
+          hasHandler: Boolean(props.onAudioChunk),
+        })
       }
     } catch (err) {
       // stopAndUnloadAsync can fail with E_AUDIO_NODATA on Android when
@@ -309,6 +308,26 @@ export function PushToTalkButton(
       await props.onPressEnd?.()
     } catch (err) {
       console.warn('PushToTalkButton: onPressEnd error', err)
+    }
+
+    // Switch the iOS audio session back to playback-only after the press
+    // releases. While `allowsRecordingIOS: true` is set, iOS uses the
+    // PlayAndRecord category which routes audio output to the earpiece by
+    // default -- which is why Friday's TTS reply was inaudible at arm's
+    // length. Flipping to `allowsRecordingIOS: false` switches to the
+    // Playback category, which routes through the main loudspeaker (or
+    // connected headphones / Bluetooth). The next press re-enables record
+    // mode in startRecording above.
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
+      })
+    } catch (err) {
+      console.warn('PushToTalkButton: revert audio mode error', err)
     }
   }, [props])
 
@@ -386,14 +405,15 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.bg,
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   pressable: {
-    flex: 1,
-    width: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
+    // Absolute-fill rather than flex:1 to avoid a Yoga chain collapse on
+    // iOS: parent View flex:1 -> Pressable flex:1 -> OrbView flex:1 was
+    // resolving OrbView to zero height in Expo SDK 54, producing a black
+    // screen with nothing visible inside the Pressable. Absolute fill
+    // gives the Pressable a measured size directly off the parent,
+    // letting OrbView's own flex:1 inherit a non-zero height.
+    ...StyleSheet.absoluteFillObject,
   },
   permissionBanner: {
     position: 'absolute',
