@@ -358,6 +358,49 @@ export default async function Page() {
             ))}
           </ol>
 
+          {/* Use from anywhere — Tailscale */}
+          <div className="mt-16 jarvis-card">
+            <span className="corner-bracket-tl" />
+            <span className="corner-bracket-tr" />
+            <span className="corner-bracket-bl" />
+            <span className="corner-bracket-br" />
+            <div className="flex items-center gap-3 mb-3">
+              <span className="text-2xl text-jarvis-cyan-bright glow-text">⌘</span>
+              <h3 className="font-sans font-semibold text-cyan-50">USE FROM ANYWHERE (CELLULAR, COFFEE-SHOP WI-FI, ETC.)</h3>
+            </div>
+            <p className="font-mono text-sm text-jarvis-cyan/60 leading-relaxed mb-5">
+              By default Friday only works when your phone and Mac are on the same Wi-Fi. To use Friday from cellular or any other network, run <a href="https://tailscale.com" target="_blank" rel="noreferrer noopener" className="text-jarvis-cyan underline underline-offset-2 hover:text-jarvis-cyan-bright">Tailscale</a> — a free personal-use mesh VPN. Zero changes to Jarvis itself; both devices get a virtual IP that works as if they were on the same LAN.
+            </p>
+            <ol className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <li className="bg-jarvis-bg/40 border border-jarvis-cyan-dark/30 p-4 rounded">
+                <div className="font-mono text-sm text-jarvis-cyan-bright glow-text mb-2">01 · MAC</div>
+                <p className="font-mono text-xs text-jarvis-cyan/60 leading-relaxed mb-2">
+                  Install Tailscale + sign in:
+                </p>
+                <code className="block font-mono text-[11px] text-jarvis-cyan/80 bg-black/40 p-2 rounded leading-relaxed">brew install tailscale<br />sudo tailscale up</code>
+              </li>
+              <li className="bg-jarvis-bg/40 border border-jarvis-cyan-dark/30 p-4 rounded">
+                <div className="font-mono text-sm text-jarvis-cyan-bright glow-text mb-2">02 · PHONE</div>
+                <p className="font-mono text-xs text-jarvis-cyan/60 leading-relaxed">
+                  Install the Tailscale app from the App Store / Play Store. Sign in with the same account. Toggle it on.
+                </p>
+              </li>
+              <li className="bg-jarvis-bg/40 border border-jarvis-cyan-dark/30 p-4 rounded">
+                <div className="font-mono text-sm text-jarvis-cyan-bright glow-text mb-2">03 · PAIR</div>
+                <p className="font-mono text-xs text-jarvis-cyan/60 leading-relaxed mb-2">
+                  Get your Mac&apos;s Tailscale IP:
+                </p>
+                <code className="block font-mono text-[11px] text-jarvis-cyan/80 bg-black/40 p-2 rounded leading-relaxed mb-2">tailscale ip -4</code>
+                <p className="font-mono text-xs text-jarvis-cyan/60 leading-relaxed">
+                  Use that IP when generating the pairing QR (Settings → Connections → host field). Done.
+                </p>
+              </li>
+            </ol>
+            <p className="mt-4 font-mono text-[11px] text-jarvis-cyan/40 leading-relaxed">
+              Tailscale free tier: 100 devices, 3 users per account — more than enough for a personal Mac + phone setup. Adds ~5-15 ms of latency vs LAN; voice still feels instant.
+            </p>
+          </div>
+
           {/* Android standalone APK + iOS note */}
           <div className="mt-12 grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="jarvis-card">
