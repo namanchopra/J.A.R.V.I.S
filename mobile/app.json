@@ -19,7 +19,10 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Jarvis needs the microphone so you can talk to him.",
         "NSCameraUsageDescription": "Jarvis needs the camera to scan the QR pairing code from your Mac.",
-        "UIBackgroundModes": ["audio", "voip"],
+        "UIBackgroundModes": [
+          "audio",
+          "voip"
+        ],
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
@@ -60,17 +63,18 @@
       "typedRoutes": true
     },
     "backgroundColor": "#0a0e1a",
-    "_updatesComment": "TODO(TASK-026): replace REPLACE_WITH_EAS_PROJECT_ID with the real EAS project ID (3 places) after running `eas init` from mobile/. See mobile/README.md.",
     "updates": {
-      "url": "https://u.expo.dev/REPLACE_WITH_EAS_PROJECT_ID"
+      "url": "https://u.expo.dev/4ec82a4b-3506-48da-ba60-114dae1ce9ba"
     },
     "runtimeVersion": {
       "policy": "appVersion"
     },
     "extra": {
+      "router": {},
       "eas": {
-        "projectId": "REPLACE_WITH_EAS_PROJECT_ID"
+        "projectId": "4ec82a4b-3506-48da-ba60-114dae1ce9ba"
       }
-    }
+    },
+    "owner": "namanchopra"
   }
 }

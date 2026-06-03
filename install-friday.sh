@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-EAS_URL="https://u.expo.dev/REPLACE_WITH_EAS_PROJECT_ID?channel=production"
-WEBSITE_URL="https://jarvis.namanchopra.dev/friday"
+EAS_URL="https://u.expo.dev/4ec82a4b-3506-48da-ba60-114dae1ce9ba?channel=production"
+WEBSITE_URL="https://jarvis-workflow-manager.vercel.app/#friday"
 
 cat <<EOF
 ╔══════════════════════════════════════════════════════════════╗

@@ -1,6 +1,39 @@
 import StarButton from '@/components/StarButton'
 import DemoTranscript from '@/components/DemoTranscript'
 import OrbClient from '@/components/OrbClient'
+import { QRCodeSVG } from 'qrcode.react'
+
+const EAS_URL = 'https://u.expo.dev/4ec82a4b-3506-48da-ba60-114dae1ce9ba?channel=production'
+const EXPO_GO_IOS = 'https://apps.apple.com/app/expo-go/id982107779'
+const EXPO_GO_ANDROID = 'https://play.google.com/store/apps/details?id=host.exp.exponent'
+
+const FRIDAY_STEPS = [
+  {
+    num: '01',
+    title: 'Make sure Jarvis is running on your Mac.',
+    body: 'Friday relays your voice to the Mac; the Mac does the thinking. Both devices need to be on the same Wi-Fi network.',
+  },
+  {
+    num: '02',
+    title: 'Install Expo Go on your phone.',
+    body: 'Free, official Expo Inc. app from the App Store and Google Play. It\'s the runtime that Friday loads inside — no Friday-specific install needed.',
+  },
+  {
+    num: '03',
+    title: 'Scan the project QR with Expo Go.',
+    body: 'Open Expo Go, tap "Scan QR code", point at the QR below. Friday opens inside Expo Go.',
+  },
+  {
+    num: '04',
+    title: 'Pair Friday with your Mac.',
+    body: 'On the Mac: Jarvis → Settings → Connections → "Connect Friday phone". Scan THAT QR with Friday. Persists to SecureStore.',
+  },
+  {
+    num: '05',
+    title: 'Press the orb. Talk.',
+    body: 'Hold the orb on Friday\'s home screen to record. Release to send. Jarvis responds through Friday\'s speaker.',
+  },
+]
 
 // Render this route on every request. Without this the Next.js cache
 // pinned the version banner to whatever was current at the last build
@@ -95,7 +128,7 @@ export default async function Page() {
               Docs
             </a>
             <a
-              href="/friday"
+              href="#friday"
               className="hidden sm:inline label-mono hover:text-jarvis-cyan-bright transition-colors"
             >
               Friday
@@ -272,13 +305,80 @@ export default async function Page() {
                 </svg>
                 <span>Get the DMG</span>
               </a>
-              <a href="/friday" className="jarvis-btn-primary">
+              <a href="#friday" className="jarvis-btn-primary">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <rect x="7" y="2" width="10" height="20" rx="2" />
                   <path d="M11 18h2" />
                 </svg>
                 <span>Get Friday (phone)</span>
               </a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================== FRIDAY (phone companion) ===================== */}
+      <section id="friday" className="relative py-24 px-6 border-t border-jarvis-cyan-dark/40">
+        <div className="mx-auto max-w-6xl">
+          <div className="flex flex-col items-center mb-12">
+            <span className="label-mono text-jarvis-cyan/45 mb-2">// PHONE COMPANION</span>
+            <h2 className="font-mono text-3xl font-bold text-jarvis-cyan tracking-[0.25em] mb-3">FRIDAY</h2>
+            <p className="font-mono text-sm text-jarvis-cyan/60 max-w-2xl text-center">
+              Press-and-hold the orb on your phone to talk to your Mac&apos;s Jarvis from anywhere on the same Wi-Fi. Audio streams over WebSocket; the brain stays on your Mac.
+            </p>
+          </div>
+
+          {/* QR + Expo Go buttons */}
+          <div className="flex flex-col items-center mb-16">
+            <div className="bg-white p-6 rounded">
+              <QRCodeSVG value={EAS_URL} size={224} fgColor="#0a0a0a" bgColor="#ffffff" />
+            </div>
+            <p className="mt-5 font-mono text-xs text-jarvis-cyan/65 max-w-md text-center">
+              Scan with Expo Go on your phone. Friday loads inside Expo Go — no App Store install needed.
+            </p>
+            <div className="mt-6 flex gap-4 flex-wrap justify-center">
+              <a href={EXPO_GO_IOS} target="_blank" rel="noreferrer noopener" className="jarvis-btn-primary">Install Expo Go (iOS)</a>
+              <a href={EXPO_GO_ANDROID} target="_blank" rel="noreferrer noopener" className="jarvis-btn-primary">Install Expo Go (Android)</a>
+            </div>
+          </div>
+
+          {/* 5-step setup */}
+          <p className="label-mono text-jarvis-cyan/45 mb-6 text-center">SETUP — 5 STEPS, ~3 MINUTES</p>
+          <ol className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+            {FRIDAY_STEPS.map((step) => (
+              <li key={step.num} className="jarvis-card">
+                <span className="corner-bracket-tl" />
+                <span className="corner-bracket-tr" />
+                <span className="corner-bracket-bl" />
+                <span className="corner-bracket-br" />
+                <div className="font-mono text-lg text-jarvis-cyan-bright glow-text mb-2">{step.num}</div>
+                <h3 className="font-sans font-semibold text-cyan-50 text-sm mb-2 leading-snug">{step.title}</h3>
+                <p className="font-mono text-xs text-jarvis-cyan/55 leading-relaxed">{step.body}</p>
+              </li>
+            ))}
+          </ol>
+
+          {/* Android standalone APK + iOS note */}
+          <div className="mt-12 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="jarvis-card">
+              <span className="corner-bracket-tl" />
+              <span className="corner-bracket-tr" />
+              <span className="corner-bracket-bl" />
+              <span className="corner-bracket-br" />
+              <p className="label-mono text-jarvis-cyan/45 mb-2">ANDROID · STANDALONE APP (OPTIONAL)</p>
+              <p className="font-mono text-sm text-jarvis-cyan/60 leading-relaxed">
+                Prefer a real home-screen icon? Download <a href={`${REPO_URL}/releases/latest`} className="text-jarvis-cyan underline underline-offset-2 hover:text-jarvis-cyan-bright">Friday-v{version}.apk</a> from the latest GitHub release. Enable <code className="text-jarvis-cyan/80">Install unknown apps</code> once, tap the APK, Friday installs as a standalone app.
+              </p>
+            </div>
+            <div className="jarvis-card">
+              <span className="corner-bracket-tl" />
+              <span className="corner-bracket-tr" />
+              <span className="corner-bracket-bl" />
+              <span className="corner-bracket-br" />
+              <p className="label-mono text-jarvis-cyan/45 mb-2">IOS · STANDALONE APP</p>
+              <p className="font-mono text-sm text-jarvis-cyan/60 leading-relaxed">
+                Apple doesn&apos;t offer a free standalone path. Friday runs inside Expo Go on iOS at no cost. A TestFlight build lands when iOS demand justifies the $99/yr Apple Developer fee.
+              </p>
             </div>
           </div>
         </div>
@@ -292,7 +392,7 @@ export default async function Page() {
             <span>J.A.R.V.I.S. · APACHE-2.0 · STATUS: PUBLIC ALPHA</span>
           </div>
           <div className="flex items-center gap-5">
-            <a href="/friday" className="hover:text-jarvis-cyan transition-colors">FRIDAY</a>
+            <a href="#friday" className="hover:text-jarvis-cyan transition-colors">FRIDAY</a>
             <a href={REPO_URL} target="_blank" rel="noreferrer noopener" className="hover:text-jarvis-cyan transition-colors">GITHUB</a>
             <a href={RELEASES_URL} target="_blank" rel="noreferrer noopener" className="hover:text-jarvis-cyan transition-colors">RELEASES</a>
             <a href={`${REPO_URL}/issues`} target="_blank" rel="noreferrer noopener" className="hover:text-jarvis-cyan transition-colors">ISSUES</a>
