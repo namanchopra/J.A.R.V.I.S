@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [0.3.1] - 2026-06-04
+
+### Fixed
+- **First-launch setup no longer fails on `portaudio.h: file not found`.** v0.3.0 users with no `portaudio` system library hit this during the `uv pip install` phase because pyaudio 0.2.14 ships no Python 3.13 arm64 wheel and falls back to compiling from source. `install-daemon.sh` now has an `ensure_portaudio` preflight step that:
+  1. Looks for `portaudio.h` in `/opt/homebrew/include` and `/usr/local/include` first — most macOS dev machines already have it.
+  2. If missing AND Homebrew is installed, runs `brew install portaudio` automatically.
+  3. If missing AND Homebrew is not installed, emits a clear `PHASE_ERROR` with both remediation paths (install Homebrew + brew install portaudio, OR download portaudio manually).
+- The `uv pip install` step now exports `CFLAGS`, `LDFLAGS`, `CPATH`, and `LIBRARY_PATH` pointing at both Apple Silicon (`/opt/homebrew`) and Intel (`/usr/local`) brew prefixes so pyaudio's source build finds the headers + libs regardless of which install prefix the user has.
+- Setup is fully resumable: a user who hit the pyaudio failure on v0.3.0 can re-run setup (Settings → Diagnostics → "Re-run setup") on v0.3.1 and it picks up cleanly from phase 2.
+
+### Notes
+- Existing v0.3.0 users with a successful install (portaudio was already on their system) get no functional change in v0.3.1 — only the first-launch setup path improves.
+
 ## [0.3.0] - 2026-06-03
 
 ### Added

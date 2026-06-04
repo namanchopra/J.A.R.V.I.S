@@ -175,6 +175,69 @@ sha256_file() {
 # we WOULD have started. This lets the SetupScreen render the error under
 # phase 1's row.
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# ensure_portaudio
+#
+# pyaudio 0.2.14 ships wheels for Python 3.7-3.11 on macOS but NOT for 3.12+.
+# On the daemon's CPython 3.13.x the wheel is missing and pip falls back to
+# compiling from src/pyaudio/device_api.c, which #includes <portaudio.h>.
+# Without the portaudio system library that header isn't on the include
+# search path and the build dies with:
+#
+#   fatal error: 'portaudio.h' file not found
+#
+# Detection order:
+#   1. Header already present in /opt/homebrew/include or /usr/local/include
+#      -> nothing to do.
+#   2. Homebrew installed -> `brew install portaudio`.
+#   3. No brew -> emit a clear error with remediation steps and exit.
+#
+# After this returns OK, the venv_install phase exports CFLAGS / LDFLAGS
+# pointing at the brew prefix so pyaudio's setup.py finds the headers + libs.
+# -----------------------------------------------------------------------------
+ensure_portaudio() {
+    log "preflight: checking portaudio"
+
+    # Common header locations on macOS (Apple Silicon brew + Intel brew).
+    if [[ -f /opt/homebrew/include/portaudio.h ]] \
+            || [[ -f /usr/local/include/portaudio.h ]]; then
+        log "preflight: portaudio.h found, skipping install"
+        return 0
+    fi
+
+    # Brew is the standard install path on Mac dev machines. If present,
+    # use it; we won't auto-install brew itself (that's a sudo-running
+    # one-liner the user should run consciously).
+    if command -v brew >/dev/null 2>&1; then
+        log "preflight: portaudio.h missing; installing via brew"
+        if brew install portaudio >>"${SETUP_LOG}" 2>&1; then
+            log "preflight: brew install portaudio ok"
+            # Re-verify so we fail fast if the install was a no-op for any reason.
+            if [[ -f /opt/homebrew/include/portaudio.h ]] \
+                    || [[ -f /usr/local/include/portaudio.h ]]; then
+                return 0
+            fi
+            emit_error "brew install portaudio finished but portaudio.h still not found in /opt/homebrew/include or /usr/local/include"
+            exit 1
+        fi
+        emit_error "brew install portaudio failed; see setup.log for details"
+        exit 1
+    fi
+
+    # No brew. Fail with the exact remediation.
+    emit_error "portaudio system library is required for the voice pipeline. Install it with one of:
+
+  (a) Install Homebrew (one-time), then retry setup:
+      /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"
+      brew install portaudio
+
+  (b) Or download portaudio from http://files.portaudio.com/download.html
+      and install the dylib + header into /usr/local/lib + /usr/local/include.
+
+Then re-launch Jarvis or click 'Re-run setup' in Settings -> Diagnostics."
+    exit 1
+}
+
 preflight() {
     ensure_log_dir
     log "preflight: starting"
@@ -218,6 +281,13 @@ preflight() {
             exit 1
         fi
     done
+
+    # portaudio is required by the pyaudio Python package, which has no
+    # pre-built arm64 wheel for Python 3.13 — pip falls back to a source
+    # build that fails with "fatal error: 'portaudio.h' file not found"
+    # if the system library isn't installed. Handle this here so the
+    # phase 2 `uv pip install` step never hits that error.
+    ensure_portaudio
 
     # uv binary must exist and be executable.
     log "preflight: checking uv binary at ${UV_BIN}"
@@ -505,9 +575,22 @@ phase_venv() {
     log "phase 2: installing requirements via uv pip install"
     emit_progress 30
 
+    # pyaudio compiles from source on Python 3.13 (no arm64 wheel). Point its
+    # build at the portaudio install ensure_portaudio prepared during preflight.
+    # Auto-detect Apple Silicon brew (/opt/homebrew) first, fall back to Intel
+    # (/usr/local). Setting both prefixes is safe — clang ignores include paths
+    # that don't exist.
+    local portaudio_cflags="-I/opt/homebrew/include -I/usr/local/include"
+    local portaudio_ldflags="-L/opt/homebrew/lib -L/usr/local/lib"
+
     local uv_err
     uv_err="$(mktemp -t install-daemon.uv-err.XXXXXX)"
-    if ! VIRTUAL_ENV="${VENV_DIR}" "${UV_BIN}" pip install \
+    if ! VIRTUAL_ENV="${VENV_DIR}" \
+            CFLAGS="${portaudio_cflags}" \
+            LDFLAGS="${portaudio_ldflags}" \
+            CPATH="/opt/homebrew/include:/usr/local/include" \
+            LIBRARY_PATH="/opt/homebrew/lib:/usr/local/lib" \
+            "${UV_BIN}" pip install \
             --python "${VENV_DIR}/bin/python3" \
             -r "${req_path}" \
             >>"${SETUP_LOG}" 2>"${uv_err}"; then
