@@ -50,11 +50,13 @@ const RELEASES_URL = `${REPO_URL}/releases/latest`
 // site never serves a 404 even if the GitHub API call below fails at
 // build time (e.g. rate-limited or offline). Bump this whenever a new
 // tag ships; `fetchLatestVersion` will override it on every cache miss.
-const FALLBACK_VERSION = '0.3.0'
+const FALLBACK_VERSION = '0.3.1'
 
-// v0.3.0 is the current release — overlay widget + Google Calendar +
-// meeting mode + recall tools + Friday dashboard redesign on top of the
-// originally scoped Spotify + Mac control + Friday mobile companion.
+// v0.3.1 is the current release — hotfix on top of v0.3.0 (overlay +
+// Google Calendar + meeting mode + recall tools + Friday dashboard
+// redesign) that installs portaudio before pyaudio's source build so
+// first-launch setup doesn't fail with `portaudio.h: file not found`
+// on machines without portaudio already present.
 
 /**
  * Compare two semver strings (no pre-release tags). Returns 1 if a > b,
