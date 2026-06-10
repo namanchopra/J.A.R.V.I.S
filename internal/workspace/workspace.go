@@ -1,9 +1,17 @@
 // Package workspace implements the Virtual Monorepo workspace system.
 //
-// A workspace is a directory at ~/.jarvis/workspaces/<name>/ that contains symlinks
-// to multiple real repositories. When launched, Claude Code sees all repos as
-// one unified workspace via the --add-dir flags. A CLAUDE.md is auto-generated
-// to describe the project structure, repo relationships, and the task at hand.
+// A workspace is a directory at ~/.jarvis/workspaces/<name>/ that contains
+// per-platform directory links to multiple real repositories. On macOS / Linux
+// we create POSIX symbolic links (os.Symlink); on Windows we create directory
+// junction points via `cmd /c mklink /J` (see workspace_windows.go, TASK-033)
+// because junctions do not require Developer Mode or admin elevation, while
+// symlinks on Windows do. When launched, Claude Code sees all repos as one
+// unified workspace via the --add-dir flags. A CLAUDE.md is auto-generated to
+// describe the project structure, repo relationships, and the task at hand.
+//
+// Deletion is handled by os.RemoveAll, which on every platform — including
+// Windows for junctions — removes the link itself rather than following it
+// into the target, so the underlying repositories are never harmed.
 package workspace
 
 import (
@@ -104,8 +112,12 @@ func Create(name string, repoPaths []string, prompt string) (*Workspace, error) 
 		}
 
 		linkPath := filepath.Join(wsDir, linkName)
-		if err := os.Symlink(repoPath, linkPath); err != nil {
-			slog.Warn("failed to create symlink for repo",
+		// linkRepo dispatches to os.Symlink on POSIX and `mklink /J` on Windows
+		// (workspace_windows.go / workspace_other.go, TASK-033). Junctions, like
+		// symlinks, fail cleanly when the target directory does not exist —
+		// satisfying the failure-case acceptance criterion for missing repos.
+		if err := linkRepo(repoPath, linkPath); err != nil {
+			slog.Warn("failed to create link for repo",
 				"repo", repoPath, "link", linkPath, "err", err)
 			// Continue with other repos rather than failing entirely.
 		}

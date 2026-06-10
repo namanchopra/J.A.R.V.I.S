@@ -19,5 +19,9 @@
   },
   "postBuildHooks": {
     "darwin": "bash build/scripts/post-build.sh"
+  },
+  "windows": {
+    "webviewUserDataPath": "%LocalAppData%\\Jarvis\\WebView",
+    "webviewBrowserPath": ""
   }
 }

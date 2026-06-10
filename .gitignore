@@ -99,6 +99,7 @@ coverage.html
 plans/
 .local-plans/
 .kiro/
+.workflows/
 
 # --- Logs ---
 *.log

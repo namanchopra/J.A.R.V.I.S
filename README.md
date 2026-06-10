@@ -1,21 +1,22 @@
 # Jarvis
 
-> A native macOS voice companion for orchestrating AI coding agents.
+> A native voice companion for orchestrating AI coding agents. Runs on macOS and Windows.
 
 [![Latest release](https://img.shields.io/github/v/release/namanchopra/J.A.R.V.I.S?label=download&color=00e5ff)](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-Apple%20Silicon-lightgrey)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 ![Status](https://img.shields.io/badge/status-pre--release-orange)
 
 Jarvis is a desktop voice assistant that drives your AI coding agents the way you'd drive a junior engineer — by talking to them. Say "Hey Jarvis" to launch Claude Code, Kiro, Gemini, Codex, or Aider sessions across multiple repositories, dispatch work in parallel, and get notified when sessions need your attention. Built-in cross-session conflict detection warns you when two agents are about to step on each other's changes.
 
 ## Download
 
-➜ **[Get the latest DMG](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest)** · Apple Silicon Macs (M1 / M2 / M3 / M4) · macOS 12+ · ~80 MB DMG
+Pick the installer for your OS — both download from the same [GitHub Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases/latest) page:
 
-**First launch** runs a one-time setup (~10–15 min) that installs a portable Python runtime + daemon venv into `~/.jarvis/` and downloads the VibeVoice + Whisper model weights to `~/.cache/huggingface/`. A full-screen progress UI tracks all four phases. After setup, Jarvis runs fully offline except for your chosen cloud LLM.
+- **macOS** (Apple Silicon, M1 / M2 / M3 / M4, macOS 12+): `Jarvis-<version>.dmg` (~35 MB). Signed with an Apple Developer ID and notarized — no Gatekeeper warnings.
+- **Windows** (Windows 10 / 11, x64 or arm64): `Jarvis-Setup-<version>.exe` (~40 MB). Inno Setup installer, code-signed — no SmartScreen "Unknown publisher" warning. WebView2 runtime auto-installs on Win10 if missing.
 
-The DMG is signed with an Apple Developer ID and notarized — no Gatekeeper warnings, no right-click workarounds. Just download, drag, and double-click.
+**First launch** runs a one-time setup (~10–15 min) that installs a portable Python runtime + daemon venv into `~/.jarvis/` (macOS) or `%USERPROFILE%\.jarvis\` (Windows) and downloads the voice model weights. A full-screen progress UI tracks all four phases. After setup, Jarvis runs fully offline except for your chosen cloud LLM.
 
 ## Demo
 
@@ -23,6 +24,8 @@ The DMG is signed with an Apple Developer ID and notarized — no Gatekeeper war
 ![Jarvis demo](docs/demo.gif)
 
 ## Install
+
+### macOS
 
 > Apple Silicon (M1 or later) running macOS 12 or newer.
 
@@ -33,13 +36,44 @@ The DMG is signed with an Apple Developer ID and notarized — no Gatekeeper war
 5. **Grant microphone permission** when prompted.
 6. **Onboarding modal** walks you through picking an LLM provider and pasting an API key (or confirming Ollama is running locally), then previews a voice. Say "Hey Jarvis" to begin.
 
-## System Requirements
+**macOS prerequisites**
 
 - **CPU**: Apple Silicon — M1, M2, M3, M4 (Intel Macs are not supported).
 - **OS**: macOS 12 Monterey or later.
 - **Disk**: ~35 MB for the installed `.app`, plus **4 GB free for the first-launch install** (Python venv + VibeVoice + Whisper model weights) staged into `~/.jarvis/` and `~/.cache/huggingface/`.
 - **RAM**: 16 GB recommended. The bundled voice models fit happily in 8 GB, but you'll want headroom for running multiple agent sessions.
 - **Microphone**: any built-in or external input device.
+
+### Windows
+
+> Windows 10 or 11, x64 or arm64.
+
+1. **Download** the latest `Jarvis-Setup-vX.Y.Z.exe` from the [Releases](https://github.com/namanchopra/J.A.R.V.I.S/releases) page. The installer is ~40 MB — code-signed, so no SmartScreen "Unknown publisher" warning.
+2. **Run the installer.** Double-click `Jarvis-Setup-vX.Y.Z.exe` and follow the wizard. A Start Menu shortcut is created automatically; the desktop shortcut is optional. Installs to `%LOCALAPPDATA%\Programs\Jarvis\` by default.
+3. **Launch Jarvis** from the Start Menu (or the optional desktop shortcut).
+4. **WebView2 runtime.** On Windows 11 this is preinstalled. On Windows 10 the installer detects WebView2 and silently installs the Evergreen runtime bootstrapper if missing. On offline machines the installer falls back to a clear "manual download required" prompt with a link.
+5. **First-launch setup runs automatically** (~10–15 min, one-time). The same four-phase progress UI as macOS — Python runtime, voice pipeline venv (uv + pip), faster-whisper STT model, and the TTS voice model — staged into `%USERPROFILE%\.jarvis\`.
+6. **Grant microphone permission** when prompted (Windows Settings → Privacy & Security → Microphone → Jarvis).
+7. **Onboarding modal** walks you through picking an LLM provider, pasting an API key, and previewing a voice. Say "Hey Jarvis" to begin.
+
+**Windows prerequisites**
+
+- **CPU**: x64 (Intel / AMD) or arm64 (Snapdragon X Elite, Surface Pro / Laptop arm64 models). 32-bit Windows is not supported.
+- **OS**: Windows 10 (version 1809+) or Windows 11. WebView2 Evergreen runtime — preinstalled on Win11, auto-installed by the Jarvis installer on Win10.
+- **Disk**: ~40 MB for the installed program, plus **4 GB free for the first-launch install** (Python venv + faster-whisper + TTS model weights) staged into `%USERPROFILE%\.jarvis\` and the HuggingFace cache.
+- **RAM**: 16 GB recommended. faster-whisper on CPU works in 8 GB; CUDA-accelerated STT (optional, NVIDIA only) reduces RAM pressure.
+- **Microphone**: any built-in or USB input device.
+- **No Apple Developer fee equivalent on Windows.** The Inno Setup installer is signed with a standard Authenticode certificate; no per-developer recurring fee like the $99/yr Apple Developer Program.
+
+### Installing via winget (optional, Windows only)
+
+Once a winget manifest is published you can install Jarvis from PowerShell with:
+
+```powershell
+winget install --id NamanChopra.Jarvis
+```
+
+This downloads and runs the same signed `Jarvis-Setup-<version>.exe` as the manual install above. Useful for scripted setups or fleet deployment.
 
 ## Features
 
@@ -72,11 +106,11 @@ The Settings view is a full UI replacement for hand-editing `~/.jarvis/config.js
 
 ## Friday Mobile
 
-Friday is the v0.3 phone companion. Press-and-hold the orb to talk; release to send. Audio relays over WebSocket to the Mac's Jarvis daemon — the phone is a mic + speaker, the brain stays on your Mac.
+Friday is the v0.3 phone companion. Press-and-hold the orb to talk; release to send. Audio relays over WebSocket to the Jarvis daemon running on your desktop — the phone is a mic + speaker, the brain stays on your computer. **The pair host can be a Mac or a Windows PC** — both run the same Echo server on port 4422, so Friday's pairing flow is identical.
 
 **Install:** open https://jarvis.namanchopra.dev/friday on a computer, scan the QR with Expo Go on your phone, done. No Apple Developer account, no Play Store listing.
 
-**Pair:** in Jarvis on the Mac, Settings → Connections → "Connect Friday phone". Scan the resulting QR with Friday. Pairing persists.
+**Pair:** in Jarvis on your Mac or Windows PC, Settings → Connections → "Connect Friday phone". Scan the resulting QR with Friday. Pairing persists.
 
 ## What works today
 
@@ -94,9 +128,10 @@ Everything in the **Features** list above is live:
 
 ## Known limitations
 
-- **Apple Silicon only.** Intel Macs are not supported and the binary refuses to start under Rosetta 2.
+- **macOS: Apple Silicon only.** Intel Macs are not supported and the binary refuses to start under Rosetta 2.
+- **Windows: x64 and arm64 only.** 32-bit Windows is not supported. STT on Windows uses faster-whisper (CTranslate2) instead of MLX Whisper; CPU works everywhere, CUDA acceleration requires an NVIDIA GPU + matching drivers.
 - **Friday mobile is push-to-talk only.** No wake-word on the phone in v0.3 — you press the orb to record, release to send. Wake-word relay over WebSocket is on the roadmap.
-- **No auto-update.** No Sparkle integration yet — new versions are downloaded manually from Releases. On the roadmap.
+- **No auto-update.** No Sparkle / Squirrel integration yet — new versions are downloaded manually from Releases (or `winget upgrade` on Windows). On the roadmap.
 - **No telemetry.** Jarvis does not phone home. This is intentional; an opt-in error reporter may land later.
 
 ## Privacy & Data
@@ -125,16 +160,19 @@ The three issues most new users hit:
 
 ### 1. Mic permission denied
 
-The voice loop will not start without mic access — wake-word detection, STT, and the entire conversation pipeline depend on it. Open **System Settings -> Privacy & Security -> Microphone**, find Jarvis in the list, and flip the switch on. If Jarvis is not in the list yet, click the wake-word indicator in the HUD once to retrigger the prompt. After granting permission you must fully quit Jarvis (Cmd-Q) and relaunch — macOS only re-reads permission grants on process start.
+The voice loop will not start without mic access — wake-word detection, STT, and the entire conversation pipeline depend on it.
 
-You can confirm the current permission state from **Settings -> Diagnostics -> Mic permission**, which polls the OS every two seconds.
+- **macOS**: open **System Settings → Privacy & Security → Microphone**, find Jarvis in the list, and flip the switch on. If Jarvis is not in the list yet, click the wake-word indicator in the HUD once to retrigger the prompt. After granting permission you must fully quit Jarvis (Cmd-Q) and relaunch — macOS only re-reads permission grants on process start.
+- **Windows**: open **Settings → Privacy & security → Microphone**, ensure "Microphone access" is on and Jarvis is enabled. Jarvis surfaces a deep link (`ms-settings:privacy-microphone`) from Settings → Diagnostics that jumps straight to the right page.
+
+You can confirm the current permission state from **Settings → Diagnostics → Mic permission**, which polls the OS every two seconds.
 
 ### 2. Daemon won't start
 
-Jarvis spawns a bundled Python daemon under the hood for STT, TTS, and the Pipecat voice pipeline. If it crashes you'll see "Daemon: stopped" in **Settings -> Diagnostics**. To investigate:
+Jarvis spawns a bundled Python daemon under the hood for STT, TTS, and the Pipecat voice pipeline. If it crashes you'll see "Daemon: stopped" in **Settings → Diagnostics**. To investigate:
 
-- Check the most recent file in `~/.jarvis/logs/` — daemon stderr and stdout are tailed there.
-- Open `Console.app` and filter for `jarvis-daemon` to see Python tracebacks raised before the log handler attached.
+- **macOS**: check the most recent file in `~/.jarvis/logs/` — daemon stderr and stdout are tailed there. Or open `Console.app` and filter for `jarvis-daemon` to see Python tracebacks raised before the log handler attached.
+- **Windows**: check the most recent file in `%USERPROFILE%\.jarvis\logs\` (the same layout, just under the Windows home directory). Event Viewer → Windows Logs → Application catches early-startup crashes raised before the log handler attached.
 
 Most common causes:
 
@@ -169,7 +207,7 @@ go test ./...
 cd frontend && npm test
 ```
 
-Data lives under `~/.jarvis/`:
+Data lives under `~/.jarvis/` on macOS and `%USERPROFILE%\.jarvis\` on Windows (paths below use the macOS form for brevity):
 
 | Path | Purpose |
 |---|---|

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# Friday — Jarvis v0.3.0 mobile companion installer
+# Friday — Jarvis v0.3.0+ mobile companion installer
 # Usage: bash install-friday.sh
+#
+# The pair host (the computer Friday talks to) can be either macOS or
+# Windows — both ship the same Echo server on port 4422 and the same
+# pairing-QR flow. This script is bash so it's commonly run from macOS
+# or WSL; on a vanilla Windows host, just open the website URL below
+# manually instead of running this script.
 
 set -euo pipefail
 
@@ -9,11 +15,15 @@ WEBSITE_URL="https://jarvis-workflow-manager.vercel.app/#friday"
 
 cat <<EOF
 ╔══════════════════════════════════════════════════════════════╗
-║  Friday — Jarvis v0.3.0 mobile companion                     ║
+║  Friday — Jarvis v0.3.0+ mobile companion                    ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Friday runs inside Expo Go on your phone. No App Store account
 required, no developer signing dance.
+
+The pair host (the computer running Jarvis that Friday talks to) can
+be a Mac OR a Windows PC — both expose the same Echo server on port
+4422 and use the same pairing QR. Pick whichever you have.
 
 INSTALL STEPS:
 
@@ -27,10 +37,11 @@ INSTALL STEPS:
      A QR code will appear. Point your phone's camera at it.
      Expo Go opens automatically and loads Friday.
 
-  3. On the Mac side, open Jarvis → Settings → Connections →
-     "Connect Friday phone". Scan THAT QR with Friday.
+  3. On the desktop side (Mac OR Windows), open Jarvis →
+     Settings → Connections → "Connect Friday phone". Scan THAT QR
+     with Friday.
 
-     Done. Voice now relays Mac ↔ phone.
+     Done. Voice now relays desktop ↔ phone.
 
 EOF
 

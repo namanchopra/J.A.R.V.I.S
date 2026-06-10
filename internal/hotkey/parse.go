@@ -7,23 +7,21 @@ import (
 	libhotkey "golang.design/x/hotkey"
 )
 
-// modifierAliases maps every accepted spelling of a modifier (lowercased) to
-// the underlying library Modifier constant.
-var modifierAliases = map[string]libhotkey.Modifier{
-	"cmd":     libhotkey.ModCmd,
-	"command": libhotkey.ModCmd,
-	"meta":    libhotkey.ModCmd,
-	"super":   libhotkey.ModCmd,
-
-	"ctrl":    libhotkey.ModCtrl,
-	"control": libhotkey.ModCtrl,
-
-	"alt":    libhotkey.ModOption,
-	"option": libhotkey.ModOption,
-	"opt":    libhotkey.ModOption,
-
-	"shift": libhotkey.ModShift,
-}
+// modifierAliases is populated by the platform-specific files
+// (parse_aliases_darwin.go, parse_aliases_windows.go, parse_aliases_other.go).
+// The library's Modifier constants differ across platforms — macOS exports
+// ModCmd / ModOption, Windows exports ModAlt / ModWin — so the alias table
+// has to be split per-OS. Spec strings ("alt+space", "cmd+shift+j") remain
+// stable across platforms; the platform file is responsible for choosing the
+// closest semantic match (e.g. "cmd" → ModWin on Windows).
+//
+// See parse_aliases_*.go for the per-platform map.
+//
+// This var is declared (not assigned) here so the rest of parse.go can
+// reference it unconditionally; the platform file does the init.
+//
+//nolint:gochecknoglobals // populated by per-OS init in parse_aliases_*.go.
+var modifierAliases map[string]libhotkey.Modifier
 
 // namedKeys covers non-letter, non-digit keys. Letters and digits are handled
 // programmatically below.

@@ -862,6 +862,171 @@ func TestRunSetup_InvalidStderrLine_DoesNotCrash(t *testing.T) {
 	}
 }
 
+// TestRunSetup_ParsesWindowsCRLFLineEndings verifies TASK-015: the parser
+// must strip trailing \r before regex-matching so PowerShell-emitted lines
+// (Windows \r\n line terminators) parse identically to bash-emitted lines
+// (Unix \n). bufio.ScanLines already drops the \r that is part of the
+// terminator, but lines that contain only a CR (or that contain an embedded
+// CR somewhere a downstream tool flushed mid-line — progress bars, for
+// instance) can still arrive at the parser with a stray trailing \r. Without
+// the TrimRight \r fix the regex anchors (^…$) would silently fail to match,
+// dropping every Windows setup event on the floor.
+//
+// We exercise three cases here:
+//   1. Canonical \r\n terminators (the common Windows case).
+//   2. A lone \r left on a PHASE marker (the malformed case the task's
+//      "Failure case" acceptance criterion calls out).
+//   3. The same fragment as the macOS happy-path test but written with \r\n,
+//      to assert event count + ordering match (idempotency of the trim).
+func TestRunSetup_ParsesWindowsCRLFLineEndings(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+
+	// PowerShell-style stderr fragment: \r\n line terminators throughout.
+	// Identical content to TestRunSetup_ParsesPhaseStartedDoneFromFakeStderr's
+	// fragment so the assertions parallel that test's "what we'd see on
+	// macOS" baseline.
+	fragment := strings.Join([]string{
+		"PHASE: python_install",
+		"PHASE_BYTES: 0 / 92341056",
+		"PHASE_PROGRESS: 0",
+		"PHASE_BYTES: 12582912 / 92341056",
+		"PHASE_PROGRESS: 13",
+		"PHASE_ETA: 26",
+		"PHASE_PROGRESS: 100",
+		"PHASE_DONE: python_install",
+	}, "\r\n") + "\r\n"
+
+	var logBuf bytes.Buffer
+	if err := a.runSetupParseLoop(strings.NewReader(fragment), &logBuf); err != nil {
+		t.Fatalf("runSetupParseLoop: %v", err)
+	}
+
+	events := rec.snapshot()
+
+	// Same event-shape expectations as the macOS happy-path test:
+	// 1 started + 3 progress + 1 done = 5 events.
+	started := findEventsByState(events, stateStarted)
+	if len(started) != 1 {
+		t.Errorf("started events = %d; want 1 (\\r\\n must not break parsing)", len(started))
+	} else {
+		if started[0].Phase != setup.PhasePython {
+			t.Errorf("started phase = %q; want %q", started[0].Phase, setup.PhasePython)
+		}
+	}
+
+	progress := findEventsByState(events, stateProgress)
+	if len(progress) != 3 {
+		t.Errorf("progress events = %d; want 3 (\\r\\n input)", len(progress))
+	}
+
+	done := findEventsByState(events, stateDone)
+	if len(done) != 1 {
+		t.Errorf("done events = %d; want 1 (\\r\\n input)", len(done))
+	} else if done[0].Phase != setup.PhasePython {
+		t.Errorf("done phase = %q; want %q", done[0].Phase, setup.PhasePython)
+	}
+
+	state := a.GetSetupState()
+	if state.Phase != setup.PhasePython {
+		t.Errorf("after \\r\\n fragment: Phase = %q; want %q", state.Phase, setup.PhasePython)
+	}
+	if state.PhaseDoneCount != 1 {
+		t.Errorf("after \\r\\n fragment: PhaseDoneCount = %d; want 1", state.PhaseDoneCount)
+	}
+}
+
+// TestRunSetup_StripsStrayCarriageReturnFromPhaseMarker covers the explicit
+// "malformed PHASE:\r\n line still produces a valid phase event" acceptance
+// criterion from TASK-015. The bytes the scanner returns can contain an
+// embedded \r mid-line if the install script flushed a CR (e.g. to overwrite
+// a progress bar) and then emitted a PHASE_* marker on the same physical
+// line before the next \n. After TrimRight strips trailing whitespace and
+// \r the regex must still match.
+func TestRunSetup_StripsStrayCarriageReturnFromPhaseMarker(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+
+	// Lines crafted to expose the bug:
+	//   - "PHASE: python_install\r" — trailing \r on its own, no \n pair.
+	//     bufio.Scanner won't strip this for us; the parser must.
+	//   - "PHASE_DONE: python_install \r" — trailing space + \r mix.
+	// We deliberately end the buffer with \n so the scanner returns the
+	// preceding bytes including the stray \r as a single token.
+	stderr := "PHASE: python_install\r\n" +
+		"PHASE_PROGRESS: 100 \r\n" +
+		"PHASE_DONE: python_install \r\n"
+
+	if err := a.runSetupParseLoop(strings.NewReader(stderr), io.Discard); err != nil {
+		t.Fatalf("runSetupParseLoop: %v", err)
+	}
+
+	events := rec.snapshot()
+	started := findEventsByState(events, stateStarted)
+	if len(started) != 1 {
+		t.Fatalf("started events = %d; want 1 (stray \\r must be trimmed)", len(started))
+	}
+	if started[0].Phase != setup.PhasePython {
+		t.Errorf("started phase = %q; want %q", started[0].Phase, setup.PhasePython)
+	}
+
+	progress := findEventsByState(events, stateProgress)
+	if len(progress) != 1 {
+		t.Errorf("progress events = %d; want 1 (stray \\r must be trimmed)", len(progress))
+	} else if progress[0].PhaseProgress == nil || *progress[0].PhaseProgress != 100 {
+		t.Errorf("progress value = %v; want 100", progress[0].PhaseProgress)
+	}
+
+	done := findEventsByState(events, stateDone)
+	if len(done) != 1 {
+		t.Errorf("done events = %d; want 1 (stray \\r must be trimmed)", len(done))
+	}
+}
+
+// TestRunSetup_ParsesPhaseStartedDoneIsIdempotentOnUnixLineEndings is the
+// idempotency-on-macOS acceptance criterion from TASK-015: adding \r to the
+// TrimRight cutset must not change behaviour on bash output that has no \r
+// to trim. We re-run the exact macOS happy-path fragment and assert the
+// same event count + ordering the original test verified.
+func TestRunSetup_ParsesPhaseStartedDoneIsIdempotentOnUnixLineEndings(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	a := &App{ctx: context.Background()}
+	clearRuntime(t, a)
+	rec := installRecorder(t, a)
+
+	fragment := strings.Join([]string{
+		"PHASE: python_install",
+		"PHASE_PROGRESS: 0",
+		"PHASE_PROGRESS: 100",
+		"PHASE_DONE: python_install",
+	}, "\n") + "\n"
+
+	if err := a.runSetupParseLoop(strings.NewReader(fragment), io.Discard); err != nil {
+		t.Fatalf("runSetupParseLoop: %v", err)
+	}
+
+	events := rec.snapshot()
+	if got := len(findEventsByState(events, stateStarted)); got != 1 {
+		t.Errorf("started events = %d; want 1 (Unix \\n idempotency)", got)
+	}
+	if got := len(findEventsByState(events, stateProgress)); got != 2 {
+		t.Errorf("progress events = %d; want 2 (Unix \\n idempotency)", got)
+	}
+	if got := len(findEventsByState(events, stateDone)); got != 1 {
+		t.Errorf("done events = %d; want 1 (Unix \\n idempotency)", got)
+	}
+}
+
 // TestRunSetup_PhaseErrorEmitsErrorEvent verifies the parser's PHASE_ERROR
 // handling: a PHASE_ERROR line produces an `error`-state setup_progress
 // event with the message, AND populates the cached state's LastError. The

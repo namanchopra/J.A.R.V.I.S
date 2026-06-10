@@ -158,3 +158,74 @@ describe('MeetingPanel TASK-012 (defaults + resilience)', () => {
     expect(SOURCE).toMatch(/['"]interview['"]/)
   })
 })
+
+describe('MeetingPanel TASK-045 (Windows mic permission UX)', () => {
+  // TASK-045 — Windows has no Screen Recording equivalent. WASAPI loopback
+  // captures system audio without a separate consent gate, so the meeting
+  // panel must surface a microphone-only CTA on Windows + leave macOS
+  // unchanged.
+
+  it('detects platform via the Wails Environment() runtime call', () => {
+    // Pin on the import + invocation so a refactor that removes platform
+    // detection silently (falling back to always-macOS) trips here.
+    expect(SOURCE).toMatch(/Environment/)
+    expect(SOURCE).toMatch(/Environment\(\)/)
+  })
+
+  it('treats "windows" as the trigger value for the Windows UX branch', () => {
+    // Wails reports runtime.GOOS verbatim: 'darwin', 'windows', 'linux'.
+    // Pin on the literal string so a swap to e.g. 'win32' surfaces.
+    expect(SOURCE).toMatch(/['"]windows['"]/)
+    expect(SOURCE).toMatch(/isWindows/)
+  })
+
+  it('deep-links to Windows Settings → Privacy → Microphone via ms-settings:', () => {
+    // The destination must be the microphone privacy panel (not the camera,
+    // not the screenshot tool privacy panel). Same scheme convention TASK-032
+    // adopts for the PermissionsPanel.
+    expect(SOURCE).toMatch(/ms-settings:privacy-microphone/)
+  })
+
+  it('shows a Microphone-only warning row on Windows (no Screen Recording row)', () => {
+    // The Windows row's data-testid is distinct from the macOS row so the
+    // SettingsView regression tests can scope by platform. The "Open Windows
+    // Settings" CTA label is the user-visible contract.
+    expect(SOURCE).toMatch(/meeting-permission-error-windows/)
+    expect(SOURCE).toMatch(/meeting-open-microphone-settings/)
+    expect(SOURCE).toMatch(/Microphone access required/)
+    expect(SOURCE).toMatch(/Open Windows Settings/)
+  })
+
+  it('keeps the macOS Screen Recording warning row + CTA unchanged (acceptance: macOS unchanged)', () => {
+    // The macOS branch must still render the existing Screen Recording row
+    // with the existing data-testid + CTA copy so SettingsView screenshots
+    // and downstream tests stay stable.
+    expect(SOURCE).toMatch(/meeting-permission-error['"]/)
+    expect(SOURCE).toMatch(/meeting-open-screen-recording/)
+    expect(SOURCE).toMatch(/Privacy_ScreenRecording/)
+    expect(SOURCE).toMatch(/Open System Settings/)
+  })
+
+  it('gates the warning rows so only one platform branch renders at a time', () => {
+    // Both rows must be conditional on permissionError AND a platform check
+    // — otherwise we'd render both branches simultaneously on macOS.
+    expect(SOURCE).toMatch(/permissionError\s*&&\s*isWindows/)
+    expect(SOURCE).toMatch(/permissionError\s*&&\s*!isWindows/)
+  })
+
+  it('defaults to darwin when Environment() fails (acceptance: macOS unchanged)', () => {
+    // Failure-mode safety: if the Wails runtime is unavailable (SSR / test
+    // harness / pre-init), the panel must render the macOS UX rather than
+    // showing Windows controls to a Mac user. Pin on the initial state.
+    expect(SOURCE).toMatch(/useState<string>\(\s*['"]darwin['"]\s*\)/)
+  })
+
+  it('surfaces a Windows-specific permission subtitle in the header', () => {
+    // Header subtitle must reflect WASAPI vs ScreenCaptureKit architecture
+    // difference so the Windows user isn't told to grant a permission that
+    // doesn't exist on their platform.
+    expect(SOURCE).toMatch(/meeting-permission-subtitle-windows/)
+    expect(SOURCE).toMatch(/meeting-permission-subtitle-darwin/)
+    expect(SOURCE).toMatch(/WASAPI/)
+  })
+})

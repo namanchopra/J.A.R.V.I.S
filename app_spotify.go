@@ -18,11 +18,23 @@ package main
 //                           in internal/spotify.Client.refreshIfNeeded
 //                           handles expiry transparently on the next API
 //                           call.
-//   - SpotifySearchAndPlay  Web API search + AppleScript play. Returns a
-//                           spoken-friendly "Playing <track> by <artist>"
-//                           string the daemon's tool layer can voice.
-//   - SpotifyPause          local AppleScript pause — no auth required.
-//   - SpotifyResume         local AppleScript resume — no auth required.
+//   - SpotifySearchAndPlay  Web API search + AppleScript play (macOS)
+//                           or Web API search + Web API play (Windows,
+//                           TASK-028). Returns a spoken-friendly
+//                           "Playing <track> by <artist>" string the
+//                           daemon's tool layer can voice.
+//   - SpotifyPause          AppleScript on macOS, Web API on Windows.
+//   - SpotifyResume         AppleScript on macOS, Web API on Windows.
+//   - SpotifySkip           AppleScript on macOS, Web API on Windows
+//                           (TASK-028).
+//
+// TASK-028 — Windows port: AppleScript only exists on macOS; the
+// `spotifyIsWindowsFn` seam routes all playback intents through the
+// Spotify Web API (`PUT /v1/me/player/{play,pause}`, `POST /v1/me/player/next`)
+// when running on Windows. The Web API requires an OAuth bearer token,
+// which the existing PKCE flow already mints. Latency is higher
+// (~500ms Web API vs ~100ms local AppleScript) — documented user-facing
+// in the v0.4.0 release notes.
 //
 // The Wails-generated TypeScript bindings produced by `wails generate
 // module` after this file lands give the React side a strongly-typed
@@ -36,8 +48,15 @@ package main
 // ---------------------------------------------------------------------------
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	goruntime "runtime"
+	"strings"
 	"time"
 
 	"github.com/namanchopra/jarvis/internal/model"
@@ -85,6 +104,193 @@ var spotifyAppleScriptPlayFn = func(uri string) error {
 // this to an httptest.Server URL; production leaves it empty so the client
 // hits the real api.spotify.com. Set inside tests; restored via t.Cleanup.
 var spotifyWebBaseURLOverride = ""
+
+// ---------------------------------------------------------------------------
+// Platform driver selection — TASK-028.
+//
+// The AppleScript driver (internal/spotify/applescript.go) shells out to
+// `osascript`, which only exists on macOS. On Windows the same intents
+// (play/pause/resume/skip) route through the Spotify Web API's playback
+// endpoints (PUT /v1/me/player/play|pause, POST /v1/me/player/next), which
+// are cross-platform and require nothing more than an OAuth bearer token —
+// which the existing PKCE flow already provides.
+//
+// spotifyIsWindowsFn is the seam tests use to flip the driver at runtime
+// without rebuilding for Windows. Production simply returns
+// runtime.GOOS == "windows"; tests override with a closure returning true
+// to exercise the Web API path on a macOS dev box.
+//
+// Why a func var instead of a const built-tagged sentinel?
+//   - Keeps the entire Windows-specific routing in this single file, per
+//     TASK-028 plan (filesToCreate is empty).
+//   - Tests can flip platforms without an OS reboot.
+//
+// The hot path is one extra function call per binding invocation —
+// negligible compared with a network round-trip.
+var spotifyIsWindowsFn = func() bool {
+	return goruntime.GOOS == "windows"
+}
+
+// spotifyWebHTTPClient is the HTTP client used by the inline Web API
+// playback helpers below. A package-level var (not a const) so tests can
+// inject an httptest.Server-backed http.Client to capture the outbound
+// PUT/POST and assert auth headers / paths / bodies.
+//
+// Production uses a 15s timeout to match internal/spotify/web.go's
+// doGetWithStatus contract — playback endpoints are typically <200ms but
+// a 15s ceiling protects against network stalls.
+var spotifyWebHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// spotifyWebAPIBase returns the Web API base URL the inline playback
+// helpers below should hit. Honours spotifyWebBaseURLOverride (test seam)
+// so app_spotify_test.go can redirect at an httptest.Server, otherwise
+// returns the real api.spotify.com.
+func spotifyWebAPIBase() string {
+	if spotifyWebBaseURLOverride != "" {
+		return spotifyWebBaseURLOverride
+	}
+	return "https://api.spotify.com"
+}
+
+// spotifyWebRequest issues an authenticated request against the Spotify
+// Web API's playback endpoints. Centralises bearer-token plumbing,
+// no-active-device translation, and consistent error wrapping so the
+// per-binding code below stays tight.
+//
+// Method is typically PUT (pause/resume/play/play-uri) or POST (next).
+// body may be nil for the empty-payload endpoints (pause/next).
+//
+// Failure modes (all returned as errors):
+//   - empty access token              -> spotify.ErrNotAuthenticated
+//   - 401 from Spotify                -> spotify.ErrNotAuthenticated
+//   - 404 NO_ACTIVE_DEVICE            -> ErrNoActiveDevice (defined below)
+//   - 5xx / network errors            -> wrapped errors from net/http
+//
+// Refresh is delegated to the existing spotify.Client.refreshIfNeeded —
+// we construct a transient Client just to bring the token current, then
+// re-load the on-disk config so we hold the freshest access token. This
+// reuses the well-tested refresh path instead of duplicating it here.
+func (a *App) spotifyWebRequest(method, endpoint string, body []byte) error {
+	cfg, _ := spotify.LoadConfig(spotify.ConfigPath())
+
+	// Force a refresh-if-needed via the existing Web API client. The
+	// trivial call (Search on an obviously-empty string would short-
+	// circuit before any HTTP) doesn't work here — instead, lean on the
+	// client's refresh gate by constructing it and calling a no-op path:
+	// we mirror the saveCfg closure used elsewhere so a fresh token
+	// persists across daemon restarts.
+	saveCfg := func(sc *model.SpotifyConfig) error {
+		return spotify.SaveConfig(spotify.ConfigPath(), *sc)
+	}
+	client := spotify.NewClient(&cfg, saveCfg)
+	// WhatIsPlaying is the cheapest authenticated endpoint we know
+	// pre-validates the token (it returns 204 when nothing's playing,
+	// 200 when something is — never a 4xx for an authenticated user).
+	// We discard the result; we only care that refreshIfNeeded fires.
+	// Note: when no token exists at all, this returns
+	// spotify.ErrNotAuthenticated which we propagate verbatim.
+	if _, err := client.WhatIsPlaying(); err != nil {
+		// 204-no-content is masked as (nil, nil) by WhatIsPlaying so
+		// any non-nil err here is genuinely a problem. Surface the
+		// auth error verbatim so callers can errors.Is-match it.
+		if strings.Contains(err.Error(), spotify.ErrNotAuthenticated.Error()) {
+			return spotify.ErrNotAuthenticated
+		}
+		// Other failures (network, 5xx) shouldn't block the playback
+		// attempt outright — Spotify might still answer the playback
+		// endpoint cleanly. Log and continue.
+		slog.Debug("spotifyWebRequest: pre-call WhatIsPlaying probe failed", "err", err)
+	}
+
+	// Re-load after refresh so we use the freshest token.
+	cfg, _ = spotify.LoadConfig(spotify.ConfigPath())
+	if cfg.AccessToken == "" {
+		return spotify.ErrNotAuthenticated
+	}
+
+	url := spotifyWebAPIBase() + endpoint
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var reader io.Reader
+	if len(body) > 0 {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.AccessToken)
+	req.Header.Set("Accept", "application/json")
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := spotifyWebHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 2xx is success — Spotify returns 204 No Content for most playback
+	// endpoints on the happy path.
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	respText := strings.TrimSpace(string(respBody))
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return fmt.Errorf("%w: 401 from %s", spotify.ErrNotAuthenticated, endpoint)
+	case http.StatusNotFound:
+		// Spotify uses 404 NO_ACTIVE_DEVICE when the user has no
+		// device currently selected for playback (Spotify app closed,
+		// or user signed out of all clients). Surface a friendly
+		// sentinel so the daemon can voice "Open Spotify on a device
+		// first" rather than a generic 404.
+		if strings.Contains(strings.ToLower(respText), "no active device") {
+			return ErrSpotifyNoActiveDevice
+		}
+		return fmt.Errorf("spotify %s %s: 404: %s", method, endpoint, respText)
+	default:
+		return fmt.Errorf("spotify %s %s: status %d: %s", method, endpoint, resp.StatusCode, respText)
+	}
+}
+
+// ErrSpotifyNoActiveDevice is returned when Spotify's playback endpoints
+// answer with NO_ACTIVE_DEVICE — i.e. the user has no client open to
+// receive playback commands. The daemon's tool layer maps this to a
+// voice-friendly "Open Spotify on a device first" reply rather than a
+// generic 404. Exported so other Wails bindings (and the Python tool
+// bridge) can errors.Is-match it.
+var ErrSpotifyNoActiveDevice = fmt.Errorf("spotify: no active device")
+
+// spotifyWebPlayURI starts playback of the given Spotify URI via the
+// Web API's PUT /v1/me/player/play endpoint. Body is a JSON object
+// {"uris": ["spotify:track:..."]} per Spotify's API contract.
+func (a *App) spotifyWebPlayURI(uri string) error {
+	body, _ := json.Marshal(map[string]any{"uris": []string{uri}})
+	return a.spotifyWebRequest(http.MethodPut, "/v1/me/player/play", body)
+}
+
+// spotifyWebPause hits PUT /v1/me/player/pause.
+func (a *App) spotifyWebPause() error {
+	return a.spotifyWebRequest(http.MethodPut, "/v1/me/player/pause", nil)
+}
+
+// spotifyWebResume hits PUT /v1/me/player/play with no body (resume
+// current track rather than start a new one).
+func (a *App) spotifyWebResume() error {
+	return a.spotifyWebRequest(http.MethodPut, "/v1/me/player/play", nil)
+}
+
+// spotifyWebSkip hits POST /v1/me/player/next.
+func (a *App) spotifyWebSkip() error {
+	return a.spotifyWebRequest(http.MethodPost, "/v1/me/player/next", nil)
+}
 
 // spotifyClientID returns the client id to use for OAuth. Prefers a
 // user-supplied id in ~/.jarvis/spotify.json (for self-hosters who want
@@ -223,33 +429,90 @@ func (a *App) SpotifySearchAndPlay(query string) (string, error) {
 	}
 
 	top := tracks[0]
+
+	// TASK-028: Windows has no AppleScript; route the play through the
+	// Spotify Web API's PUT /v1/me/player/play endpoint instead. Latency
+	// is higher (~500ms Web API vs ~100ms local AppleScript) but the
+	// caller-visible contract is identical.
+	if spotifyIsWindowsFn() {
+		if err := a.spotifyWebPlayURI(top.URI); err != nil {
+			return "", fmt.Errorf("SpotifySearchAndPlay: %w", err)
+		}
+		return fmt.Sprintf("Playing %s by %s", top.Name, top.Artist), nil
+	}
+
 	if err := spotifyAppleScriptPlayFn(top.URI); err != nil {
 		return "", fmt.Errorf("SpotifySearchAndPlay: applescript play: %w", err)
 	}
 	return fmt.Sprintf("Playing %s by %s", top.Name, top.Artist), nil
 }
 
-// SpotifyPause pauses the local Spotify.app via AppleScript.
+// SpotifyPause pauses Spotify playback.
 //
-// No-op if already paused — the Spotify scripting dictionary treats
-// "pause" as idempotent. No auth required because this path doesn't
-// touch the Web API.
+// macOS:  local Spotify.app via AppleScript (~100ms, no auth required).
+// Windows (TASK-028): PUT /v1/me/player/pause via the Web API. Requires
+// the user to have signed in via SpotifySignIn; surfaces
+// ErrNotAuthenticated when no token is on disk, ErrSpotifyNoActiveDevice
+// when Spotify isn't open on any device.
+//
+// No-op if already paused — Spotify treats the call as idempotent on
+// both transports.
 func (a *App) SpotifyPause() error {
+	if spotifyIsWindowsFn() {
+		if err := a.spotifyWebPause(); err != nil {
+			return fmt.Errorf("SpotifyPause: %w", err)
+		}
+		return nil
+	}
 	if err := spotify.NewAppleScript().Pause(); err != nil {
 		return fmt.Errorf("SpotifyPause: %w", err)
 	}
 	return nil
 }
 
-// SpotifyResume resumes the local Spotify.app via AppleScript.
+// SpotifyResume resumes Spotify playback.
+//
+// macOS:  local Spotify.app via AppleScript (~100ms, no auth required).
+// Windows (TASK-028): PUT /v1/me/player/play with no body via the Web API.
+// Spotify treats the empty-body play as "resume current track" rather
+// than start a new one. Requires the user to have signed in.
 //
 // AppleScript uses "play" with no arguments to continue the current
 // track (there is no separate "resume" verb in Spotify's scripting
-// dictionary). No auth required because this path doesn't touch the
-// Web API.
+// dictionary).
 func (a *App) SpotifyResume() error {
+	if spotifyIsWindowsFn() {
+		if err := a.spotifyWebResume(); err != nil {
+			return fmt.Errorf("SpotifyResume: %w", err)
+		}
+		return nil
+	}
 	if err := spotify.NewAppleScript().Resume(); err != nil {
 		return fmt.Errorf("SpotifyResume: %w", err)
+	}
+	return nil
+}
+
+// SpotifySkip advances Spotify to the next track in the queue.
+//
+// macOS:  local Spotify.app via AppleScript (~100ms, no auth required).
+// Windows (TASK-028): POST /v1/me/player/next via the Web API. Requires
+// the user to have signed in via SpotifySignIn; surfaces
+// ErrNotAuthenticated when no token is on disk, ErrSpotifyNoActiveDevice
+// when Spotify isn't open on any device.
+//
+// Added in TASK-028 to round out the play/pause/resume/skip quartet the
+// daemon's tool layer voices ("skip this song"). Idempotent for the
+// caller — repeated calls just advance further through the queue.
+func (a *App) SpotifySkip() error {
+	if spotifyIsWindowsFn() {
+		if err := a.spotifyWebSkip(); err != nil {
+			return fmt.Errorf("SpotifySkip: %w", err)
+		}
+		return nil
+	}
+	if err := spotify.NewAppleScript().Next(); err != nil {
+		return fmt.Errorf("SpotifySkip: %w", err)
 	}
 	return nil
 }

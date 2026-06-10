@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+#
+# TASK-060: winget Version manifest for Jarvis.
+#
+# This is the "root" manifest for a Jarvis winget submission. Per the winget
+# spec (https://learn.microsoft.com/windows/package-manager/package/manifest),
+# a single package version is described by three (or more) sibling YAML files
+# that all share the same PackageIdentifier + PackageVersion: this Version
+# manifest, an Installer manifest, and at least one Locale manifest. When the
+# Microsoft / winget-pkgs reviewers accept the PR, the canonical home for
+# these files is:
+#
+#   manifests/n/namanchopra/Jarvis/<PackageVersion>/Namanchopra.Jarvis.yaml
+#   manifests/n/namanchopra/Jarvis/<PackageVersion>/Namanchopra.Jarvis.installer.yaml
+#   manifests/n/namanchopra/Jarvis/<PackageVersion>/Namanchopra.Jarvis.locale.en-US.yaml
+#
+# We keep this template in the Jarvis repo at the un-versioned path
+# manifests/n/namanchopra/Jarvis/ so it is grep-friendly and trivially diffable
+# across releases. The release pipeline (TASK-056 / future winget submission
+# step) copies these three files into a versioned subdirectory and updates the
+# `PackageVersion` + Installer `InstallerUrl` / `InstallerSha256` fields before
+# opening the PR against microsoft/winget-pkgs.
+#
+# Acceptance criteria covered (TASK-060):
+#   - `winget install Namanchopra.Jarvis` works after the PR merges: the
+#     PackageIdentifier here matches the PR path and the Installer manifest
+#     supplies an Inno-Setup-aware InstallerType (see installer YAML).
+#   - Manifest validates: this file follows the v1.6.0 Version schema and
+#     declares every required key (PackageIdentifier, PackageVersion,
+#     DefaultLocale, ManifestType, ManifestVersion).
+#   - Failure case: if Microsoft reviewers reject the PR, revise per their
+#     feedback (each reviewer comment maps to one of the three YAMLs).
+#
+PackageIdentifier: Namanchopra.Jarvis
+PackageVersion: 0.4.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0
