@@ -51,7 +51,7 @@ const RELEASES_URL = `${REPO_URL}/releases/latest`
 // site never serves a 404 even if the GitHub API call below fails at
 // build time (e.g. rate-limited or offline). Bump this whenever a new
 // tag ships; `fetchLatestVersion` will override it on every cache miss.
-const FALLBACK_VERSION = '0.3.1'
+const FALLBACK_VERSION = '0.4.0'
 
 // v0.3.1 is the current release — hotfix on top of v0.3.0 (overlay +
 // Google Calendar + meeting mode + recall tools + Friday dashboard
@@ -175,10 +175,16 @@ export default async function Page() {
           </div>
           <div className="flex items-center gap-3">
             <a
-              href={`${REPO_URL}#install`}
+              href="#download"
               className="hidden sm:inline label-mono hover:text-jarvis-cyan-bright transition-colors"
             >
-              Docs
+              Download
+            </a>
+            <a
+              href="#windows"
+              className="hidden sm:inline label-mono hover:text-jarvis-cyan-bright transition-colors"
+            >
+              Windows
             </a>
             <a
               href="#friday"
@@ -309,11 +315,114 @@ export default async function Page() {
         <span className="pointer-events-none absolute bottom-4 right-4 label-mono text-jarvis-cyan/30 animate-pulse-soft">◉ READY</span>
       </section>
 
+      {/* ===================== DOWNLOADS ===================== */}
+      <section id="download" className="relative py-24 px-6 border-t border-jarvis-cyan-dark/40">
+        <div className="mx-auto max-w-6xl">
+          <div className="mb-12">
+            <span className="label-mono text-jarvis-cyan/55">SECTION_02 · DOWNLOAD</span>
+            <h2 className="mt-3 font-sans font-bold text-3xl md:text-4xl text-cyan-50 text-balance">
+              Pick your platform.
+            </h2>
+            <p className="mt-3 font-mono text-sm text-jarvis-cyan/55 max-w-2xl">
+              Binaries are released to GitHub on every tag. macOS DMG is signed and notarized; Windows installer is Authenticode-signed. arm64 + x64 both ship.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {/* macOS DMG */}
+            <div className="jarvis-card flex flex-col h-full">
+              <span className="corner-bracket-tl" />
+              <span className="corner-bracket-tr" />
+              <span className="corner-bracket-bl" />
+              <span className="corner-bracket-br" />
+              <div className="flex items-center justify-between mb-3">
+                <span className="font-mono font-bold text-jarvis-cyan tracking-[0.25em]">MACOS</span>
+                <span className="label-mono text-jarvis-cyan/45">~35 MB</span>
+              </div>
+              <h3 className="font-sans font-semibold text-cyan-50 mb-1">Jarvis-{version}.dmg</h3>
+              <p className="font-mono text-xs text-jarvis-cyan/55 leading-relaxed mb-5 flex-1">
+                Apple Silicon (M1+) · macOS 12 or newer · Developer ID signed and notarized — no Gatekeeper warning. Drag to Applications and launch.
+              </p>
+              <a href={dmgUrl} className="jarvis-btn-primary self-start" data-testid="download-card-macos">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="m6 9 6 6 6-6" />
+                  <path d="M5 21h14" />
+                </svg>
+                <span>Download .dmg</span>
+              </a>
+            </div>
+
+            {/* Windows .exe */}
+            <div className="jarvis-card flex flex-col h-full">
+              <span className="corner-bracket-tl" />
+              <span className="corner-bracket-tr" />
+              <span className="corner-bracket-bl" />
+              <span className="corner-bracket-br" />
+              <div className="flex items-center justify-between mb-3">
+                <span className="font-mono font-bold text-jarvis-cyan tracking-[0.25em]">WINDOWS</span>
+                <span className="label-mono text-jarvis-cyan/45">~40 MB</span>
+              </div>
+              <h3 className="font-sans font-semibold text-cyan-50 mb-1">Jarvis-Setup-{version}.exe</h3>
+              <p className="font-mono text-xs text-jarvis-cyan/55 leading-relaxed mb-5 flex-1">
+                Windows 10 (1809+) or Windows 11 · x64 + arm64 · Inno Setup, Authenticode-signed. WebView2 runtime auto-installs on Win10 if missing.
+              </p>
+              <a href={exeUrl} className="jarvis-btn-primary self-start" data-testid="download-card-windows">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 3v12" />
+                  <path d="m6 9 6 6 6-6" />
+                  <path d="M5 21h14" />
+                </svg>
+                <span>Download .exe</span>
+              </a>
+            </div>
+
+            {/* winget — Windows package manager */}
+            <div className="jarvis-card flex flex-col h-full">
+              <span className="corner-bracket-tl" />
+              <span className="corner-bracket-tr" />
+              <span className="corner-bracket-bl" />
+              <span className="corner-bracket-br" />
+              <div className="flex items-center justify-between mb-3">
+                <span className="font-mono font-bold text-jarvis-cyan tracking-[0.25em]">WINGET</span>
+                <span className="label-mono text-jarvis-cyan/45">WIN11</span>
+              </div>
+              <h3 className="font-sans font-semibold text-cyan-50 mb-1">Windows package manager</h3>
+              <p className="font-mono text-xs text-jarvis-cyan/55 leading-relaxed mb-3">
+                One-line install + auto-update via Microsoft&apos;s built-in package manager.
+              </p>
+              <pre className="text-xs font-mono bg-jarvis-cyan-dark/15 border border-jarvis-cyan-dark/40 px-3 py-2 mb-4 text-jarvis-cyan-bright overflow-x-auto"><code>winget install JarvisAI.Jarvis</code></pre>
+              <a
+                href={`${REPO_URL}/blob/main/winget-pkgs/manifests/n/namanchopra/Jarvis/Namanchopra.Jarvis.yaml`}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="label-mono text-jarvis-cyan/65 hover:text-jarvis-cyan-bright transition-colors self-start"
+                data-testid="download-card-winget"
+              >
+                View manifest →
+              </a>
+            </div>
+          </div>
+
+          <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t border-jarvis-cyan-dark/40 pt-6">
+            <p className="font-mono text-xs text-jarvis-cyan/45 max-w-xl">
+              All releases · checksums · changelog · source tarballs are on the GitHub Releases page.
+            </p>
+            <a href={RELEASES_URL} target="_blank" rel="noreferrer noopener" className="jarvis-btn-secondary">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 .5a12 12 0 0 0-3.79 23.4c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.41-4.04-1.41-.55-1.39-1.34-1.76-1.34-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.83 1.24 1.83 1.24 1.07 1.84 2.81 1.31 3.5 1 .1-.78.42-1.31.76-1.61-2.66-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.12-.31-.54-1.55.12-3.22 0 0 1.01-.33 3.3 1.23a11.46 11.46 0 0 1 6 0c2.29-1.56 3.3-1.23 3.3-1.23.66 1.67.24 2.91.12 3.22.77.84 1.24 1.91 1.24 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.83.58A12 12 0 0 0 12 .5Z" />
+              </svg>
+              <span>github.com / releases</span>
+            </a>
+          </div>
+        </div>
+      </section>
+
       {/* ===================== DEMO ===================== */}
       <section className="relative py-24 px-6">
         <div className="mx-auto max-w-5xl">
           <div className="mb-12 text-center">
-            <span className="label-mono text-jarvis-cyan/55">SECTION_02 · LIVE_LOOP</span>
+            <span className="label-mono text-jarvis-cyan/55">SECTION_03 · LIVE_LOOP</span>
             <h2 className="mt-3 font-sans font-bold text-3xl md:text-4xl text-cyan-50 text-balance">
               Voice in. Sessions out.
             </h2>
@@ -336,7 +445,7 @@ export default async function Page() {
       <section className="relative py-24 px-6">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
-            <span className="label-mono text-jarvis-cyan/55">SECTION_03 · CAPABILITIES</span>
+            <span className="label-mono text-jarvis-cyan/55">SECTION_04 · CAPABILITIES</span>
             <h2 className="mt-3 font-sans font-bold text-3xl md:text-4xl text-cyan-50 text-balance">
               Built for orchestrating a swarm of agents.
             </h2>
@@ -354,7 +463,7 @@ export default async function Page() {
       <section id="install" className="relative py-24 px-6">
         <div className="mx-auto max-w-4xl">
           <div className="mb-10">
-            <span className="label-mono text-jarvis-cyan/55">SECTION_04 · INSTALL</span>
+            <span className="label-mono text-jarvis-cyan/55">SECTION_05 · INSTALL</span>
             <h2 className="mt-3 font-sans font-bold text-3xl md:text-4xl text-cyan-50 text-balance">
               Five minutes to first reply.
             </h2>
@@ -434,6 +543,70 @@ export default async function Page() {
                 <span>Get Friday (phone)</span>
               </a>
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ===================== WINDOWS ===================== */}
+      <section id="windows" className="relative py-24 px-6 border-t border-jarvis-cyan-dark/40">
+        <div className="mx-auto max-w-6xl">
+          <div className="mb-12 flex flex-col md:flex-row md:items-end md:justify-between gap-6">
+            <div>
+              <span className="label-mono text-jarvis-cyan/55">SECTION_06 · WINDOWS</span>
+              <h2 className="mt-3 font-sans font-bold text-3xl md:text-4xl text-cyan-50 text-balance">
+                Same Jarvis. <span className="text-jarvis-cyan glow-text-strong">Now on Windows.</span>
+              </h2>
+              <p className="mt-3 font-mono text-sm text-jarvis-cyan/55 max-w-2xl">
+                Native Windows 10 / 11 binaries — x64 and arm64. The macOS code path is byte-for-byte unchanged; the Windows port is a strict extension via build-tag-isolated implementations under <code className="text-jarvis-cyan">internal/syscontrol/</code>.
+              </p>
+            </div>
+            <a href={exeUrl} className="jarvis-btn-primary self-start md:self-auto whitespace-nowrap" data-testid="windows-section-cta">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M12 3v12" />
+                <path d="m6 9 6 6 6-6" />
+                <path d="M5 21h14" />
+              </svg>
+              <span>Get the installer</span>
+            </a>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            <FeatureCard glyph="◉" title="WASAPI loopback meeting mode" body="Captures system audio + mic without a virtual cable. Pipe into the same transcript buffer that powers macOS meeting recall — markdown notes, search, recap synthesis all carry over." />
+            <FeatureCard glyph="⊞" title="15 system control tools" body="Open/quit apps, focus windows, volume, brightness, DND, files, clipboard, screenshots — all by voice. PowerShell + Win32 + COM backends behind the same syscontrol interface as macOS." />
+            <FeatureCard glyph="◯" title="WebView2 HUD overlay" body="Edge Chromium runtime ships with Win11 and auto-installs on Win10. Same React HUD as macOS. Hotkeys: Alt+Space toggles the overlay, Ctrl+Space is global push-to-talk." />
+            <FeatureCard glyph="▸" title="faster-whisper STT" body="CTranslate2-backed Whisper. CPU by default; opt into CUDA via Settings → Voice for NVIDIA GPU acceleration. Same offline transcription pipeline as MLX on Mac, ~2-3× CPU latency." />
+            <FeatureCard glyph="⊕" title="VibeVoice TTS with CUDA" body="Default CPU path works on every Windows machine. NVIDIA GPU? Opt into CUDA for <500ms first-syllable latency. Same voice presets as macOS — your tuned Jarvis voice carries over." />
+            <FeatureCard glyph="◇" title="Friday pairs with Windows hosts" body="QR pairing flow is identical to Mac. Echo HTTP + WebSocket on port 4422. Tested end-to-end on Win11 + iPhone + Pixel. Same phone app, no Windows-specific build." />
+          </div>
+
+          <div className="mt-10 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="border border-jarvis-cyan-dark/40 p-5">
+              <p className="label-mono text-jarvis-cyan/45 mb-2">SUPPORTED</p>
+              <p className="font-mono text-sm text-jarvis-cyan/65 leading-relaxed">
+                Windows 10 (build 19045+) · Windows 11 · x64 (Intel / AMD) and arm64 (Snapdragon X Elite, Surface Pro / Laptop ARM).
+              </p>
+            </div>
+            <div className="border border-jarvis-cyan-dark/40 p-5">
+              <p className="label-mono text-jarvis-cyan/45 mb-2">SIGNING</p>
+              <p className="font-mono text-sm text-jarvis-cyan/65 leading-relaxed">
+                Authenticode-signed installer via Azure Trusted Signing. SmartScreen reputation accrues over installs — no recurring per-app fee like the Apple Developer Program.
+              </p>
+            </div>
+            <div className="border border-jarvis-cyan-dark/40 p-5">
+              <p className="label-mono text-jarvis-cyan/45 mb-2">MIGRATING FROM MAC?</p>
+              <p className="font-mono text-sm text-jarvis-cyan/65 leading-relaxed">
+                Existing v0.3.x macOS installs are unaffected. No config migration. Same Friday companion. Same Settings UI. Same voice.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-8 text-center">
+            <p className="font-mono text-xs text-jarvis-cyan/45 max-w-2xl mx-auto">
+              arm64 is Beta in v0.4.0 — some Python wheels in the Pipecat dependency tree don&apos;t yet cover arm64 Windows. x64 is the recommended path until v0.4.1.{' '}
+              <a href={`${REPO_URL}/blob/main/CHANGELOG.md`} target="_blank" rel="noreferrer noopener" className="text-jarvis-cyan-bright hover:underline">
+                See changelog →
+              </a>
+            </p>
           </div>
         </div>
       </section>
