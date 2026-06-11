@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-11
+
+### Fixed
+- **First-launch setup no longer requires Homebrew on macOS.** Users without Homebrew were failing at phase 1 ("Installing Python Runtime") with a "portaudio system library is required… Install Homebrew" error. The .app now bundles portaudio's headers + dylib under `Contents/Resources/portaudio/`; the installer stages them into `~/.jarvis/portaudio/`, re-ids the dylib to that absolute path, and compiles pyaudio against the bundled copy. Homebrew is now only consulted on dev machines running from source. If you previously hit this error: update Jarvis, then click **Retry** on the setup screen (or Settings → Diagnostics → Re-run setup) — setup resumes where it left off.
+- **CI now exercises the no-Homebrew install path.** A new `install-smoke-no-brew-portaudio` job stages the bundled layout, removes brew's portaudio, and runs the full first-launch install — pyaudio compile included. (This job caught a second latent bug on its first run: pyaudio's macOS build also needs `pa_mac_core.h`, not just `portaudio.h`.)
+
 ### Added
 - **Windows support (meeting mode).** Meeting mode now works natively on Windows 10 (1903+) / Windows 11 alongside the existing macOS implementation. System-audio capture uses [WASAPI loopback](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording) on the default render endpoint — Jarvis records whatever your speakers/headphones are playing without screen-recording a window. Mic capture continues to flow through the same PortAudio path used on macOS.
 - **No Screen Recording permission prompt on Windows.** Unlike macOS (where ScreenCaptureKit requires the user to grant Screen Recording in System Settings → Privacy & Security), WASAPI loopback is unrestricted by default for desktop apps on Windows. First-launch meeting mode on Windows starts capturing immediately — there is no `ProbeMeetingPermission` modal, no settings deeplink, and no degraded mic-only fallback for permission denial.
