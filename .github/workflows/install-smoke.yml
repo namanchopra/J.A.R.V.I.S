@@ -87,3 +87,87 @@ jobs:
           name: install-stderr-log
           path: install-stderr.log
           retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # No-Homebrew scenario (v0.4.1 regression test for the bundled-portaudio fix).
+  #
+  # Real users without Homebrew were dying at phase 1 with the "install
+  # Homebrew, then retry" remediation error, because the job above
+  # brew-installs portaudio and therefore only ever exercises the brew branch.
+  # This job reproduces the user scenario: stage Resources/portaudio/ the way
+  # build/scripts/post-build.sh does, REMOVE brew's portaudio, and assert the
+  # installer succeeds via the bundled copy (ensure_portaudio branch 0) —
+  # including pyaudio compiling against the staged header and importing
+  # against the staged dylib.
+  # ---------------------------------------------------------------------------
+  install-smoke-no-brew-portaudio:
+    name: Setup smoke test (bundled portaudio, no brew portaudio)
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Stage bundled portaudio layout (as post-build.sh would)
+        run: |
+          brew install portaudio
+          PREFIX="$(brew --prefix portaudio)"
+          mkdir -p resources-stage/portaudio/include resources-stage/portaudio/lib
+          cp "${PREFIX}/include/portaudio.h" resources-stage/portaudio/include/portaudio.h
+          cp "$(realpath "${PREFIX}/lib/libportaudio.2.dylib")" resources-stage/portaudio/lib/libportaudio.2.dylib
+          # The script resolves the bundle as dirname(<daemon-src>)/portaudio,
+          # so the daemon source must sit NEXT TO portaudio/ in the stage dir.
+          cp -R scripts/jarvis-daemon resources-stage/jarvis-daemon
+
+      - name: Remove brew portaudio (simulate no-Homebrew user)
+        run: brew uninstall --ignore-dependencies portaudio
+
+      - name: Fetch uv binary
+        run: bash build/scripts/fetch-uv.sh
+
+      - name: Set up clean test home
+        run: |
+          mkdir -p "$RUNNER_TEMP/jarvis-test-nobrew"
+          echo "JARVIS_TEST_HOME=$RUNNER_TEMP/jarvis-test-nobrew" >> "$GITHUB_ENV"
+
+      - name: Run install-daemon.sh against the bundled layout
+        env:
+          HOME: ${{ env.JARVIS_TEST_HOME }}
+        run: |
+          bash scripts/setup/install-daemon.sh ./build/uv/uv ./resources-stage/jarvis-daemon 2>&1 | tee install-stderr-nobrew.log
+
+      - name: Assert bundled branch was taken (not brew)
+        run: |
+          grep -q "staging bundled portaudio" install-stderr-nobrew.log \
+            || (echo "::error::installer did not take the bundled-portaudio branch"; exit 1)
+
+      - name: Assert staged portaudio in ~/.jarvis
+        run: |
+          test -f "$JARVIS_TEST_HOME/.jarvis/portaudio/include/portaudio.h" || (echo "::error::staged header missing"; exit 1)
+          test -f "$JARVIS_TEST_HOME/.jarvis/portaudio/lib/libportaudio.2.dylib" || (echo "::error::staged dylib missing"; exit 1)
+          test -L "$JARVIS_TEST_HOME/.jarvis/portaudio/lib/libportaudio.dylib" || (echo "::error::unversioned ld symlink missing"; exit 1)
+          otool -D "$JARVIS_TEST_HOME/.jarvis/portaudio/lib/libportaudio.2.dylib" | grep -q "$JARVIS_TEST_HOME/.jarvis/portaudio/lib/libportaudio.2.dylib" \
+            || (echo "::error::staged dylib install_name not re-id'd to absolute staged path"; exit 1)
+
+      - name: Assert pyaudio built + loads against the staged dylib
+        env:
+          HOME: ${{ env.JARVIS_TEST_HOME }}
+        run: |
+          "$JARVIS_TEST_HOME/.jarvis/jarvis-daemon-env/bin/python3" -c "import pyaudio; print('pyaudio', pyaudio.__version__)" \
+            || (echo "::error::pyaudio not importable against the staged portaudio dylib"; exit 1)
+
+      - name: Assert sentinel exists
+        run: |
+          test -f "$JARVIS_TEST_HOME/.jarvis/.setup-version-0.2.0" || (echo "::error::sentinel missing"; exit 1)
+
+      - name: Restore brew portaudio (runner hygiene)
+        if: always()
+        run: brew install portaudio || true
+
+      - name: Upload log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-stderr-nobrew-log
+          path: install-stderr-nobrew.log
+          retention-days: 14

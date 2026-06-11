@@ -232,6 +232,90 @@ def test_preflight_portaudio_missing_without_brew_emits_remediation(
 
 
 # ---------------------------------------------------------------------------
+# Preflight: app-bundled portaudio staged into ~/.jarvis without Homebrew
+# ---------------------------------------------------------------------------
+
+
+@requires_arm64
+def test_preflight_bundled_portaudio_staged_without_brew(
+    tmp_path: Path,
+    run_install_daemon: Callable[..., _ScriptResultProto],
+    jarvis_home: Path,
+    fake_daemon_src: Path,
+    fake_path_dir: Path,
+    make_stub: Callable[[Path, str, str], Path],
+    seed_python_sentinel: Callable[[Path], None],
+) -> None:
+    """v0.4.1 regression test: when the .app bundles Resources/portaudio/
+    (post-build.sh staging), ensure_portaudio must stage header + dylib into
+    ~/.jarvis/portaudio/ and proceed WITHOUT consulting Homebrew — this is the
+    fix for users without brew dying at phase 1 with the remediation error.
+
+    The bundled dir is resolved as dirname(BUNDLED_DAEMON_SRC)/portaudio, so
+    we create it next to the fake_daemon_src fixture. The dylib must be a real
+    Mach-O (install_name_tool rejects dummies), so build an empty one with
+    clang — the script's own preflight already requires the Xcode CLT.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("clang") is None:
+        pytest.skip("clang not available to build the test dylib")
+
+    bundled = fake_daemon_src.parent / "portaudio"
+    (bundled / "include").mkdir(parents=True)
+    (bundled / "lib").mkdir(parents=True)
+    (bundled / "include" / "portaudio.h").write_text(
+        "/* stub portaudio.h for bundled-staging test */\n"
+    )
+    empty_c = tmp_path / "empty.c"
+    empty_c.write_text("")
+    subprocess.run(
+        ["clang", "-dynamiclib", str(empty_c),
+         "-o", str(bundled / "lib" / "libportaudio.2.dylib")],
+        check=True, capture_output=True,
+    )
+
+    # Stub `df` to report ample disk so the test doesn't depend on the host
+    # machine's free space (same trick as the low-disk test, inverted).
+    make_stub(
+        fake_path_dir,
+        "df",
+        "echo 'Filesystem     1024-blocks      Used Available Capacity iused ifree %iused  Mounted on'\n"
+        "echo '/dev/fake         500000000 100000000 400000000      20%     0     0    20% /'\n"
+        "exit 0\n",
+    )
+
+    # Skip phase 1's network download; phase 2 runs against the fake uv.
+    seed_python_sentinel(jarvis_home)
+
+    result = run_install_daemon()
+
+    assert result.returncode == 0, result.stderr
+    assert "PHASE_ERROR" not in result.stderr
+
+    staged_header = jarvis_home / "portaudio" / "include" / "portaudio.h"
+    staged_dylib = jarvis_home / "portaudio" / "lib" / "libportaudio.2.dylib"
+    assert staged_header.is_file()
+    assert staged_dylib.is_file()
+    # `ld -lportaudio` resolves the UNVERSIONED name; the staging must mirror
+    # brew's libportaudio.dylib -> libportaudio.2.dylib symlink.
+    unversioned = jarvis_home / "portaudio" / "lib" / "libportaudio.dylib"
+    assert unversioned.is_symlink()
+    assert unversioned.resolve() == staged_dylib.resolve()
+
+    # The staged dylib's install name (LC_ID_DYLIB) must be the absolute
+    # staged path — that id is what ld bakes into pyaudio's _portaudio.so,
+    # which is loaded by the bundled python process where @executable_path
+    # or brew paths would not resolve.
+    otool = subprocess.run(
+        ["otool", "-D", str(staged_dylib)],
+        check=True, capture_output=True, text=True,
+    )
+    assert str(staged_dylib) in otool.stdout
+
+
+# ---------------------------------------------------------------------------
 # Phase python: skip path on sentinel present
 # ---------------------------------------------------------------------------
 
