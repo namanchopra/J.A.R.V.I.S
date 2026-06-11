@@ -1,12 +1,15 @@
-//go:build !darwin
+//go:build !darwin && !windows
 
-// app_voice_other.go — non-macOS fallback for GetAudioInputDevices.
+// app_voice_other.go — non-macOS, non-Windows fallback for
+// GetAudioInputDevices.
 //
-// On Linux/Windows we don't currently enumerate Core Audio (no equivalent
-// shell command, and cgo bindings to ALSA / WASAPI are out of scope for
-// Phase 2 P1). We return a single "Default" entry so the Settings dropdown
-// has at least one option to render and the daemon falls back to the OS
-// default input device.
+// On Linux (and any other future port target) we don't yet have a native
+// audio-device enumeration path. We return a single "Default" entry so the
+// Settings dropdown has at least one option to render and the daemon falls
+// back to the OS default input device.
+//
+// macOS uses app_voice_darwin.go (Core Audio via system_profiler).
+// Windows uses app_voice_windows.go (MMDevice / IMMDeviceEnumerator).
 package main
 
 func enumerateAudioInputs() []AudioDevice {

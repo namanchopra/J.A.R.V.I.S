@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -251,7 +250,7 @@ func (c *Client) cliExec(ctx context.Context, args ...string) ([]byte, error) {
 		fullArgs = append([]string{"--password", c.socketPassword}, args...)
 	}
 	cmd := exec.CommandContext(ctx, c.binPath, fullArgs...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	setDetached(cmd)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

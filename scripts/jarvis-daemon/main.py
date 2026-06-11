@@ -387,6 +387,69 @@ system-audio inject, we attribute it to system audio (i.e. speakers
 playing remote meeting participants); otherwise it's mic-side speech.
 ``None`` until the first ``system_audio`` frame arrives."""
 
+# v0.4.0 / TASK-052: Volume normalisation between mic and system audio.
+# Mic and system audio peaks routinely differ by 12-30 dB on Windows (the
+# loopback capture path tends to be much louder than condenser mics). The
+# unnormalised mix produces transcripts where one speaker looks SHOUTED
+# and the other barely registers. We track a rolling peak (in dBFS) for
+# each source and apply a bounded gain to the system audio so its peak
+# tracks the mic peak within ``_VOL_NORM_TARGET_RANGE_DB``.
+#
+# Design notes:
+#  - We normalise SYSTEM AUDIO only (mic stays untouched). Mic flows
+#    through Pipecat's transport and is what the user has tuned for
+#    everything else in the daemon -- changing it would ripple through
+#    VAD/wake-word/STT calibration.
+#  - The mic-peak tracker is updated by :class:`WSBridgeProcessor` on
+#    each ``InputAudioRawFrame``/``AudioRawFrame`` it sees. Cheap O(N)
+#    on the frame, dominated by Pipecat's existing per-frame work.
+#  - Gain is clamped to ``[_VOL_NORM_MIN_GAIN, _VOL_NORM_MAX_GAIN]``.
+#    The upper bound prevents amplifying silent system audio into noise
+#    when the user is on a one-way call (acceptance criterion #3).
+#  - We use a tiny EMA (alpha=0.15) so peaks decay over ~6-7 frames.
+#    Long enough to ride out short silences within a phrase, short
+#    enough to react when one speaker hands off to the other.
+_MIC_PEAK_DBFS: float = -60.0
+"""Exponential moving average of recent mic-audio peak in dBFS. Updated
+by :class:`WSBridgeProcessor` on each ``AudioRawFrame``/``InputAudioRawFrame``
+during meeting mode. Floor of -60 dBFS represents "effectively silent"
+(matches the silence floor used in ``_pcm16_peak_dbfs``)."""
+
+_SYSTEM_PEAK_DBFS: float = -60.0
+"""Exponential moving average of recent system-audio peak in dBFS.
+Updated in :func:`_handle_system_audio` BEFORE gain is applied so the
+estimate reflects the source level, not the normalised level."""
+
+_VOL_NORM_TARGET_RANGE_DB: Final[float] = 6.0
+"""Acceptance criterion #1: peaks must be within this many dB of each
+other after normalisation. We aim for system audio peak == mic peak;
+the 6 dB band is the headroom we tolerate before re-applying gain."""
+
+_VOL_NORM_MAX_GAIN_DB: Final[float] = 18.0
+"""Upper bound on the gain we will apply to system audio. Caps the
+amplification of a quiet remote talker so a momentarily-silent mic
+doesn't drag the gain sky-high (acceptance criterion #3). 18 dB ~= 8x
+linear, which covers a quiet remote on a loud-mic setup without
+crossing into noise-amplification territory."""
+
+_VOL_NORM_MIN_GAIN_DB: Final[float] = -12.0
+"""Lower bound on the gain we will apply to system audio. Attenuates
+overly hot system audio (e.g. someone joins on speakerphone) so the
+mixed transcript doesn't clip the STT input."""
+
+_VOL_NORM_SILENCE_FLOOR_DBFS: Final[float] = -50.0
+"""If the mic peak EMA is below this, we treat the mic as silent and
+SKIP normalisation -- we don't want to boost system audio to match
+silence (acceptance criterion #3). Likewise if system audio itself is
+below this floor we leave it alone (boosting silence == boosting
+electrical noise)."""
+
+_VOL_NORM_EMA_ALPHA: Final[float] = 0.15
+"""Smoothing factor for the rolling peak EMA. Higher = react faster
+to changes; lower = smoother. 0.15 gives ~6-7 frame half-life, which
+at 16 kHz / typical 20 ms Pipecat frames is ~140 ms -- snappy enough
+to follow speaker handoffs without flapping on a single loud word."""
+
 # v0.3.0 / TASK-007: cache of the recap text produced by the most-
 # recent ``generate_meeting_notes`` call. TASK-008's
 # ``__meeting_recap__`` handler reads this for replay-without-
@@ -597,6 +660,193 @@ def _handle_mobile_active(data: dict[str, Any]) -> None:
             )
 
 
+# ---------------------------------------------------------------------------
+# v0.4.0 / TASK-052: Volume normalisation helpers
+# ---------------------------------------------------------------------------
+
+
+def _pcm16_peak_dbfs(pcm: bytes) -> float:
+    """Compute the peak amplitude of a 16-bit signed-LE mono PCM buffer in dBFS.
+
+    Returns ``_VOL_NORM_SILENCE_FLOOR_DBFS`` for empty / all-zero buffers
+    so the caller doesn't have to special-case silence (the silence-floor
+    check in :func:`_normalize_system_pcm` already treats values at/below
+    that floor as "don't normalise").
+
+    The output is a negative float capped at 0 dBFS (max int16 = 32767
+    is 0 dBFS by definition). We use ``numpy`` because:
+
+    1. The standard library's ``audioop`` was removed in Python 3.13 and
+       the daemon ships Python 3.13 (TASK-051 setup).
+    2. numpy is already imported lazily by ``WakeWordGate`` and the
+       startup-audio pre-roll path, so the import cost is amortised.
+
+    Falling back to a slow pure-Python loop on numpy import failure keeps
+    the daemon usable in degraded environments (e.g. minimal CI matrix
+    runs) -- TASK-052 is volume polish, not a hard dependency.
+    """
+    if not pcm:
+        return _VOL_NORM_SILENCE_FLOOR_DBFS
+    try:
+        import numpy as np
+
+        samples = np.frombuffer(pcm, dtype=np.int16)
+        if samples.size == 0:
+            return _VOL_NORM_SILENCE_FLOOR_DBFS
+        peak = int(np.abs(samples).max())
+    except Exception:  # noqa: BLE001 -- defensive fallback
+        # Pure-Python fallback: scan int16 LE samples manually.
+        peak = 0
+        for i in range(0, len(pcm) - 1, 2):
+            lo = pcm[i]
+            hi = pcm[i + 1]
+            val = lo | (hi << 8)
+            if val >= 0x8000:
+                val -= 0x10000
+            if val < 0:
+                val = -val
+            if val > peak:
+                peak = val
+    if peak <= 0:
+        return _VOL_NORM_SILENCE_FLOOR_DBFS
+    # 20 * log10(peak / 32767). Use math.log10 to avoid pulling numpy
+    # into the hot path twice.
+    import math
+
+    dbfs = 20.0 * math.log10(peak / 32767.0)
+    if dbfs < _VOL_NORM_SILENCE_FLOOR_DBFS:
+        return _VOL_NORM_SILENCE_FLOOR_DBFS
+    return dbfs
+
+
+def _update_peak_ema(prev_dbfs: float, sample_dbfs: float) -> float:
+    """Update the rolling peak EMA with a new sample.
+
+    Pure function so the meeting-mode tests can reproduce the math
+    without touching module globals.
+    """
+    return (
+        _VOL_NORM_EMA_ALPHA * sample_dbfs
+        + (1.0 - _VOL_NORM_EMA_ALPHA) * prev_dbfs
+    )
+
+
+def _observe_mic_peak(pcm: bytes) -> None:
+    """Feed a mic-audio PCM buffer into the mic-peak EMA.
+
+    Called from :class:`WSBridgeProcessor` for each ``AudioRawFrame`` /
+    ``InputAudioRawFrame`` flowing through the pipeline while a meeting
+    is active. Cheap no-op outside meeting mode (the caller already
+    guards on ``_MEETING_ACTIVE`` but we re-check defensively so the
+    helper is safe to call from anywhere).
+    """
+    global _MIC_PEAK_DBFS
+    if not _MEETING_ACTIVE:
+        return
+    sample_dbfs = _pcm16_peak_dbfs(pcm)
+    _MIC_PEAK_DBFS = _update_peak_ema(_MIC_PEAK_DBFS, sample_dbfs)
+
+
+def _normalize_system_pcm(pcm: bytes) -> bytes:
+    """Apply bounded volume gain to system-audio PCM to match mic peak.
+
+    Mutates the module-level ``_SYSTEM_PEAK_DBFS`` with the pre-gain peak
+    of ``pcm`` so subsequent calls converge on the right target. Returns
+    the (possibly amplified, possibly attenuated, possibly unchanged) PCM
+    buffer.
+
+    Behaviour matrix (acceptance criteria mapping):
+
+    1. Mic loud, system quiet  -> apply +gain (capped at +18 dB).
+       => post-norm peaks within ``_VOL_NORM_TARGET_RANGE_DB`` of mic.
+    2. Mic quiet, system loud  -> apply -gain (capped at -12 dB).
+       => no audible clipping.
+    3. Mic silent (below floor) -> NO-OP. Don't amplify system audio
+       to match silence (silent-source guard).
+    4. System silent (below floor) -> NO-OP. Don't amplify noise floor.
+    5. Already within target band -> NO-OP. Idempotent on aligned input.
+
+    Clipping guard: after computing gain, we additionally check that the
+    post-gain peak would not exceed 0 dBFS (32767). If it would, we
+    further attenuate to leave 1 dB of headroom. This catches the edge
+    case where the mic peak EMA is hot (e.g. user just clapped) and the
+    target would push system samples into saturation.
+    """
+    global _SYSTEM_PEAK_DBFS
+
+    if not pcm:
+        return pcm
+
+    system_dbfs = _pcm16_peak_dbfs(pcm)
+    _SYSTEM_PEAK_DBFS = _update_peak_ema(_SYSTEM_PEAK_DBFS, system_dbfs)
+
+    # Acceptance criterion #3: don't over-amplify silence on either side.
+    if _MIC_PEAK_DBFS <= _VOL_NORM_SILENCE_FLOOR_DBFS:
+        return pcm
+    if system_dbfs <= _VOL_NORM_SILENCE_FLOOR_DBFS:
+        return pcm
+
+    delta_db = _MIC_PEAK_DBFS - system_dbfs
+
+    # Within the target band? Leave it alone (idempotent + cheap).
+    if abs(delta_db) <= _VOL_NORM_TARGET_RANGE_DB:
+        return pcm
+
+    # Clamp the gain so we never explode quiet input or pump down loud
+    # input below useful levels.
+    if delta_db > _VOL_NORM_MAX_GAIN_DB:
+        gain_db = _VOL_NORM_MAX_GAIN_DB
+    elif delta_db < _VOL_NORM_MIN_GAIN_DB:
+        gain_db = _VOL_NORM_MIN_GAIN_DB
+    else:
+        gain_db = delta_db
+
+    # Clipping guard: if applying the gain would push system_dbfs above
+    # -1 dBFS, ratchet the gain back so we keep 1 dB of headroom.
+    post_peak_dbfs = system_dbfs + gain_db
+    if post_peak_dbfs > -1.0:
+        gain_db -= post_peak_dbfs + 1.0
+
+    # Linear gain. 10^(gain_db / 20).
+    import math
+
+    gain_linear = math.pow(10.0, gain_db / 20.0)
+
+    try:
+        import numpy as np
+
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+        scaled = samples * gain_linear
+        # Hard-clip just in case the EMA-based headroom estimate is off
+        # on a transient. Hard clip at int16 bounds rather than letting
+        # the cast wrap.
+        np.clip(scaled, -32768.0, 32767.0, out=scaled)
+        return scaled.astype(np.int16).tobytes()
+    except Exception:  # noqa: BLE001 -- defensive fallback
+        # Pure-Python fallback. Slow, but the daemon must never crash on
+        # an injected system-audio frame.
+        logger.debug(
+            "_normalize_system_pcm: numpy path failed, using fallback"
+        )
+        out = bytearray(len(pcm))
+        for i in range(0, len(pcm) - 1, 2):
+            lo = pcm[i]
+            hi = pcm[i + 1]
+            val = lo | (hi << 8)
+            if val >= 0x8000:
+                val -= 0x10000
+            scaled_val = int(val * gain_linear)
+            if scaled_val > 32767:
+                scaled_val = 32767
+            elif scaled_val < -32768:
+                scaled_val = -32768
+            if scaled_val < 0:
+                scaled_val += 0x10000
+            out[i] = scaled_val & 0xFF
+            out[i + 1] = (scaled_val >> 8) & 0xFF
+        return bytes(out)
+
+
 def _handle_system_audio(data: dict[str, Any]) -> None:
     """Handle a ``system_audio`` control frame from the Go bridge.
 
@@ -634,6 +884,16 @@ def _handle_system_audio(data: dict[str, Any]) -> None:
         return
 
     _LAST_SYSTEM_AUDIO_TS = time.monotonic()
+
+    # v0.4.0 / TASK-052: Normalise system-audio peak to match the
+    # rolling mic peak (within ``_VOL_NORM_TARGET_RANGE_DB``) before
+    # injecting. This is the "buffer-append step" the task brief calls
+    # out -- it's the last hook we control before the audio joins the
+    # mic stream in the STT pipeline. The mic-peak EMA is fed by
+    # ``WSBridgeProcessor.process_frame`` (see the AudioRawFrame branch
+    # there). Guarded by ``_normalize_system_pcm`` against amplifying
+    # silence on either side.
+    pcm = _normalize_system_pcm(pcm)
 
     # Inject as a MobileAudioRawFrame so STT consumes it on the same
     # pipeline as the mic path. The mic + system streams mix into one
@@ -1154,6 +1414,25 @@ class WSBridgeProcessor(FrameProcessor):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
+
+        # v0.4.0 / TASK-052: Feed mic-audio peaks into the volume-norm
+        # EMA so :func:`_handle_system_audio` can match system-audio
+        # peaks to the mic side. Only active during meeting mode; the
+        # ``_observe_mic_peak`` helper short-circuits otherwise. We use
+        # ``MobileAudioRawFrame`` exclusion to avoid double-counting
+        # system audio that we already injected via _handle_system_audio
+        # (those frames re-enter as InputAudioRawFrame subclasses).
+        if _MEETING_ACTIVE and isinstance(frame, AudioRawFrame):
+            if not isinstance(frame, MobileAudioRawFrame):
+                audio_bytes = getattr(frame, "audio", None)
+                if isinstance(audio_bytes, (bytes, bytearray)):
+                    try:
+                        _observe_mic_peak(bytes(audio_bytes))
+                    except Exception:  # noqa: BLE001 -- never let metering crash audio
+                        logger.debug(
+                            "WSBridge: mic peak observation failed",
+                            exc_info=True,
+                        )
 
         # v0.3.0 / TASK-006: LLM suppression during meeting mode.
         # ``__meeting_start__`` flips ``_SUPPRESS_LLM_TURN`` True so that

@@ -92,7 +92,21 @@ class VibeVoiceTTSService(FrameProcessor):
         self._service_lock = asyncio.Lock()
         self._consecutive_failures = 0
 
-        # Auto-detect device: MPS for Apple Silicon, CUDA if available, else CPU
+        # Auto-detect device.
+        #
+        # Priority order:
+        #   1. MPS — Apple Silicon (macOS).
+        #   2. CUDA — Windows / Linux with an NVIDIA GPU available. Windows
+        #      has no MPS backend, so on a CUDA-equipped Win11 box we land
+        #      here and get GPU-accelerated TTS (<500ms first-syllable
+        #      latency per TASK-038).
+        #   3. CPU — fallback. On Windows without CUDA this keeps the
+        #      pipeline functional at degraded latency (~2s first
+        #      syllable), which TASK-038 explicitly accepts.
+        #
+        # The mid-session CUDA OOM fallback handled in `_synthesize` may
+        # later flip ``self._device`` from "cuda" to "cpu" at runtime; see
+        # `_is_cuda_oom` + `_fallback_to_cpu` below.
         if device is None:
             import torch
             if torch.backends.mps.is_available():
@@ -427,12 +441,60 @@ class VibeVoiceTTSService(FrameProcessor):
 
         await self.push_frame(frame, direction)
 
+    @staticmethod
+    def _is_cuda_oom(exc: BaseException) -> bool:
+        """Return True if ``exc`` looks like a CUDA out-of-memory error.
+
+        We avoid importing torch at module load (heavy + slow) so we sniff
+        the exception by type name + message. This covers
+        ``torch.cuda.OutOfMemoryError`` and the historical
+        ``RuntimeError("CUDA out of memory. ...")`` form.
+        """
+        type_name = type(exc).__name__
+        msg = str(exc).lower()
+        if type_name == "OutOfMemoryError":
+            return True
+        return (
+            "cuda" in msg
+            and ("out of memory" in msg or "cuda_error_out_of_memory" in msg)
+        )
+
+    async def _fallback_to_cpu(self) -> None:
+        """Drop the loaded CUDA model and switch device to CPU.
+
+        Called when a CUDA OOM is detected mid-session (TASK-038 failure
+        case). The next ``_synthesize`` call will reload the model on CPU
+        via ``_get_service``. We deliberately do **not** raise here — the
+        current utterance is already lost, but the pipeline keeps running
+        at degraded latency rather than failing every subsequent request.
+        """
+        logger.warning(
+            "VibeVoice: CUDA OOM detected — falling back to CPU for the "
+            "remainder of this session. Restart Jarvis to retry CUDA."
+        )
+        self._service = None
+        self._device = "cpu"
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            # If torch import or cache eviction fails we still want the
+            # CPU fallback to take effect — swallow and continue.
+            logger.debug("torch.cuda.empty_cache() failed during fallback", exc_info=True)
+
     async def _synthesize(self, text: str):
         """Synthesize text to audio via VibeVoice.
 
-        No silent fallback. If VibeVoice fails, the error is logged and
-        propagated as missing audio; the user sees the failure rather than
-        silently switching to a cloud TTS with a different voice.
+        No silent fallback to a different TTS engine. If VibeVoice fails,
+        the error is logged and propagated as missing audio; the user sees
+        the failure rather than silently switching to a cloud TTS with a
+        different voice.
+
+        Exception: when running on CUDA and the failure is an OOM, we
+        transparently flip ``self._device`` to ``cpu`` so the next
+        utterance reloads on CPU. This satisfies TASK-038's "gracefully
+        falls back to CPU mid-session" acceptance criterion.
         """
         logger.info("TTS synthesizing: %s", text[:60])
         self._audio_chunk_counter = 0
@@ -441,12 +503,14 @@ class VibeVoiceTTSService(FrameProcessor):
         try:
             await self._synthesize_vibevoice(text)
             self._consecutive_failures = 0
-        except Exception:
+        except Exception as exc:
             self._consecutive_failures += 1
             logger.exception(
                 "VibeVoice TTS failed (attempt %d) for: %s",
                 self._consecutive_failures, text[:60],
             )
+            if self._device == "cuda" and self._is_cuda_oom(exc):
+                await self._fallback_to_cpu()
         finally:
             await self.push_frame(TTSStoppedFrame())
             if self._audio_send_fn is not None:

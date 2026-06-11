@@ -1,0 +1,834 @@
+# Release workflow for Jarvis on Windows — builds signed zips on tag push.
+#
+# Triggered by pushing a semver tag (e.g. `v0.4.0`). Produces:
+#   - build/bin/jarvis.exe                                            (Wails-built, Trusted-Signing signed)
+#   - jarvis-<version>-win11-21h2-amd64.zip                           (Win11 21H2 / Server 2022 amd64 zip)
+#   - jarvis-<version>-win11-24h2-amd64.zip                           (Win11 24H2 / Server 2025 amd64 zip)
+#   - jarvis-<version>-win11-21h2-arm64.zip                           (Win11 21H2 / Server 2022 arm64 zip, cross-compiled)
+#   - jarvis-<version>-<win-label>-amd64.msix                         (optional, TASK-063: Microsoft Store / sideload package)
+#
+# Runs alongside the existing macOS `release.yml`.
+#   - TASK-054 wires Inno Setup .iss into this workflow (installer .exe). When
+#     TASK-054 lands and drops `Jarvis-Setup-<version>.exe` next to the wails
+#     output, the signing step in this workflow (TASK-056) signs it too — no
+#     change needed here once that file appears.
+#   - TASK-056 (this task) wires Azure Trusted Signing + signtool. When the
+#     AZURE_* secrets are not configured, the workflow falls through to
+#     publishing UNSIGNED zips (so OSS forks without a cert can still ship)
+#     and prints a loud warning in the build log. With the secrets set, every
+#     .exe / .dll under build/bin/ is signed and signtool verify /pa is run as
+#     a gate — an expired or revoked cert fails CI cleanly (AC #3).
+#   - TASK-063 adds an OPTIONAL MSIX packaging step (Microsoft Store /
+#     sideload-friendly format). It runs only on amd64 (Store accepts arm64
+#     but we ship arm64 as zip-only in Phase 1) and `continue-on-error: true`
+#     so a missing or broken `makeappx.exe` on a runner with a stripped
+#     Windows SDK never blocks the primary zip / installer release path. The
+#     produced `.msix` requires Win11 (or Win10 1809+ with Developer Mode and
+#     the "App Installer" Store app) to sideload — older Win10 emits a
+#     graceful warning and the artefact is still uploaded so a release
+#     engineer can decide whether to publish it.
+#
+# Build matrix:
+#   - windows-2022 (Server 2022 / Win11 21H2 build line) × amd64
+#   - windows-2025 (Server 2025 / Win11 24H2 build line) × amd64
+#   - windows-2022 × arm64 (cross-compiled from x64; GitHub also offers a
+#     native `windows-11-arm` runner now, but we keep cross-compile here so
+#     the arm64 binary's Go toolchain stamp is identical to the amd64 one
+#     we ship from the canonical builder. Wails v2 supports
+#     `-platform windows/arm64` cross-compile from x64 Windows out of the
+#     box via the Go cross-toolchain.)
+#
+# We deliberately do NOT cross-compile arm64 on windows-2025: arm64 builds
+# are only published from windows-2022 to keep the produced binary's
+# toolchain stamp identical to what we ship from the canonical builder.
+#
+# Why two amd64 builds on different Windows generations: Windows API
+# surface area drifts between major Server/Win11 builds (some shell,
+# mediafoundation, and webview2 APIs only appeared in Win11 22H2/24H2).
+# Building + smoke-running on the OLDER image (windows-2022) catches use
+# of newer-Windows-only APIs *before* an artifact is uploaded — see the
+# "Smoke jarvis.exe --version" step which fails fast on entry-point-not
+# -found. This is the AC's "Win10-only API usage caught" check; we use
+# windows-2022 as the stand-in for the Win10 build line because GitHub
+# retired `windows-2019` (the original choice in the plan task body) in
+# mid-2025, and `windows-2022` is the oldest still-hosted image we can
+# rely on. See https://github.com/actions/runner-images for the canonical
+# list of supported labels.
+#
+# Per-arch timeout is 25min: ~3 min Go+Node setup, ~2 min npm ci, ~1 min
+# frontend build, ~10 min wails build (Wails compiles to native via Go +
+# bundles the WebView2 loader), ~3 min signtool (Azure Trusted Signing — the
+# action calls home to the signing service per artefact, so multiple .exe/.dll
+# under Resources/lib multiplies this), ~1 min zip, plus runner cold start
+# headroom. Was 20min before TASK-056 added signing.
+#
+# Secrets required for signed releases (Settings → Secrets and variables →
+# Actions). All six must be set together, or none — the workflow auto-detects
+# via HAS_TRUSTED_SIGNING below and gates the signing steps on it.
+#
+#   AZURE_TENANT_ID            - Microsoft Entra tenant hosting the Trusted Signing account
+#   AZURE_CLIENT_ID            - Service principal app ID with the
+#                                "Trusted Signing Certificate Profile Signer" role
+#   AZURE_CLIENT_SECRET        - Service principal client secret
+#   AZURE_SIGNING_ENDPOINT     - Trusted Signing regional endpoint
+#                                (e.g. https://wus2.codesigning.azure.net/)
+#   AZURE_SIGNING_ACCOUNT_NAME - Trusted Signing account name
+#   AZURE_SIGNING_PROFILE_NAME - Certificate profile to use (e.g. "jarvis-prod")
+#
+# Optional secret (TASK-063 MSIX path only):
+#
+#   AZURE_SIGNING_PUBLISHER_CN - Distinguished Name of the Trusted Signing
+#                                cert's Subject (e.g.
+#                                "CN=Jarvis, O=Anthropic, C=US"). Used as
+#                                <Identity Publisher=...> in AppxManifest.xml.
+#                                MUST match the cert subject exactly or
+#                                makeappx + signtool reject the package. When
+#                                unset the MSIX falls back to a sideload-only
+#                                dev publisher CN and a loud warning.
+#
+# Why Azure Trusted Signing over DigiCert / Sectigo OV: $9.99/month flat with
+# no per-signature fees and no HSM hardware to manage; certs are short-lived
+# (~3 days) and auto-rotated by the service, so we never have to deal with
+# "cert about to expire" warnings. signtool DOES fail loudly if the Azure
+# call returns an expired/invalid response, which closes the "ship unsigned
+# by accident" AC failure case.
+
+name: Release (Windows)
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+# Prevent two builds of the same tag from racing each other. Scoped to this
+# workflow so it doesn't fight the macOS release.yml for the same tag.
+concurrency:
+  group: release-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+# `contents: write` is required so the matrix can upload artefacts that a
+# downstream consolidation job (or TASK-054's installer build) can attach to
+# the GitHub Release. For this task we only upload as workflow artefacts —
+# Release publishing for Windows binaries lands with TASK-054.
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build jarvis ${{ matrix.arch }} on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    # 25 min ceiling. If wails build alone exceeds ~12 min on a cold cache we
+    # should investigate before bumping this — the budget reflects what a
+    # stripped Phase 1 Windows build + Trusted Signing should cost. Was 20min
+    # before TASK-056 added the ~3min signtool step.
+    timeout-minutes: 25
+
+    # `secrets.X` can't be referenced in step-level `if:` directly (GHA
+    # security restriction), so we materialise the flag once at job level
+    # via env, then gate the signing + verify steps on `env.HAS_TRUSTED_SIGNING`.
+    # When unset, the workflow falls through to publishing unsigned zips
+    # (Windows SmartScreen will show "Unknown publisher" — fine for OSS
+    # forks without a signing budget). When set, the same workflow upgrades
+    # to the full signed + verified path. Mirrors the HAS_APPLE_CERT pattern
+    # in the macOS release.yml.
+    env:
+      HAS_TRUSTED_SIGNING: ${{ secrets.AZURE_TENANT_ID != '' }}
+
+    strategy:
+      # Fail-fast off so an arm64 cross-compile regression doesn't mask an
+      # amd64 success (and vice versa). Each combination is independently
+      # shippable and we want all build logs on failure.
+      fail-fast: false
+      matrix:
+        # Explicit include list (rather than a runner×arch product) so we
+        # only build arm64 on windows-2022. Cross-compiling arm64 on a
+        # windows-2025 image would not exercise any new code path — the
+        # output is the same Go-stamped PE32+ binary either way — and would
+        # double the arm64 build cost for zero coverage gain.
+        #
+        # `win-label` is the human-readable Windows generation used to
+        # disambiguate uploaded artifact names so the older + newer Win11
+        # zips can coexist as separate downloads without colliding on the
+        # artifact storage backend (GitHub rejects duplicate artifact names
+        # within a single workflow run).
+        include:
+          - runner: windows-2022
+            arch: amd64
+            win-label: win11-21h2
+          - runner: windows-2025
+            arch: amd64
+            win-label: win11-24h2
+          - runner: windows-2022
+            arch: arm64
+            win-label: win11-21h2
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Wails CLI
+        # Same install pattern as release.yml; `go env GOPATH` resolves to
+        # the runner-local Go install (C:\Users\runneradmin\go on
+        # windows-2022). Appending to GITHUB_PATH makes `wails` discoverable
+        # in subsequent steps without a full shell reload.
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          $goBin = Join-Path (go env GOPATH) 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $goBin
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        shell: pwsh
+        run: npm ci
+
+      # Wails runs `npm run build` itself, but pre-building here gives us a
+      # clean failure mode if the frontend toolchain breaks — easier to
+      # triage than a wrapped error inside `wails build`. Matches ci.yml.
+      - name: Build frontend
+        working-directory: frontend
+        shell: pwsh
+        run: npm run build
+
+      # Build the Wails app for the matrix arch. `-clean` wipes any stray
+      # build/bin output so artefact paths are deterministic across reruns.
+      # No signing flags — TASK-056 wires those in. Output filename is
+      # `jarvis.exe` (set by wails.json `outputfilename`).
+      - name: Wails build (windows/${{ matrix.arch }})
+        shell: pwsh
+        # 15 min per-step ceiling leaves 5 min for setup + zip within the
+        # job's 20 min budget. If wails build runs longer we want it to fail
+        # this step (clean error) rather than hit the job timeout (raw kill).
+        timeout-minutes: 15
+        run: wails build -platform windows/${{ matrix.arch }} -clean
+
+      # Sanity check before we zip: a missing jarvis.exe means the wails
+      # build silently produced nothing for this arch (we have seen this on
+      # arm64 cross-compile when CGO transitively pulled in an x64-only
+      # dep). Fail here rather than upload an empty zip.
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'build/bin/jarvis.exe')) {
+            Write-Error 'build/bin/jarvis.exe missing after wails build'
+            exit 1
+          }
+          Get-Item 'build/bin/jarvis.exe' | Select-Object Name, Length, LastWriteTime
+
+      # ------------------------------------------------------------------
+      # Code Signing (Azure Trusted Signing)  [TASK-056]
+      # ------------------------------------------------------------------
+      # Why here (after Verify, before Smoke):
+      #   - Sign first so the smoke step runs against the SIGNED PE.
+      #     Signing rewrites the PE header (Security Directory + cert table)
+      #     and re-checksums the file; if anything in that pipeline corrupted
+      #     the executable, `jarvis.exe --version` will fault loudly here
+      #     rather than after we've already published a broken artifact.
+      #   - Sign before zipping so the produced .zip contains the signed
+      #     binaries — users extracting the zip get a Windows-blessed .exe,
+      #     not an "Unknown publisher" SmartScreen prompt (AC #2).
+      #
+      # Why HAS_TRUSTED_SIGNING gate:
+      #   `secrets.X != ''` cannot be evaluated in a step-level `if:` (GHA
+      #   security policy), so we materialise the flag at job level (`env:`
+      #   above) and reference it via `env.HAS_TRUSTED_SIGNING` here. When
+      #   the AZURE_* secrets are unset (e.g. OSS forks, PR builds without
+      #   secret access) the signing steps skip and we ship unsigned zips
+      #   — same fallback as the macOS release.yml HAS_APPLE_CERT path.
+      #
+      # Why iterate over .exe + .dll under build/bin/:
+      #   The task body explicitly calls out signing "jarvis.exe, all bundled
+      #   .exe / .dll in Resources/, AND the Inno Setup output" (AC #1: every
+      #   Mach-O equivalent is signed). Today there is only jarvis.exe; once
+      #   TASK-035's post-build.ps1 lands and copies portaudio.dll +
+      #   webview2-loader.dll into Resources/lib/, the same recursive scan
+      #   catches them automatically — no follow-up edit needed when those
+      #   tasks land.
+      - name: Find signable artefacts (.exe / .dll)
+        if: ${{ env.HAS_TRUSTED_SIGNING == 'true' }}
+        id: find-artefacts
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path build/bin -Recurse -File `
+            -Include '*.exe','*.dll' `
+            | Select-Object -ExpandProperty FullName
+          if (-not $files) {
+            Write-Error 'No .exe / .dll files found under build/bin to sign — wails build output is empty?'
+            exit 1
+          }
+          $listPath = Join-Path $env:RUNNER_TEMP 'signtool-files.txt'
+          $files | Out-File -FilePath $listPath -Encoding ascii
+          Write-Host "Will sign:`n$($files -join "`n")"
+          # Emit the file list path for the signing action and the dir prefix
+          # the action uses to root its glob (it signs every file matched by
+          # `files-folder-filter` inside `files-folder`).
+          "files-folder=build/bin"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "files-folder-filter=exe,dll"      | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "files-list=$listPath"             | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # azure/trusted-signing-action installs the Trusted Signing dlib +
+      # invokes signtool with the Azure-managed cert. The action authenticates
+      # via the AZURE_* env vars (service principal, no on-runner certificate
+      # material), so there is no `security`-style keychain teardown to do
+      # afterwards. Pinned to a major-version tag so action upgrades don't
+      # land silently mid-release.
+      #
+      # `files-folder-recurse: true` walks Resources/ when TASK-035 starts
+      # populating it. `files-folder-filter: exe,dll` is matched
+      # case-insensitively by the action and excludes everything else
+      # (so we don't accidentally sign .json/.txt assets).
+      #
+      # Timestamp server is selected by the Trusted Signing service itself
+      # (it always counter-signs with Microsoft's RFC 3161 timestamper), so
+      # we don't pass --timestamp manually like the macOS path does.
+      - name: Sign jarvis.exe + bundled .exe/.dll (Azure Trusted Signing)
+        if: ${{ env.HAS_TRUSTED_SIGNING == 'true' }}
+        timeout-minutes: 10
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id:        ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id:        ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret:    ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint:               ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name:     ${{ secrets.AZURE_SIGNING_PROFILE_NAME }}
+          files-folder:           ${{ steps.find-artefacts.outputs.files-folder }}
+          files-folder-filter:    ${{ steps.find-artefacts.outputs.files-folder-filter }}
+          files-folder-recurse:   true
+          # Authenticode + Microsoft RFC 3161 timestamp (default for the
+          # action). Page-hash subject so SmartScreen reputation accrues to
+          # the binary, not just the cert chain.
+          file-digest:            SHA256
+          timestamp-rfc3161:      http://timestamp.acs.microsoft.com
+          timestamp-digest:       SHA256
+
+      # Independent verification of the signing result. `signtool verify /pa
+      # /v` walks the cert chain with the default trust policy + verifies the
+      # Authenticode signature, the timestamp counter-signature, and that the
+      # cert is currently valid (not expired, not revoked). When the cert is
+      # expired this returns SignTool Error: SignerSign() failed (-2146762495
+      # / TRUST_E_CERT_SIGNATURE) and exits non-zero — exactly the failure
+      # mode AC #3 demands.
+      #
+      # We locate signtool.exe via the Windows SDK install on the runner
+      # (Get-Command resolves it from the PATH that azure/trusted-signing-action
+      # set up; on stock windows-2022 runners signtool is already on PATH via
+      # the Windows 10 SDK install). Failing to find it is itself a CI failure
+      # because we'd be skipping verification silently.
+      - name: Verify signatures (signtool /pa)
+        if: ${{ env.HAS_TRUSTED_SIGNING == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $signtool) {
+            # Fall back to scanning the Windows Kits install. Stable across
+            # SDK minor versions because we sort and pick the newest.
+            $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10\bin'
+            $candidate = Get-ChildItem $sdkRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+              | Where-Object { $_.FullName -match '\\x64\\' } `
+              | Sort-Object FullName -Descending `
+              | Select-Object -First 1
+            if (-not $candidate) {
+              Write-Error 'signtool.exe not found on runner — cannot verify signing result.'
+              exit 1
+            }
+            $signtool = $candidate.FullName
+          }
+          Write-Host "Using signtool: $signtool"
+          $files = Get-ChildItem -Path build/bin -Recurse -File -Include '*.exe','*.dll'
+          $failed = @()
+          foreach ($f in $files) {
+            Write-Host "Verifying $($f.FullName)"
+            & $signtool verify /pa /v $f.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $f.FullName }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Error ("signtool verify failed for:`n" + ($failed -join "`n") + "`n`nThis usually means the Trusted Signing cert is expired, revoked, or the signing call silently no-op'd. Refusing to ship unsigned binaries.")
+            exit 1
+          }
+
+      # Loud warning when the workflow skipped signing. Without this the only
+      # signal that a release shipped unsigned would be a SmartScreen prompt
+      # on user machines — better to surface it in the build log so the
+      # release engineer notices BEFORE publishing.
+      - name: Warn when shipping unsigned (no AZURE_* secrets)
+        if: ${{ env.HAS_TRUSTED_SIGNING != 'true' }}
+        shell: pwsh
+        run: |
+          Write-Warning 'AZURE_TENANT_ID is not set — shipping UNSIGNED jarvis.exe. Windows SmartScreen will show "Unknown publisher" on first launch. Configure Azure Trusted Signing secrets (see release-windows.yml header) to produce signed releases.'
+
+      # ------------------------------------------------------------------
+      # Inno Setup installer signing  [TASK-056 / TASK-054]
+      # ------------------------------------------------------------------
+      # When TASK-054's Inno Setup compile step lands and drops
+      # `Jarvis-Setup-<version>.exe` anywhere in the workspace, sign + verify
+      # it the same way as the binaries. Until then this block is a graceful
+      # no-op: `has-installer=false` and the two follow-up steps skip on the
+      # condition. This keeps THIS commit landable independent of TASK-054
+      # ordering. The task body explicitly notes that signing the installer
+      # is an AC for TASK-056, even though the installer build is TASK-054.
+      #
+      # Why post-build signing instead of Inno's built-in /SIGNTOOL=$q...:
+      # Inno's /SIGNTOOL flag expects a local cert store + a shell command
+      # the compiler spawns per file, which does not compose well with
+      # Azure Trusted Signing's service-principal auth model. Routing every
+      # signing call through azure/trusted-signing-action gives us ONE place
+      # to rotate creds / swap signing services later.
+      - name: Locate Inno Setup installer (if produced by TASK-054)
+        if: ${{ env.HAS_TRUSTED_SIGNING == 'true' }}
+        id: find-installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path . -Recurse -File -Filter 'Jarvis-Setup-*.exe' -ErrorAction SilentlyContinue `
+            | Select-Object -First 1
+          if ($installer) {
+            Write-Host "Found installer: $($installer.FullName)"
+            "installer-path=$($installer.FullName)"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "installer-dir=$($installer.DirectoryName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "has-installer=true"                        | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            Write-Host 'No Jarvis-Setup-*.exe found (TASK-054 not yet integrated in this run) - skipping installer signing.'
+            "has-installer=false"                       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Sign Inno Setup installer (Azure Trusted Signing)
+        if: ${{ env.HAS_TRUSTED_SIGNING == 'true' && steps.find-installer.outputs.has-installer == 'true' }}
+        timeout-minutes: 5
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id:        ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id:        ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret:    ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint:               ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name:     ${{ secrets.AZURE_SIGNING_PROFILE_NAME }}
+          # Scope the action to the directory containing the installer with
+          # recurse:false so we don't re-sign sibling files unintentionally.
+          files-folder:           ${{ steps.find-installer.outputs.installer-dir }}
+          files-folder-filter:    exe
+          files-folder-recurse:   false
+          file-digest:            SHA256
+          timestamp-rfc3161:      http://timestamp.acs.microsoft.com
+          timestamp-digest:       SHA256
+
+      # Same expired-cert gate as the binary verify: a non-zero exit here
+      # fails CI before we publish (AC #3). Reuses the same signtool-finder
+      # logic. Could be refactored to a composite action later, but keeping
+      # it inline avoids adding a new action file inside this single task.
+      - name: Verify installer signature (signtool /pa)
+        if: ${{ env.HAS_TRUSTED_SIGNING == 'true' && steps.find-installer.outputs.has-installer == 'true' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $signtool) {
+            $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10\bin'
+            $candidate = Get-ChildItem $sdkRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+              | Where-Object { $_.FullName -match '\\x64\\' } `
+              | Sort-Object FullName -Descending `
+              | Select-Object -First 1
+            if (-not $candidate) {
+              Write-Error 'signtool.exe not found on runner - cannot verify installer signature.'
+              exit 1
+            }
+            $signtool = $candidate.FullName
+          }
+          $installer = '${{ steps.find-installer.outputs.installer-path }}'
+          Write-Host "Verifying installer: $installer"
+          & $signtool verify /pa /v $installer
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool verify failed for installer: $installer. Refusing to ship unsigned installer (likely cert expired/revoked)."
+            exit 1
+          }
+
+      # Smoke-run the freshly built jarvis.exe with `--version` so the OS
+      # loader has to resolve every imported Windows API symbol. If the
+      # build accidentally pulls in a newer-Windows-only function (e.g. a
+      # 24H2-only webview2/shell32 entry point), the OLDER runner
+      # (windows-2022, Win11 21H2 build line) will fail here with
+      # "entry point not found" *before* we upload an artifact — the AC's
+      # failure case ("Win10-only API usage caught by Win10 runner; smoke
+      # test fails before upload"). We use windows-2022 as the older
+      # stand-in because GitHub retired `windows-2019` in mid-2025.
+      # `--version` exits cleanly without opening the GUI (see `cliFlags`
+      # map in main.go), so this works on a headless runner.
+      #
+      # Skipped for arm64 because the runner is x64 — the freshly built
+      # arm64 .exe cannot execute natively here. arm64 smoke-on-device is
+      # tracked separately (TASK-058's setup-screen verification).
+      - name: Smoke jarvis.exe --version
+        if: matrix.arch == 'amd64'
+        shell: pwsh
+        # Tight ceiling: --version should print + exit in well under a
+        # second. A multi-minute hang here means CLI plumbing regressed
+        # and we should fail fast rather than chew up the job budget.
+        timeout-minutes: 1
+        run: |
+          $output = & 'build/bin/jarvis.exe' --version 2>&1
+          $exit = $LASTEXITCODE
+          Write-Host "jarvis.exe --version exit=$exit output:`n$output"
+          if ($exit -ne 0) {
+            Write-Error "jarvis.exe --version failed on ${{ matrix.runner }} (exit=$exit). This usually means a newer-Windows-only API leaked into the build — see release-windows.yml header comment."
+            exit $exit
+          }
+
+      # Zip the whole `build/bin` tree (jarvis.exe today; future TASK-005
+      # Windows bundling will add Resources/ next to it). Filename mirrors
+      # the macOS DMG naming and tags both arch + win generation so the
+      # win11-21h2 + win11-24h2 amd64 zips can coexist as separate
+      # downloads:
+      #   `jarvis-<version>-<win-label>-<arch>.zip`
+      # The GITHUB_REF_NAME for a tag push is the tag itself (e.g.
+      # `v0.4.0`), so we strip the leading `v` to match `Jarvis-<version>.dmg`.
+      - name: Create release zip
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $zipName = "jarvis-$version-${{ matrix.win-label }}-${{ matrix.arch }}.zip"
+          Compress-Archive -Path 'build/bin/*' -DestinationPath $zipName -Force
+          # Surface the zip path + size in the log for sanity.
+          Get-Item $zipName | Select-Object Name, Length
+
+      # Upload as workflow artefact. TASK-054 (installer) and TASK-056
+      # (signing) will consume this in a downstream job; for this task the
+      # AC only requires the zip exist on a successful tag push.
+      # `if-no-files-found: error` makes "wails built but no zip" a loud
+      # failure instead of a silent empty artefact (closes the AC's
+      # "no orphan artifacts" failure case).
+      #
+      # Artifact name embeds win-label so the win11-21h2 + win11-24h2 amd64
+      # uploads do not collide — GitHub rejects duplicate artifact names
+      # within a single workflow run.
+      - name: Upload zip artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-${{ matrix.win-label }}-${{ matrix.arch }}
+          path: jarvis-*-${{ matrix.win-label }}-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      # ------------------------------------------------------------------
+      # MSIX packaging (optional)  [TASK-063]
+      # ------------------------------------------------------------------
+      # MSIX is the modern Windows app package format used for Microsoft
+      # Store submissions and sideloading on Win11 (or Win10 1809+ with the
+      # "App Installer" Store app + Developer Mode enabled). It is NOT our
+      # primary distribution channel — Inno Setup .exe (TASK-054) is — but
+      # producing the .msix here lets us iterate on a future Store
+      # submission without spinning up a separate workflow.
+      #
+      # Why amd64-only:
+      #   The Microsoft Store accepts arm64 MSIX, but Phase 1 ships arm64
+      #   as zip-only (matches the "amd64-only" smoke step above). When we
+      #   add arm64 MSIX later, drop the arch guard and the manifest's
+      #   `ProcessorArchitecture` attribute below picks up the matrix arch
+      #   automatically.
+      #
+      # Why `continue-on-error: true` on the packaging steps:
+      #   `makeappx.exe` ships with the Windows 10/11 SDK but is occasionally
+      #   stripped from a runner image (or returns an obscure non-zero on
+      #   manifest schema mismatches that only matter for Store submission,
+      #   not sideload). The .msix is supplementary, so a MSIX failure must
+      #   never tank the primary zip / installer release. The graceful-error
+      #   AC (#3) is satisfied by emitting a warning + a clear log line, not
+      #   by failing the job.
+      #
+      # Why we hand-roll AppxManifest.xml inline instead of checking it in:
+      #   The manifest's Identity@Version must match the release tag (and
+      #   MSIX has a stricter 4-part-version rule than semver: "1.2.3.4",
+      #   no pre-release suffix), and Identity@Publisher must match the
+      #   signing cert subject. Both are dynamic per-release. Generating
+      #   inline keeps the source of truth in the workflow rather than
+      #   forcing TASK-054 / TASK-056 to keep a checked-in template in sync.
+      - name: Locate Windows SDK makeappx.exe
+        if: matrix.arch == 'amd64'
+        id: find-makeappx
+        continue-on-error: true
+        shell: pwsh
+        # Resolve makeappx.exe (and signtool.exe, reused for MSIX signing
+        # below). Both ship with the Windows SDK; on a stock windows-2022 /
+        # windows-2025 runner they sit under `C:\Program Files (x86)\Windows
+        # Kits\10\bin\<sdk-version>\x64\`. We prefer PATH (in case the
+        # runner image promotes a newer SDK) and fall back to the Kits
+        # scan we already use for signtool above.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $makeappx = (Get-Command makeappx.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $makeappx) {
+            $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10\bin'
+            $candidate = Get-ChildItem $sdkRoot -Recurse -Filter makeappx.exe -ErrorAction SilentlyContinue `
+              | Where-Object { $_.FullName -match '\\x64\\' } `
+              | Sort-Object FullName -Descending `
+              | Select-Object -First 1
+            if ($candidate) { $makeappx = $candidate.FullName }
+          }
+          if (-not $makeappx) {
+            Write-Warning 'makeappx.exe not found on runner — skipping MSIX packaging. This is the TASK-063 graceful-error path (Win10 / stripped-SDK runners produce no .msix; the zip + installer still ship).'
+            "has-makeappx=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          Write-Host "Using makeappx: $makeappx"
+          "makeappx-path=$makeappx" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "has-makeappx=true"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Build the staging directory `msix-payload/` that makeappx will pack:
+      #   msix-payload/
+      #     AppxManifest.xml         (generated below)
+      #     jarvis.exe + bundled .exe / .dll (copied from build/bin)
+      #     Assets/                  (Square44x44Logo + Square150x150Logo
+      #                               + StoreLogo, sourced from build/windows/icon.ico)
+      #
+      # Identity@Version coerces the semver tag (e.g. "0.4.0", "0.4.0-rc1")
+      # into the 4-part form MSIX requires ("0.4.0.0"). A leading "v" and
+      # any pre-release suffix (after "-") are stripped — this matches how
+      # the inno-installer + zip filenames are versioned today.
+      #
+      # Identity@Publisher MUST match the signing cert's Subject CN exactly
+      # or makeappx + signtool will refuse the package. When Azure Trusted
+      # Signing is configured, the cert subject is the value Azure issues
+      # for the certificate profile (typically `CN=<account-name>, O=...`).
+      # We materialise it via the AZURE_SIGNING_PUBLISHER_CN secret so the
+      # ops team can rotate the publisher without editing the workflow.
+      # When neither HAS_TRUSTED_SIGNING nor the publisher CN are set, we
+      # fall through to a self-signed development publisher CN so the
+      # unsigned MSIX still installs in Developer Mode on a test rig.
+      - name: Stage MSIX payload + generate AppxManifest.xml
+        if: matrix.arch == 'amd64' && steps.find-makeappx.outputs.has-makeappx == 'true'
+        id: stage-msix
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          # Strip any pre-release suffix (everything after the first '-')
+          # and coerce to MSIX's required 4-part Major.Minor.Patch.Revision.
+          $semver  = $version -split '-' | Select-Object -First 1
+          $parts   = $semver -split '\.'
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $msixVersion = ($parts[0..3] -join '.')
+          Write-Host "MSIX version: $msixVersion (from tag $env:GITHUB_REF_NAME)"
+
+          # Resolve publisher CN with a sensible fallback for OSS/test
+          # builds without the Trusted Signing publisher secret configured.
+          $publisher = "${{ secrets.AZURE_SIGNING_PUBLISHER_CN }}"
+          if (-not $publisher) {
+            $publisher = 'CN=Jarvis Dev (Sideload), O=Jarvis, C=US'
+            Write-Warning "AZURE_SIGNING_PUBLISHER_CN not configured — using sideload-only fallback Publisher '$publisher'. The produced .msix will install on Win11 Developer Mode but will not be Microsoft Store-acceptable until a real publisher CN matching the signing cert is supplied."
+          }
+
+          $payload = Join-Path $env:RUNNER_TEMP 'msix-payload'
+          if (Test-Path $payload) { Remove-Item -Recurse -Force $payload }
+          New-Item -ItemType Directory -Path $payload | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $payload 'Assets') | Out-Null
+
+          # Copy the wails build output (jarvis.exe + any bundled .dll/.exe
+          # added later by TASK-035 post-build script) into the payload root.
+          Copy-Item -Path 'build/bin/*' -Destination $payload -Recurse -Force
+
+          # Convert the source .ico to the three PNG asset sizes MSIX
+          # requires. AppxManifest demands real PNGs (it rejects .ico).
+          # We use System.Drawing — present on every Windows runner — and
+          # render each size by drawing the ico into a fresh bitmap.
+          Add-Type -AssemblyName System.Drawing
+          $iconPath = Resolve-Path 'build/windows/icon.ico'
+          $icon = New-Object System.Drawing.Icon($iconPath.Path)
+          foreach ($pair in @(@{Name='Square44x44Logo.png';Size=44}, @{Name='Square150x150Logo.png';Size=150}, @{Name='StoreLogo.png';Size=50})) {
+            $bmp = New-Object System.Drawing.Bitmap($pair.Size, $pair.Size)
+            $g   = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.DrawIcon($icon, (New-Object System.Drawing.Rectangle(0,0,$pair.Size,$pair.Size)))
+            $bmp.Save((Join-Path $payload "Assets/$($pair.Name)"), [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+          }
+          $icon.Dispose()
+
+          # Minimum Windows version: 10.0.17763 (Win10 1809) is the floor
+          # for the App Installer + MSIX sideload story. Win11 (10.0.22000+)
+          # is fully supported. Older Win10 builds will refuse to install
+          # this package and the App Installer surfaces a clear error —
+          # that is the AC #3 graceful-error path on the install side.
+          #
+          # We build the manifest as a PowerShell string array (joined on
+          # newline) rather than a PS here-string `@"..."@` because YAML's
+          # `run: |` block scalar parser tracks indentation of the script
+          # body, and a here-string's mandatory column-0 closing `"@` would
+          # collide with that. The array form is YAML-safe (every line
+          # is indented under `run:`) AND readable.
+          $manifestLines = @(
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<Package',
+            '    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"',
+            '    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"',
+            '    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"',
+            '    IgnorableNamespaces="uap rescap">',
+            '',
+            '  <Identity',
+            '      Name="com.jarvis.Jarvis"',
+            "      Publisher=`"$publisher`"",
+            "      Version=`"$msixVersion`"",
+            '      ProcessorArchitecture="x64" />',
+            '',
+            '  <Properties>',
+            '    <DisplayName>Jarvis</DisplayName>',
+            '    <PublisherDisplayName>Jarvis</PublisherDisplayName>',
+            '    <Logo>Assets\StoreLogo.png</Logo>',
+            '    <Description>Jarvis - AI Voice Companion (Windows port).</Description>',
+            '  </Properties>',
+            '',
+            '  <Dependencies>',
+            '    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22631.0" />',
+            '  </Dependencies>',
+            '',
+            '  <Resources>',
+            '    <Resource Language="en-us" />',
+            '  </Resources>',
+            '',
+            '  <Applications>',
+            '    <Application Id="Jarvis" Executable="jarvis.exe" EntryPoint="Windows.FullTrustApplication">',
+            '      <uap:VisualElements',
+            '          DisplayName="Jarvis"',
+            '          Description="AI Voice Companion"',
+            '          BackgroundColor="transparent"',
+            '          Square150x150Logo="Assets\Square150x150Logo.png"',
+            '          Square44x44Logo="Assets\Square44x44Logo.png" />',
+            '    </Application>',
+            '  </Applications>',
+            '',
+            '  <Capabilities>',
+            '    <rescap:Capability Name="runFullTrust" />',
+            '  </Capabilities>',
+            '</Package>'
+          )
+          $manifest     = ($manifestLines -join [Environment]::NewLine)
+          $manifestPath = Join-Path $payload 'AppxManifest.xml'
+          Set-Content -Path $manifestPath -Value $manifest -Encoding UTF8
+          Write-Host "Wrote AppxManifest.xml to $manifestPath"
+
+          "payload-dir=$payload"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msix-version=$msixVersion"      | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Pack .msix with makeappx
+        if: matrix.arch == 'amd64' && steps.find-makeappx.outputs.has-makeappx == 'true' && steps.stage-msix.outcome == 'success'
+        id: pack-msix
+        continue-on-error: true
+        shell: pwsh
+        # `pack /d <payload> /p <out.msix> /o` — `/o` overwrites stale
+        # artefacts on workflow reruns; `/l` would localise but we ship
+        # en-US only in Phase 1.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $msixName = "jarvis-$version-${{ matrix.win-label }}-${{ matrix.arch }}.msix"
+          $msixPath = Join-Path (Get-Location) $msixName
+          $makeappx = '${{ steps.find-makeappx.outputs.makeappx-path }}'
+          $payload  = '${{ steps.stage-msix.outputs.payload-dir }}'
+          Write-Host "Packing $payload -> $msixPath"
+          & $makeappx pack /d $payload /p $msixPath /o
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "makeappx pack failed (exit=$LASTEXITCODE). This is the TASK-063 graceful-error path on older / stripped Windows SDKs — the zip + installer still ship."
+            exit $LASTEXITCODE
+          }
+          Get-Item $msixPath | Select-Object Name, Length
+          "msix-path=$msixPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msix-name=$msixName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # Sign the .msix with the same Azure Trusted Signing flow used for
+      # binaries / installer. Signing is required for production sideload
+      # (Win11 refuses unsigned .msix unless Developer Mode is on AND the
+      # user double-clicks through App Installer's "trust this publisher"
+      # warning). When HAS_TRUSTED_SIGNING is false we publish an unsigned
+      # .msix for dev-rig sideload testing — the loud warning step below
+      # surfaces it in the build log.
+      - name: Sign .msix (Azure Trusted Signing)
+        if: matrix.arch == 'amd64' && env.HAS_TRUSTED_SIGNING == 'true' && steps.pack-msix.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id:        ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id:        ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret:    ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint:               ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name:     ${{ secrets.AZURE_SIGNING_PROFILE_NAME }}
+          # Sign exactly the freshly-packed .msix sitting in the workspace
+          # root (recurse:false so we don't accidentally re-sign sibling
+          # binaries that already went through the binary-signing step).
+          files-folder:           ${{ github.workspace }}
+          files-folder-filter:    msix
+          files-folder-recurse:   false
+          file-digest:            SHA256
+          timestamp-rfc3161:      http://timestamp.acs.microsoft.com
+          timestamp-digest:       SHA256
+
+      - name: Warn when MSIX shipped unsigned
+        if: matrix.arch == 'amd64' && env.HAS_TRUSTED_SIGNING != 'true' && steps.pack-msix.outcome == 'success'
+        shell: pwsh
+        run: |
+          Write-Warning 'AZURE_TENANT_ID is not set — shipping UNSIGNED .msix. Win11 will reject sideload unless Developer Mode is enabled AND the user manually trusts the package via App Installer. Microsoft Store submission requires a signed package.'
+
+      # Independent verification — only meaningful when we actually signed.
+      # `signtool verify /pa` walks the cert chain + Authenticode + timestamp
+      # the same way it does for .exe. A non-zero exit here means the cert
+      # was expired/revoked/missing, which is the AC #3 failure case for the
+      # signing path (graceful failure: the MSIX upload step below still
+      # runs so a release engineer can inspect the artefact).
+      - name: Verify .msix signature (signtool /pa)
+        if: matrix.arch == 'amd64' && env.HAS_TRUSTED_SIGNING == 'true' && steps.pack-msix.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $signtool) {
+            $sdkRoot = 'C:\Program Files (x86)\Windows Kits\10\bin'
+            $candidate = Get-ChildItem $sdkRoot -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue `
+              | Where-Object { $_.FullName -match '\\x64\\' } `
+              | Sort-Object FullName -Descending `
+              | Select-Object -First 1
+            if (-not $candidate) {
+              Write-Warning 'signtool.exe not found on runner — skipping .msix verify. The signed artefact is still uploaded below.'
+              exit 0
+            }
+            $signtool = $candidate.FullName
+          }
+          $msix = '${{ steps.pack-msix.outputs.msix-path }}'
+          Write-Host "Verifying .msix: $msix"
+          & $signtool verify /pa /v $msix
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "signtool verify failed for .msix: $msix (exit=$LASTEXITCODE). Likely cert expired/revoked or the package signing call silently no-op'd. Inspect the artefact before publishing to the Store."
+          }
+
+      # Upload the .msix as an independent artefact whenever pack succeeded
+      # (regardless of whether signing/verify succeeded — release engineers
+      # can still pull a signed-but-unverified package down to inspect or
+      # hand-sign locally). The combination of:
+      #   - per-step `continue-on-error: true` on find/stage/pack/sign/verify
+      #   - this upload gated on `steps.pack-msix.outcome == 'success'`
+      # is the AC #3 "graceful error" surface: makeappx not found / pack
+      # failed / verify failed all short-circuit cleanly without taking
+      # down the zip / installer release path, and the absence of the
+      # .msix artefact (vs an empty/broken one) is the loud signal.
+      - name: Upload .msix artefact
+        if: matrix.arch == 'amd64' && steps.pack-msix.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-${{ matrix.win-label }}-${{ matrix.arch }}-msix
+          path: jarvis-*-${{ matrix.win-label }}-${{ matrix.arch }}.msix
+          if-no-files-found: warn
+          retention-days: 30

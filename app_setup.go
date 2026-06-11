@@ -1147,7 +1147,16 @@ func (a *App) runSetupParseLoop(stderr io.Reader, logFile io.Writer) error {
 		if heartbeat != nil {
 			heartbeat.Store(time.Now().UnixNano())
 		}
-		line := strings.TrimRight(string(raw), " \t")
+		// Trim trailing whitespace AND \r before parsing. PowerShell on
+		// Windows terminates lines with \r\n; bufio.ScanLines already drops
+		// the \r when it is part of the line terminator, but PHASE_* markers
+		// emitted via Write-Host or via tools that flush \r mid-line (e.g.
+		// progress bars) can still leave embedded/trailing \r on the bytes
+		// the scanner returns. Trimming \r here makes the regex match
+		// PHASE: tokens correctly regardless of the script's host shell, and
+		// is a no-op on macOS bash output (idempotent — bash lines have no
+		// \r to strip). See TASK-015 in plans/jarvis-windows-port.md.
+		line := strings.TrimRight(string(raw), " \t\r")
 		if line == "" {
 			continue
 		}

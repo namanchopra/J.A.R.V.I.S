@@ -196,3 +196,135 @@ describe('PermissionsPanel TASK-017 (aesthetic / structural pinning)', () => {
     expect(SOURCE).toMatch(/'SF Mono', 'Menlo', monospace/)
   })
 })
+
+// ---------------------------------------------------------------------------
+// TASK-035 (v0.4.0 Windows port) -- Source-level coverage for the Windows
+// copy variants delivered by TASK-032 (ms-settings: deep-link CTA). Pinning
+// is intentionally source-string based (the same ?raw pattern the
+// TASK-017 block above uses) so the test stays jsdom-free; sibling
+// MeetingPanel.test.tsx + OverlayPanel.test.tsx follow the same convention
+// for their Windows variants (TASK-045 / TASK-036).
+//
+// Acceptance criteria pinned here:
+//   1. "ms-settings:privacy-microphone in tests"
+//   2. "All 490+ existing tests pass" (TASK-017 block above must remain
+//      untouched -- this section is append-only)
+//   3. Failure case: platform-detection branch falls through on Linux
+//      (i.e. the macOS branch renders when platform !== 'windows', which
+//      includes Linux + any unrecognised GOOS value).
+// ---------------------------------------------------------------------------
+
+describe('PermissionsPanel TASK-035 (Windows ms-settings copy)', () => {
+  it('imports Environment from the Wails runtime for platform detection', () => {
+    // Pin on the import line + the call site so a refactor that silently
+    // drops platform detection (and thus always falls through to macOS)
+    // surfaces here rather than at runtime on a Windows user's machine.
+    expect(SOURCE).toMatch(/Environment/)
+    expect(SOURCE).toMatch(/from\s+['"]\.\.\/\.\.\/\.\.\/wailsjs\/runtime\/runtime['"]/)
+    expect(SOURCE).toMatch(/Environment\(\)/)
+  })
+
+  it('treats "windows" as the trigger value for the Windows UX branch', () => {
+    // Wails reports runtime.GOOS verbatim ('darwin', 'windows', 'linux').
+    // Pin on both the literal + the isWindows flag so a swap to a
+    // different string (e.g. 'win32') or a renamed flag trips here.
+    expect(SOURCE).toMatch(/['"]windows['"]/)
+    expect(SOURCE).toMatch(/isWindows/)
+    expect(SOURCE).toMatch(/platform\s*===\s*['"]windows['"]/)
+  })
+
+  it('deep-links to ms-settings:privacy-microphone (acceptance criterion)', () => {
+    // The destination URI is the user-visible contract. It must be the
+    // microphone privacy panel (not camera, not general privacy root).
+    // Same scheme MeetingPanel.tsx adopts on Windows (TASK-045).
+    expect(SOURCE).toMatch(/ms-settings:privacy-microphone/)
+    // The URI must be bound to a constant referenced by BrowserOpenURL --
+    // pin on the constant name to keep the wiring traceable.
+    expect(SOURCE).toMatch(/WINDOWS_SETTINGS_MICROPHONE_URL\s*=\s*['"]ms-settings:privacy-microphone['"]/)
+    expect(SOURCE).toMatch(/BrowserOpenURL\(WINDOWS_SETTINGS_MICROPHONE_URL\)/)
+  })
+
+  it('renders a distinct data-testid for the Windows deep-link row', () => {
+    // The Windows-only row uses a dedicated data-testid so SettingsView /
+    // end-to-end tests can scope by platform without false positives from
+    // the macOS row. Pin on the literal so a rename surfaces here.
+    expect(SOURCE).toMatch(/data-testid=['"]permissions-os-deeplink-windows['"]/)
+    expect(SOURCE).toMatch(/data-testid=['"]permissions-open-windows-microphone['"]/)
+  })
+
+  it('uses the "Open Windows Settings" CTA label on the Windows branch', () => {
+    // The CTA label is the user-visible contract -- localised copy changes
+    // must trip this test so a maintainer reviews the Windows screenshot.
+    expect(SOURCE).toMatch(/Open Windows Settings/)
+  })
+
+  it('shows fallback copy for the group-policy-blocked failure case', () => {
+    // Failure-mode acceptance criterion ("group-policy-blocked URI shows
+    // fallback text"): a locked-down corp environment can disable the
+    // ms-settings: handler, in which case BrowserOpenURL silently no-ops.
+    // The Windows branch surfaces a fallback row instructing the user to
+    // search the Start menu manually. Pin on the dedicated data-testid +
+    // a fragment of the helper copy so a rewrite that drops the fallback
+    // surfaces loudly.
+    expect(SOURCE).toMatch(/data-testid=['"]permissions-os-deeplink-windows-fallback['"]/)
+    expect(SOURCE).toMatch(/group policy/)
+    expect(SOURCE).toMatch(/Microphone privacy settings/)
+  })
+
+  it('keeps the macOS deep link unchanged (acceptance: macOS deep link unchanged)', () => {
+    // The macOS branch must still render the existing System Settings row
+    // with the x-apple.systempreferences: URI + the "Open System Settings"
+    // CTA so existing Mac users see no change. Pin on the constant name,
+    // the URI, the data-testid + the CTA copy.
+    expect(SOURCE).toMatch(/MACOS_SETTINGS_MICROPHONE_URL\s*=/)
+    expect(SOURCE).toMatch(/x-apple\.systempreferences:com\.apple\.preference\.security\?Privacy_Microphone/)
+    expect(SOURCE).toMatch(/data-testid=['"]permissions-os-deeplink-darwin['"]/)
+    expect(SOURCE).toMatch(/data-testid=['"]permissions-open-macos-microphone['"]/)
+    expect(SOURCE).toMatch(/Open System Settings/)
+  })
+
+  it('defaults the platform state to "darwin" so detection failure falls back to macOS', () => {
+    // Failure-mode safety: if the Wails runtime is unavailable (SSR / test
+    // harness / pre-init), the panel must render the macOS UX rather than
+    // showing Windows controls to a Mac user. This is the same convention
+    // MeetingPanel + OverlayPanel adopt. The Linux failure-case acceptance
+    // criterion ("platform-detection branch falls through on Linux")
+    // collapses to this same default because the platform value 'linux'
+    // also takes the !isWindows branch -- there is no Linux-only UI today.
+    expect(SOURCE).toMatch(/useState<string>\(\s*['"]darwin['"]\s*\)/)
+  })
+
+  it('gates the deep-link rows so only one platform branch renders at a time', () => {
+    // The two branches are mutually exclusive: the JSX uses a ternary on
+    // isWindows so a maintainer that accidentally swaps it for `&&` (which
+    // would render both rows on macOS) trips here.
+    expect(SOURCE).toMatch(/isWindows\s*\?\s*\(/)
+    // The else branch must wrap the macOS row -- pin on the data-testid so
+    // an inverted condition (isWindows ? darwin : windows) trips here.
+    expect(SOURCE).toMatch(/:\s*\(\s*<div[\s\S]*?data-testid=['"]permissions-os-deeplink-darwin['"]/)
+  })
+
+  it('falls through to the macOS branch on Linux / unknown platforms', () => {
+    // Failure-case acceptance criterion: "platform-detection branch falls
+    // through on Linux". The only positive check in the source is
+    // `platform === 'windows'` -- every other value (including 'linux',
+    // 'freebsd', '' and any malformed string) renders the macOS branch.
+    // Pin on the absence of any Linux-specific branch + the strict
+    // equality so a future maintainer that adds e.g. `||
+    // platform === 'linux'` to the Windows branch trips here and has to
+    // explicitly update this expectation.
+    expect(SOURCE).not.toMatch(/['"]linux['"]/)
+    expect(SOURCE).not.toMatch(/isLinux/)
+    // The Windows branch must be an exact equality check, not a substring
+    // / startsWith match that could accidentally swallow Linux values.
+    const windowsChecks = SOURCE.match(/platform\s*===\s*['"]windows['"]/g) ?? []
+    expect(windowsChecks.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('exposes the OS deep-link wrapper section with a stable data-testid', () => {
+    // The wrapper <section> data-testid is shared across both platforms so
+    // a single locator can find the row regardless of the user's OS. Pin
+    // it here so a rename trips both the platform branches in one go.
+    expect(SOURCE).toMatch(/data-testid=['"]permissions-os-deeplink['"]/)
+  })
+})

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { SettingsPanelProps } from './types'
 import { SaveConfig } from '../../../wailsjs/go/main/App'
-import { EventsOn, BrowserOpenURL } from '../../../wailsjs/runtime/runtime'
+import { EventsOn, BrowserOpenURL, Environment } from '../../../wailsjs/runtime/runtime'
 import { config as cfgModels } from '../../../wailsjs/go/models'
 import {
   canonicalizeSpec,
@@ -103,6 +103,49 @@ function isValidPosition(v: string | undefined): v is Position {
   )
 }
 
+// ---------------------------------------------------------------------------
+// TASK-036 (v0.4.0 Windows port) — Windows-style hotkey label formatter.
+//
+// On Windows the user expects literal modifier names ("Ctrl + Space",
+// "Alt + Space") rather than the macOS Unicode glyphs (⌃, ⌥, ⌘, ⇧). Windows
+// global hotkeys also can't bind to the Command key, so we map any lingering
+// `cmd` token to `Ctrl` (defensive — the canonical spec format is shared
+// across platforms but a config persisted on macOS could still contain it).
+//
+// Pure / structural — no React or runtime dependency — so it can be tested
+// directly against the source via the existing `?raw` source-level contracts.
+// ---------------------------------------------------------------------------
+const WINDOWS_MOD_LABELS: Readonly<Record<string, string>> = {
+  cmd: 'Ctrl', // Win has no Command — closest analogue is Ctrl.
+  ctrl: 'Ctrl',
+  alt: 'Alt',
+  shift: 'Shift',
+}
+
+function titleCaseKeyForWindows(token: string): string {
+  if (token.length === 1) return token.toUpperCase()
+  if (/^f([1-9]|1[0-2])$/.test(token)) return token.toUpperCase()
+  return token.charAt(0).toUpperCase() + token.slice(1)
+}
+
+function windowsFormatSpec(spec: string): string {
+  if (!spec) return ''
+  const parts = spec
+    .split('+')
+    .map((p) => p.trim())
+    .filter(Boolean)
+  const out: string[] = []
+  for (const p of parts) {
+    const lower = p.toLowerCase()
+    if (WINDOWS_MOD_LABELS[lower]) {
+      out.push(WINDOWS_MOD_LABELS[lower])
+    } else {
+      out.push(titleCaseKeyForWindows(lower))
+    }
+  }
+  return out.join(' + ')
+}
+
 export type OverlayPanelProps = SettingsPanelProps
 
 export function OverlayPanel({ cfg, setCfg, activeTab }: OverlayPanelProps): React.ReactElement {
@@ -120,6 +163,44 @@ export function OverlayPanel({ cfg, setCfg, activeTab }: OverlayPanelProps): Rea
   const [reservedWarning, setReservedWarning] = useState<string | null>(null)
   const [hotkeyError, setHotkeyError] = useState<boolean>(false)
   const captureBtnRef = useRef<HTMLButtonElement | null>(null)
+
+  // TASK-036 (v0.4.0 Windows port) — platform detection so we can render
+  // Windows-style hotkey labels ("Ctrl + Space") instead of the macOS Unicode
+  // glyphs ("⌃ Space"). Defaults to 'darwin' so a stale/failed Environment()
+  // call falls back to the existing macOS glyph rendering — that's the
+  // failure-case acceptance criterion ("platform detection failure defaults
+  // to Unicode symbols (the existing macOS path)").
+  const [platform, setPlatform] = useState<string>('darwin')
+  useEffect(() => {
+    let cancelled = false
+    Environment()
+      .then((env) => {
+        if (cancelled) return
+        if (env && typeof env.platform === 'string' && env.platform.length > 0) {
+          setPlatform(env.platform)
+        }
+      })
+      .catch((err) => {
+        // Wails runtime not available (e.g. SSR / test harness). Keep the
+        // macOS default — the existing Unicode rendering is the safest
+        // fallback per the TASK-036 failure-case acceptance criterion.
+        console.debug('OverlayPanel: Environment() unavailable, defaulting to darwin', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  const isWindows = platform === 'windows'
+
+  // Memoize the formatted hotkey label so the same string flows into both the
+  // visible badge and the aria-label without recomputing on every render. We
+  // route through the Windows formatter when isWindows is true; everywhere
+  // else (darwin, linux, unknown platform, pre-detection) uses the existing
+  // glyphFormatSpec — preserving the macOS unchanged contract.
+  const hotkeyLabel = useMemo<string>(
+    () => (isWindows ? windowsFormatSpec(hotkey) : glyphFormatSpec(hotkey)),
+    [hotkey, isWindows],
+  )
 
   // ---------------------------------------------------------------
   // Subscribe to TASK-005's `"overlay:hotkey_error"` event. The Go side
@@ -405,7 +486,7 @@ export function OverlayPanel({ cfg, setCfg, activeTab }: OverlayPanelProps): Rea
           aria-label={
             capturing
               ? 'Press your desired hotkey combo, or Escape to cancel'
-              : `Rebind overlay hotkey (current: ${glyphFormatSpec(hotkey)})`
+              : `Rebind overlay hotkey (current: ${hotkeyLabel})`
           }
           onClick={handleStartCapture}
           disabled={capturing}
@@ -436,7 +517,7 @@ export function OverlayPanel({ cfg, setCfg, activeTab }: OverlayPanelProps): Rea
             </span>
           ) : (
             <span>
-              <span style={{ marginRight: 12, color: '#00e5ff' }}>{glyphFormatSpec(hotkey)}</span>
+              <span style={{ marginRight: 12, color: '#00e5ff' }}>{hotkeyLabel}</span>
               <span style={{ color: 'rgba(207, 231, 255, 0.45)', fontSize: 11 }}>
                 — click to rebind
               </span>

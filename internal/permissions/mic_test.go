@@ -25,10 +25,14 @@ func TestMicStatusReturnsValidString(t *testing.T) {
 }
 
 // TestMicStatusStubOnNonDarwin pins the stub behaviour so we don't accidentally
-// change it later. Skipped on darwin where MicStatus reads real TCC state.
+// change it later. Skipped on darwin where MicStatus reads real TCC state and
+// on windows where MicStatus reads the CapabilityAccessManager registry.
 func TestMicStatusStubOnNonDarwin(t *testing.T) {
 	if runtime.GOOS == "darwin" {
 		t.Skip("darwin uses the real AVFoundation implementation")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("windows uses the real CapabilityAccessManager registry implementation")
 	}
 	if got := MicStatus(); got != "not_determined" {
 		t.Fatalf("non-darwin MicStatus() = %q; want \"not_determined\"", got)

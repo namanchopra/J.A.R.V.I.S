@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SettingsPanelProps } from './types'
 import { SaveConfig } from '../../../wailsjs/go/main/App'
-import { EventsOn, BrowserOpenURL } from '../../../wailsjs/runtime/runtime'
+import { EventsOn, BrowserOpenURL, Environment } from '../../../wailsjs/runtime/runtime'
 import { config as cfgModels } from '../../../wailsjs/go/models'
 
 // ---------------------------------------------------------------------------
@@ -45,6 +45,14 @@ import { config as cfgModels } from '../../../wailsjs/go/models'
 // as DiagnosticsPanel.tsx's mic-permission deep-link.
 const SYSTEM_SETTINGS_SCREEN_RECORDING_URL =
   'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenRecording'
+
+// TASK-045 (v0.4.0 Windows port) — Windows has no equivalent to macOS
+// Screen Recording permission: WASAPI loopback (TASK-041) captures system
+// audio output without a separate consent gate. Only the microphone needs
+// user-granted permission. The deep link points at Settings → Privacy →
+// Microphone via the ms-settings: URI scheme (the same scheme is used in
+// the Diagnostics + Permissions panels per TASK-032).
+const WINDOWS_SETTINGS_MICROPHONE_URL = 'ms-settings:privacy-microphone'
 
 // ---------------------------------------------------------------------------
 // Runtime bridge: OpenMeetingNotesFolder
@@ -111,6 +119,36 @@ export function MeetingPanel({ cfg, setCfg, activeTab }: MeetingPanelProps): Rea
   const [permissionError, setPermissionError] = useState<string | null>(null)
   // Keyword draft input state — local-only; committed to config on Enter.
   const [keywordDraft, setKeywordDraft] = useState<string>('')
+
+  // TASK-045 (v0.4.0 Windows port) — platform detection so we can render
+  // Windows-specific permission CTAs (Microphone only, no Screen Recording).
+  // Defaults to 'darwin' so a stale/failed Environment() call renders the
+  // existing macOS UI rather than spuriously offering Windows controls
+  // (acceptance criterion: "macOS unchanged"). The Failure-case acceptance
+  // criterion — "registry read-locked, gracefully degrade to no permission
+  // status" — is satisfied because the panel only surfaces a warning row
+  // when the daemon explicitly emits `meeting:permission_error`; no event,
+  // no row, regardless of platform detection state.
+  const [platform, setPlatform] = useState<string>('darwin')
+  useEffect(() => {
+    let cancelled = false
+    Environment()
+      .then((env) => {
+        if (cancelled) return
+        if (env && typeof env.platform === 'string' && env.platform.length > 0) {
+          setPlatform(env.platform)
+        }
+      })
+      .catch((err) => {
+        // Wails runtime not available (e.g. SSR / test harness). Keep the
+        // macOS default — the existing behaviour is the safest fallback.
+        console.debug('MeetingPanel: Environment() unavailable, defaulting to darwin', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  const isWindows = platform === 'windows'
 
   // ---------------------------------------------------------------
   // Listen for permission errors emitted by TASK-005. Payload may be a
@@ -220,15 +258,71 @@ export function MeetingPanel({ cfg, setCfg, activeTab }: MeetingPanelProps): Rea
           notes file with Summary / Key Points / Action Items / Raw Transcript when you stop the
           recording. Captures both the microphone and system audio output.
         </p>
-        <p className="text-[10px] text-[#4a6278] mt-2 italic">
-          Requires <span style={{ color: 'rgba(0,229,255,0.7)' }}>Screen Recording</span>{' '}
-          permission for system-audio capture.
-        </p>
+        {/* TASK-045 — platform-aware permission subtitle. macOS captures
+            system audio via ScreenCaptureKit which gates on Screen Recording;
+            Windows uses WASAPI loopback (TASK-041) which has no equivalent
+            consent gate, so only the mic permission needs to be surfaced. */}
+        {isWindows ? (
+          <p
+            className="text-[10px] text-[#4a6278] mt-2 italic"
+            data-testid="meeting-permission-subtitle-windows"
+          >
+            Requires <span style={{ color: 'rgba(0,229,255,0.7)' }}>Microphone</span>{' '}
+            permission. System audio loopback (WASAPI) needs no extra consent.
+          </p>
+        ) : (
+          <p
+            className="text-[10px] text-[#4a6278] mt-2 italic"
+            data-testid="meeting-permission-subtitle-darwin"
+          >
+            Requires <span style={{ color: 'rgba(0,229,255,0.7)' }}>Screen Recording</span>{' '}
+            permission for system-audio capture.
+          </p>
+        )}
       </section>
 
       {/* Permission warning row — hidden until the daemon emits the event.
-          Mirrors the Accessibility CTA in OverlayPanel.tsx. */}
-      {permissionError && (
+          Mirrors the Accessibility CTA in OverlayPanel.tsx.
+          TASK-045 — on Windows we surface a Microphone-only CTA (no Screen
+          Recording row, because WASAPI loopback needs no extra consent). */}
+      {permissionError && isWindows && (
+        <section
+          role="alert"
+          aria-live="polite"
+          data-testid="meeting-permission-error-windows"
+          className="fade-in-up text-xs px-3 py-2 rounded-sm flex items-center gap-3"
+          style={{
+            fontFamily: "'SF Mono', 'Menlo', monospace",
+            letterSpacing: '0.04em',
+            background: 'rgba(255, 184, 0, 0.08)',
+            border: '1px solid rgba(255, 184, 0, 0.45)',
+            color: 'var(--accent-amber)',
+            boxShadow: '0 0 14px rgba(255, 184, 0, 0.18)',
+          }}
+        >
+          <span style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>⚠</span>
+          <span style={{ flex: 1, color: 'rgba(255, 207, 100, 0.85)' }}>
+            <strong style={{ color: 'var(--accent-amber)' }}>Microphone access required.</strong>{' '}
+            Grant Jarvis access in Windows Settings → Privacy → Microphone.
+          </span>
+          <button
+            type="button"
+            data-testid="meeting-open-microphone-settings"
+            onClick={() => BrowserOpenURL(WINDOWS_SETTINGS_MICROPHONE_URL)}
+            className="text-[11px] px-3 py-1 rounded border transition-colors"
+            style={{
+              fontFamily: "'SF Mono', 'Menlo', monospace",
+              letterSpacing: '0.05em',
+              borderColor: 'rgba(255, 184, 0, 0.5)',
+              color: 'rgba(255, 207, 100, 0.95)',
+              background: 'transparent',
+            }}
+          >
+            Open Windows Settings
+          </button>
+        </section>
+      )}
+      {permissionError && !isWindows && (
         <section
           role="alert"
           aria-live="polite"

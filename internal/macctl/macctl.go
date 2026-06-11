@@ -3,6 +3,32 @@ package macctl
 import (
 	"errors"
 	"os/exec"
+
+	"github.com/namanchopra/jarvis/internal/syscontrol"
+)
+
+// Compile-time assertions that *Controller satisfies every cross-platform
+// system-control interface declared in internal/syscontrol. macctl is the
+// macOS reference backend for those interfaces; future Windows / Linux
+// backends will live in sibling packages or in syscontrol's own *_windows.go
+// files. Holding the assertions here ties the two packages together without
+// introducing a runtime dependency: syscontrol stays interface-only (zero
+// implementation imports), and macctl is the only place that needs to know
+// it's implementing the contract.
+//
+// Each var _ = ... line will fail to compile if a method signature drifts
+// on either side — the canonical signal to update both ends in lockstep.
+//
+// TASK-019 (v0.4.0 Windows port): introduced the syscontrol package so the
+// Phase 2 Windows backends can be written against small focused interfaces
+// rather than the full *macctl.Controller surface area.
+var (
+	_ syscontrol.AppController        = (*Controller)(nil)
+	_ syscontrol.AudioController      = (*Controller)(nil)
+	_ syscontrol.DisplayController    = (*Controller)(nil)
+	_ syscontrol.FilesController      = (*Controller)(nil)
+	_ syscontrol.ClipboardController  = (*Controller)(nil)
+	_ syscontrol.ScreenshotController = (*Controller)(nil)
 )
 
 // ErrNotImplemented is returned by stub methods until their real

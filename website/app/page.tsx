@@ -2,6 +2,7 @@ import StarButton from '@/components/StarButton'
 import DemoTranscript from '@/components/DemoTranscript'
 import OrbClient from '@/components/OrbClient'
 import { QRCodeSVG } from 'qrcode.react'
+import { headers } from 'next/headers'
 
 const EAS_URL = 'https://u.expo.dev/4ec82a4b-3506-48da-ba60-114dae1ce9ba?channel=production'
 const EXPO_GO_IOS = 'https://apps.apple.com/app/expo-go/id982107779'
@@ -74,6 +75,45 @@ function semverCompare(a: string, b: string): number {
 }
 
 /**
+ * Coarse OS detection from a User-Agent string. Returns:
+ *   - 'macos'   for any Mac UA (we ship only Apple-Silicon DMG, but a
+ *               UA-only sniff can't tell Intel from arm64 — so we show
+ *               the DMG to all macOS visitors and let the install screen
+ *               surface the arch warning)
+ *   - 'windows' for any Win32 UA
+ *   - 'unknown' for everything else (Linux, *BSD, crawlers, opaque UAs,
+ *               or an empty header) — caller surfaces BOTH downloads in
+ *               that case rather than guessing wrong
+ *
+ * Deliberately conservative: a missing or unrecognisable UA returns
+ * 'unknown' so we never hide a download a real user wants. The Friday
+ * page on iOS/Android also lands on 'unknown' and gets both, which is
+ * fine — mobile users don't install the desktop binary anyway.
+ */
+type DetectedOS = 'macos' | 'windows' | 'unknown'
+
+function detectOS(userAgent: string | null | undefined): DetectedOS {
+  if (!userAgent) return 'unknown'
+  const ua = userAgent.toLowerCase()
+  // Windows: Win32, Win64, Windows NT, WOW64. ARM64 Windows still
+  // identifies as "Windows NT" — we don't need to branch on arch here
+  // because the installer .exe is multi-arch (separate amd64 / arm64
+  // installers are shipped under the same Setup-<version>.exe naming
+  // on Releases; the UA-sniff just needs to pick "Windows" vs "macOS").
+  if (ua.includes('windows nt') || ua.includes('win32') || ua.includes('win64') || ua.includes('wow64')) {
+    return 'windows'
+  }
+  // macOS: "Macintosh" and "Mac OS X" are the canonical tokens. Mobile
+  // Safari on iPad in desktop-mode also matches "Macintosh" — that's
+  // fine; iPad users tapping "Download" land on the GitHub releases
+  // page and pick from the asset list.
+  if (ua.includes('macintosh') || ua.includes('mac os x') || ua.includes('macos')) {
+    return 'macos'
+  }
+  return 'unknown'
+}
+
+/**
  * Latest visible version. Prefers FALLBACK_VERSION when GitHub's
  * /releases/latest endpoint returns an OLDER tag — this happens during
  * the window between a tag push and `gh release create` finishing
@@ -110,6 +150,17 @@ async function fetchLatestVersion(): Promise<string> {
 export default async function Page() {
   const version = await fetchLatestVersion()
   const dmgUrl = `${REPO_URL}/releases/download/v${version}/Jarvis-${version}.dmg`
+  // Inno Setup installer naming from TASK-054: `Jarvis-Setup-<version>.exe`.
+  // Single installer covers both x64 + arm64 (the Inno Setup script picks
+  // the matching arch payload at install time). UA-sniff only needs to
+  // distinguish macOS vs Windows, not the Windows architecture.
+  const exeUrl = `${REPO_URL}/releases/download/v${version}/Jarvis-Setup-${version}.exe`
+  // headers() is server-only and async in Next 15. Reading it here keeps
+  // the page a Server Component (no client JS for UA detection) and means
+  // bots / crawlers that don't send a UA gracefully fall through to
+  // 'unknown' → both downloads visible.
+  const hdrs = await headers()
+  const detectedOS = detectOS(hdrs.get('user-agent'))
   return (
     <main className="relative">
       {/* ===================== NAV ===================== */}
@@ -167,14 +218,48 @@ export default async function Page() {
             </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-3">
-              <a href={dmgUrl} className="jarvis-btn-primary">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M12 3v12" />
-                  <path d="m6 9 6 6 6-6" />
-                  <path d="M5 21h14" />
-                </svg>
-                <span>Download for macOS</span>
-              </a>
+              {/* Primary CTA: UA-matched installer. On 'unknown' (crawlers,
+                  Linux, empty UA, opaque proxies) we render BOTH macOS +
+                  Windows buttons so the visitor can't end up with a
+                  one-platform homepage that doesn't match their machine. */}
+              {detectedOS === 'windows' ? (
+                <a href={exeUrl} className="jarvis-btn-primary" data-testid="cta-download-windows">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 3v12" />
+                    <path d="m6 9 6 6 6-6" />
+                    <path d="M5 21h14" />
+                  </svg>
+                  <span>Download for Windows</span>
+                </a>
+              ) : detectedOS === 'macos' ? (
+                <a href={dmgUrl} className="jarvis-btn-primary" data-testid="cta-download-macos">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 3v12" />
+                    <path d="m6 9 6 6 6-6" />
+                    <path d="M5 21h14" />
+                  </svg>
+                  <span>Download for macOS</span>
+                </a>
+              ) : (
+                <>
+                  <a href={dmgUrl} className="jarvis-btn-primary" data-testid="cta-download-macos">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M12 3v12" />
+                      <path d="m6 9 6 6 6-6" />
+                      <path d="M5 21h14" />
+                    </svg>
+                    <span>Download for macOS</span>
+                  </a>
+                  <a href={exeUrl} className="jarvis-btn-primary" data-testid="cta-download-windows">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M12 3v12" />
+                      <path d="m6 9 6 6 6-6" />
+                      <path d="M5 21h14" />
+                    </svg>
+                    <span>Download for Windows</span>
+                  </a>
+                </>
+              )}
               <a
                 href={REPO_URL}
                 target="_blank"
@@ -191,7 +276,7 @@ export default async function Page() {
             <ul className="mt-10 grid grid-cols-2 gap-x-6 gap-y-3 label-mono text-jarvis-cyan/55 max-w-sm">
               <li className="flex items-center gap-2"><span className="text-jarvis-cyan-bright">✓</span> Local STT + TTS</li>
               <li className="flex items-center gap-2"><span className="text-jarvis-cyan-bright">✓</span> Offline after setup</li>
-              <li className="flex items-center gap-2"><span className="text-jarvis-cyan-bright">✓</span> Apple Silicon native</li>
+              <li className="flex items-center gap-2"><span className="text-jarvis-cyan-bright">✓</span> macOS + Windows</li>
               <li className="flex items-center gap-2"><span className="text-jarvis-cyan-bright">✓</span> Open source · Apache-2.0</li>
             </ul>
           </div>
@@ -220,7 +305,7 @@ export default async function Page() {
         {/* Decorative grid corners */}
         <span className="pointer-events-none absolute top-20 left-4 label-mono text-jarvis-cyan/30">▸ J.A.R.V.I.S.//SYS</span>
         <span className="pointer-events-none absolute top-20 right-4 label-mono text-jarvis-cyan/30">v{version} // STABLE</span>
-        <span className="pointer-events-none absolute bottom-4 left-4 label-mono text-jarvis-cyan/30">⏚ APPLE SILICON ONLY</span>
+        <span className="pointer-events-none absolute bottom-4 left-4 label-mono text-jarvis-cyan/30">⏚ MACOS · WINDOWS</span>
         <span className="pointer-events-none absolute bottom-4 right-4 label-mono text-jarvis-cyan/30 animate-pulse-soft">◉ READY</span>
       </section>
 
@@ -299,14 +384,48 @@ export default async function Page() {
               </p>
             </div>
             <div className="flex flex-wrap gap-3">
-              <a href={dmgUrl} className="jarvis-btn-primary">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M12 3v12" />
-                  <path d="m6 9 6 6 6-6" />
-                  <path d="M5 21h14" />
-                </svg>
-                <span>Get the DMG</span>
-              </a>
+              {/* Mirror the hero CTA logic: UA-matched primary, both on
+                  unknown. This block lives at the bottom of the install
+                  section, so it's the last download offer a visitor sees
+                  if they scroll past the hero. */}
+              {detectedOS === 'windows' ? (
+                <a href={exeUrl} className="jarvis-btn-primary">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 3v12" />
+                    <path d="m6 9 6 6 6-6" />
+                    <path d="M5 21h14" />
+                  </svg>
+                  <span>Get the installer (.exe)</span>
+                </a>
+              ) : detectedOS === 'macos' ? (
+                <a href={dmgUrl} className="jarvis-btn-primary">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 3v12" />
+                    <path d="m6 9 6 6 6-6" />
+                    <path d="M5 21h14" />
+                  </svg>
+                  <span>Get the DMG</span>
+                </a>
+              ) : (
+                <>
+                  <a href={dmgUrl} className="jarvis-btn-primary">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M12 3v12" />
+                      <path d="m6 9 6 6 6-6" />
+                      <path d="M5 21h14" />
+                    </svg>
+                    <span>Get the DMG</span>
+                  </a>
+                  <a href={exeUrl} className="jarvis-btn-primary">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M12 3v12" />
+                      <path d="m6 9 6 6 6-6" />
+                      <path d="M5 21h14" />
+                    </svg>
+                    <span>Get the installer (.exe)</span>
+                  </a>
+                </>
+              )}
               <a href="#friday" className="jarvis-btn-primary">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <rect x="7" y="2" width="10" height="20" rx="2" />
@@ -543,12 +662,12 @@ function FeatureCard({ glyph, title, body }: Feature) {
 
 const INSTALL_STEPS = [
   {
-    title: 'Download the DMG.',
-    body: 'About 35 MB. Apple Silicon Macs (M1 / M2 / M3 / M4) on macOS 12 or newer. Signed with a Developer ID and notarized by Apple — no Gatekeeper warnings.',
+    title: 'Download the installer for your platform.',
+    body: 'macOS: ~35 MB DMG, Apple Silicon (M1+) on macOS 12 or newer, signed with a Developer ID and notarized — no Gatekeeper warnings. Windows: ~40 MB Inno Setup .exe, Windows 10 / 11 on x64 or arm64, code-signed — no SmartScreen "Unknown publisher" warning.',
   },
   {
-    title: 'Drag Jarvis to Applications.',
-    body: 'Double-click the DMG, then drag the Jarvis icon onto the Applications folder shortcut.',
+    title: 'Run the installer.',
+    body: 'macOS: open the DMG and drag Jarvis onto Applications. Windows: double-click Jarvis-Setup-<version>.exe and follow the wizard — Start Menu shortcut is created, desktop shortcut is optional. WebView2 runtime auto-installs on Win10 if missing.',
   },
   {
     title: 'First-launch setup runs automatically.',

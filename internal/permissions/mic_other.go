@@ -1,9 +1,10 @@
-//go:build !darwin
+//go:build !darwin && !windows
 
-// Package permissions exposes microphone permission helpers. On non-darwin
-// platforms there is no TCC-equivalent we care about for Phase 2, so these
-// stubs let the rest of the codebase compile and test on Linux/Windows while
-// the real implementation lives in mic_darwin.go.
+// Package permissions exposes microphone permission helpers. On platforms
+// without a real implementation (Linux today; future POSIX targets) these
+// stubs let the rest of the codebase compile and test. darwin uses the
+// AVFoundation TCC bridge in mic_darwin.go; windows reads the
+// CapabilityAccessManager consent store in mic_windows.go.
 package permissions
 
 // MicStatus always returns "not_determined" on non-darwin platforms.

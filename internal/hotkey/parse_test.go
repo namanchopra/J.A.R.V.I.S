@@ -1,3 +1,12 @@
+//go:build darwin
+
+// parse_test.go is gated to darwin because its test fixtures reference the
+// macOS-only constants libhotkey.ModOption and libhotkey.ModCmd. The
+// cross-platform Parse() behaviour on Windows is covered by the parallel
+// test cases in hotkey_windows_test.go which use libhotkey.ModAlt /
+// libhotkey.ModWin instead. The Linux variants are not currently shipped
+// (Jarvis v0.4.0 targets macOS + Windows).
+
 package hotkey
 
 import (

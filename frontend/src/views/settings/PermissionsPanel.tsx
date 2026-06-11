@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SettingsPanelProps } from './types'
+import { BrowserOpenURL, Environment } from '../../../wailsjs/runtime/runtime'
 
 // ---------------------------------------------------------------------------
 // PermissionsPanel — Settings → Permissions tab (TASK-017, v0.3.0 P1).
@@ -43,6 +44,26 @@ import type { SettingsPanelProps } from './types'
 type Decision = 'allow' | 'ask' | 'deny'
 
 const DECISIONS: ReadonlyArray<Decision> = ['allow', 'ask', 'deny'] as const
+
+// ---------------------------------------------------------------------------
+// TASK-032 (v0.4.0 Windows port) — Deep-link URIs to OS privacy settings.
+//
+// macOS: x-apple.systempreferences: opens System Settings → Privacy &
+// Security → Microphone. Same scheme DiagnosticsPanel.tsx uses for the mic
+// permission row.
+//
+// Windows: ms-settings: opens Settings → Privacy → Microphone. The scheme
+// is documented at https://learn.microsoft.com/en-us/windows/uwp/launch-resume/launch-settings-app.
+// Note: a locked-down corp environment can disable the ms-settings: handler
+// via group policy ("Prevent access to the Settings app"); when that
+// happens BrowserOpenURL silently no-ops, so we surface a fallback hint
+// below the button telling the user the manual path through Start menu
+// search. This satisfies the "group-policy-blocked URI shows fallback
+// text" acceptance criterion.
+// ---------------------------------------------------------------------------
+const MACOS_SETTINGS_MICROPHONE_URL =
+  'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'
+const WINDOWS_SETTINGS_MICROPHONE_URL = 'ms-settings:privacy-microphone'
 
 interface ToolDef {
   name: string
@@ -233,6 +254,34 @@ export function PermissionsPanel({ activeTab }: PermissionsPanelProps): React.Re
   // running so a frantic double-click can't queue conflicting writes.
   const [savingTool, setSavingTool] = useState<string | null>(null)
 
+  // TASK-032 (v0.4.0 Windows port) — platform detection so we can render a
+  // Windows-specific deep-link CTA (ms-settings:privacy-microphone) instead
+  // of the macOS x-apple.systempreferences: scheme. Defaults to 'darwin' so
+  // a stale/failed Environment() call renders the existing macOS UI rather
+  // than spuriously offering Windows controls (acceptance criterion: "macOS
+  // deep link unchanged"). Same pattern MeetingPanel.tsx + OverlayPanel.tsx
+  // use for platform-aware rendering.
+  const [platform, setPlatform] = useState<string>('darwin')
+  useEffect(() => {
+    let cancelled = false
+    Environment()
+      .then((env) => {
+        if (cancelled) return
+        if (env && typeof env.platform === 'string' && env.platform.length > 0) {
+          setPlatform(env.platform)
+        }
+      })
+      .catch((err) => {
+        // Wails runtime not available (e.g. SSR / test harness). Keep the
+        // macOS default — the existing behaviour is the safest fallback.
+        console.debug('PermissionsPanel: Environment() unavailable, defaulting to darwin', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  const isWindows = platform === 'windows'
+
   // ---------------------------------------------------------------
   // GetMacctlPolicy on mount. We deliberately do NOT depend on cfg/setCfg
   // here — the policy is its own ~/.jarvis/policy.json file on disk and is
@@ -379,6 +428,96 @@ export function PermissionsPanel({ activeTab }: PermissionsPanelProps): React.Re
           Stored at <span style={{ color: 'rgba(0,229,255,0.7)' }}>~/.jarvis/policy.json</span>.
           Changes save instantly.
         </p>
+      </section>
+
+      {/* ---------------------------------------------------------- */}
+      {/* TASK-032 — OS-level Microphone permission deep link.        */}
+      {/* Same row layout on both platforms; only the button label,  */}
+      {/* deep-link target, and helper copy change per platform.     */}
+      {/* macOS branch is the existing System Settings behaviour     */}
+      {/* (unchanged per acceptance criterion). Windows branch uses  */}
+      {/* the ms-settings: URI and surfaces a fallback hint for the  */}
+      {/* group-policy-blocked failure case.                          */}
+      {/* ---------------------------------------------------------- */}
+      <section className="holo-panel p-4" data-testid="permissions-os-deeplink">
+        <h3
+          className="text-xs font-semibold text-[#00e5ff] mb-2"
+          style={{
+            fontFamily: "'SF Mono', 'Menlo', monospace",
+            letterSpacing: '0.18em',
+            textTransform: 'uppercase',
+          }}
+        >
+          ▸ OS-level Microphone Access
+        </h3>
+        {isWindows ? (
+          <div
+            className="flex items-center justify-between gap-4"
+            data-testid="permissions-os-deeplink-windows"
+          >
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] text-[#8ba4b8]">
+                Jarvis needs Microphone access from Windows. Open{' '}
+                <span style={{ color: 'rgba(0,229,255,0.7)' }}>
+                  Settings → Privacy → Microphone
+                </span>{' '}
+                and enable access for Jarvis.
+              </p>
+              <p
+                className="text-[10px] text-[#4a6278] mt-1 italic"
+                data-testid="permissions-os-deeplink-windows-fallback"
+              >
+                If your organisation blocks <code>ms-settings:</code> via group policy, open the
+                Start menu and search for <em>Microphone privacy settings</em> instead.
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="permissions-open-windows-microphone"
+              onClick={() => BrowserOpenURL(WINDOWS_SETTINGS_MICROPHONE_URL)}
+              className="text-[11px] px-3 py-1 rounded border transition-colors flex-shrink-0"
+              style={{
+                fontFamily: "'SF Mono', 'Menlo', monospace",
+                letterSpacing: '0.05em',
+                borderColor: 'rgba(0, 229, 255, 0.5)',
+                color: 'rgba(0, 229, 255, 0.95)',
+                background: 'transparent',
+              }}
+            >
+              Open Windows Settings
+            </button>
+          </div>
+        ) : (
+          <div
+            className="flex items-center justify-between gap-4"
+            data-testid="permissions-os-deeplink-darwin"
+          >
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] text-[#8ba4b8]">
+                Jarvis needs Microphone access from macOS. Open{' '}
+                <span style={{ color: 'rgba(0,229,255,0.7)' }}>
+                  System Settings → Privacy &amp; Security → Microphone
+                </span>{' '}
+                and enable access for Jarvis.
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="permissions-open-macos-microphone"
+              onClick={() => BrowserOpenURL(MACOS_SETTINGS_MICROPHONE_URL)}
+              className="text-[11px] px-3 py-1 rounded border transition-colors flex-shrink-0"
+              style={{
+                fontFamily: "'SF Mono', 'Menlo', monospace",
+                letterSpacing: '0.05em',
+                borderColor: 'rgba(0, 229, 255, 0.5)',
+                color: 'rgba(0, 229, 255, 0.95)',
+                background: 'transparent',
+              }}
+            >
+              Open System Settings
+            </button>
+          </div>
+        )}
       </section>
 
       {/* ---------------------------------------------------------- */}

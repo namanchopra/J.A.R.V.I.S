@@ -1,0 +1,133 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+#
+# TASK-060: winget Installer manifest for Jarvis.
+#
+# Describes the per-architecture installer .exe assets produced by the Inno
+# Setup script at installer/jarvis.iss (TASK-054) and signed by the
+# release-windows.yml workflow (TASK-056). Two installer entries are listed:
+# x64 and arm64. Microsoft Store / winget routes the user to the matching
+# entry automatically based on their Windows architecture.
+#
+# Installer URLs point at the GitHub Releases assets produced by
+# release-windows.yml; the v0.4.0 placeholder is rewritten by the release
+# pipeline before the PR is opened against microsoft/winget-pkgs (see the
+# header in Namanchopra.Jarvis.yaml).
+#
+# InstallerSha256 fields are placeholders here — they are populated by the
+# release pipeline using `Get-FileHash -Algorithm SHA256` against each signed
+# Jarvis-Setup-<version>-<arch>.exe just before the PR is opened. The 64-zero
+# value is the canonical "unfilled" marker the winget toolchain recognises;
+# `winget validate` flags it loudly so an accidental publish without real
+# hashes fails fast.
+#
+# Acceptance criteria covered (TASK-060):
+#   - `winget install Namanchopra.Jarvis` works: InstallerType `inno`
+#     instructs winget to invoke Inno Setup's silent-install switches
+#     (/VERYSILENT /SUPPRESSMSGBOXES /NORESTART) which our jarvis.iss
+#     supports out of the box (CloseApplications=yes, RestartApplications=no).
+#   - Manifest validates: every required key for v1.6.0 is present
+#     (PackageIdentifier, PackageVersion, Installers[], ManifestType,
+#     ManifestVersion). Per-installer required keys (Architecture,
+#     InstallerType, InstallerUrl, InstallerSha256) are also present.
+#   - Failure case: rejection by Microsoft reviewers — common rebuttals are
+#     "missing ProductCode" (we include it; matches the AppId GUID in
+#     jarvis.iss with surrounding braces), "InstallerSwitches.Silent
+#     incorrect" (Inno's silent flag is /VERYSILENT, not /S — included
+#     here), and "Scope must be machine for admin installs" (set below).
+#
+PackageIdentifier: Namanchopra.Jarvis
+PackageVersion: 0.4.0
+
+# Publisher metadata that surfaces in `winget show Namanchopra.Jarvis`.
+Publisher: namanchopra
+PublisherUrl: https://github.com/namanchopra
+PublisherSupportUrl: https://github.com/namanchopra/J.A.R.V.I.S/issues
+Author: namanchopra
+PackageName: Jarvis
+PackageUrl: https://github.com/namanchopra/J.A.R.V.I.S
+License: Apache-2.0
+LicenseUrl: https://github.com/namanchopra/J.A.R.V.I.S/blob/main/LICENSE
+Copyright: Copyright (c) 2026 namanchopra
+ShortDescription: AI voice companion for orchestrating coding agents across multiple projects.
+Moniker: jarvis
+Tags:
+  - ai
+  - voice-assistant
+  - coding-agents
+  - developer-tools
+  - claude
+  - llm
+
+# Minimum Windows: 10.0.17763 (Win10 1809) — matches the MinVersion guard in
+# installer/jarvis.iss and the WebView2 supported floor. winget refuses the
+# install on older machines rather than letting Inno Setup fail mid-flight.
+MinimumOSVersion: 10.0.17763.0
+
+# InstallerType `inno` lets winget drive Inno Setup's well-known silent flags
+# without us having to spell them out in InstallerSwitches. We DO override
+# Silent here because Inno's "/VERYSILENT" is what suppresses the wizard
+# entirely (the default "/SILENT" still shows a progress dialog).
+InstallerType: inno
+
+# Install scope: "machine" matches PrivilegesRequired=admin in jarvis.iss. A
+# winget user without admin rights gets the standard UAC prompt; declining
+# UAC fails the install cleanly rather than silently falling back to a
+# per-user install (which would not be findable by `winget upgrade`).
+Scope: machine
+
+# Inno Setup respects /VERYSILENT for fully-silent installs and /SILENT for
+# progress-dialog-only. winget passes Silent by default for unattended
+# installs (`winget install -h` / "headless"); the SilentWithProgress flag
+# is used by `winget install` without -h.
+InstallerSwitches:
+  Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+  SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART
+  # Custom switch lets advanced users pass extra Inno args via
+  # `winget install Namanchopra.Jarvis --custom "/LOG=jarvis-install.log"`
+  Custom: ""
+
+# UpgradeBehavior `install` (default) tells winget to run the new installer
+# directly; jarvis.iss handles in-place upgrades via the AppId GUID (the
+# matching uninstall entry is detected and the prior version is replaced).
+UpgradeBehavior: install
+
+# ProductCode mirrors the AppId GUID in installer/jarvis.iss (with surrounding
+# braces, as registered under HKLM\...\Uninstall by Inno Setup). winget uses
+# this to detect already-installed versions and route upgrades correctly. The
+# leading "{{" / trailing "}}" double-brace pattern in jarvis.iss is Inno's
+# escape for a single literal brace; the registry value Windows actually
+# stores is the single-braced form below.
+ProductCode: "{A8F1C0E2-7B3E-4E5A-9D2C-3F8B6A1D0E4F}"
+
+# ReleaseDate placeholder — overwritten by the release pipeline with the
+# actual tag-push date (ISO-8601, e.g. 2026-07-15).
+ReleaseDate: 2026-01-01
+
+# ReleaseNotesUrl points at the GitHub release page for this version; the
+# release pipeline appends the v-prefixed tag (e.g. /tag/v0.4.0).
+ReleaseNotesUrl: https://github.com/namanchopra/J.A.R.V.I.S/releases/tag/v0.4.0
+
+# -----------------------------------------------------------------------------
+# Per-architecture installers. The release-windows.yml workflow produces
+# both x64 and arm64 Inno Setup .exe files; winget picks the right one based
+# on the user's Windows architecture (an arm64 user gets the native arm64
+# build, NOT the x64 build under emulation).
+# -----------------------------------------------------------------------------
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/namanchopra/J.A.R.V.I.S/releases/download/v0.4.0/Jarvis-Setup-0.4.0-x64.exe
+    # SHA256 placeholder — release pipeline fills this from the signed .exe.
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+  - Architecture: arm64
+    InstallerUrl: https://github.com/namanchopra/J.A.R.V.I.S/releases/download/v0.4.0/Jarvis-Setup-0.4.0-arm64.exe
+    # SHA256 placeholder — release pipeline fills this from the signed .exe.
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+# FileExtensions / Commands left intentionally empty: Jarvis is a GUI app
+# launched from the Start Menu shortcut, not a CLI tool reachable from PATH.
+# If the optional `awm` CLI is later shipped on PATH, add:
+#   Commands: [awm]
+
+ManifestType: installer
+ManifestVersion: 1.6.0

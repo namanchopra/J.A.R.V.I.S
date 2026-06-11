@@ -1,0 +1,106 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+#
+# TASK-060: winget DefaultLocale manifest for Jarvis (en-US).
+#
+# Surfaces the human-readable metadata `winget show Namanchopra.Jarvis`
+# displays. Because the Version manifest declares DefaultLocale: en-US, this
+# file MUST exist and use ManifestType: defaultLocale (not "locale" — that
+# type is reserved for additional, non-default locales).
+#
+# Acceptance criteria covered (TASK-060):
+#   - `winget install Namanchopra.Jarvis` works: the DefaultLocale entry
+#     here matches the one declared in Namanchopra.Jarvis.yaml.
+#   - Manifest validates: every required key for v1.6.0 defaultLocale is
+#     present (PackageIdentifier, PackageVersion, PackageLocale, Publisher,
+#     PackageName, License, ShortDescription, ManifestType, ManifestVersion).
+#   - Failure case: Microsoft reviewers occasionally bounce manifests for
+#     "ShortDescription too long" (>256 chars) or "Tags not lower-kebab".
+#     Both constraints are honoured below.
+#
+PackageIdentifier: Namanchopra.Jarvis
+PackageVersion: 0.4.0
+PackageLocale: en-US
+
+Publisher: namanchopra
+PublisherUrl: https://github.com/namanchopra
+PublisherSupportUrl: https://github.com/namanchopra/J.A.R.V.I.S/issues
+PrivacyUrl: https://github.com/namanchopra/J.A.R.V.I.S/blob/main/README.md#privacy
+
+Author: namanchopra
+
+PackageName: Jarvis
+PackageUrl: https://github.com/namanchopra/J.A.R.V.I.S
+
+License: Apache-2.0
+LicenseUrl: https://github.com/namanchopra/J.A.R.V.I.S/blob/main/LICENSE
+
+Copyright: Copyright (c) 2026 namanchopra
+CopyrightUrl: https://github.com/namanchopra/J.A.R.V.I.S/blob/main/LICENSE
+
+# Keep ShortDescription <= 256 chars (winget schema enforces).
+ShortDescription: AI voice companion for orchestrating coding agents across multiple projects.
+
+# Description supports a longer multi-paragraph blurb (max 10000 chars).
+Description: |-
+  Jarvis is a native desktop voice companion for driving AI coding agents the
+  way you'd drive a junior engineer — by talking to them. Say "Hey Jarvis" to
+  launch Claude Code, Kiro, Gemini, Codex, or Aider sessions across multiple
+  repositories, dispatch work in parallel, and get notified when sessions
+  need your attention.
+
+  Features:
+    - Voice-driven session launch and management via a local wake-word.
+    - Multi-agent support: Claude Code, Kiro, Gemini, Codex, Aider.
+    - Cross-session conflict detection warns when two agents are about to
+      step on each other's changes.
+    - Built-in mobile companion (Friday) for monitoring sessions remotely.
+    - Local Whisper transcription via faster-whisper on Windows.
+    - System audio capture via WASAPI loopback for meeting mode.
+
+  First launch performs a one-time setup (~10-15 min) that installs a
+  portable Python runtime + daemon venv and downloads the local model
+  weights. After setup, Jarvis runs fully offline except for your chosen
+  cloud LLM provider.
+
+Moniker: jarvis
+
+# Lower-kebab-case is the winget convention for Tags; reviewers reject
+# CamelCase or whitespace.
+Tags:
+  - ai
+  - voice-assistant
+  - coding-agents
+  - developer-tools
+  - claude
+  - llm
+  - whisper
+  - automation
+
+ReleaseNotes: |-
+  v0.4.0 — Windows port.
+  Adds native Windows builds (x64 + arm64), Inno Setup installer, WASAPI
+  meeting mode, faster-whisper transcription, and winget distribution.
+  Existing macOS installs are unaffected — no migration steps required.
+
+ReleaseNotesUrl: https://github.com/namanchopra/J.A.R.V.I.S/releases/tag/v0.4.0
+
+PurchaseUrl: https://github.com/namanchopra/J.A.R.V.I.S
+InstallationNotes: |-
+  First launch will run a one-time setup that installs a portable Python
+  runtime to %LocalAppData%\Jarvis\ and downloads model weights from
+  Hugging Face. Allow ~10-15 minutes for the initial setup; subsequent
+  launches start in <2 seconds.
+
+  If WebView2 is not already installed, the bundled bootstrapper installs
+  it silently during the install step. The mobile-API firewall rule for
+  port 4422 is added automatically when running the installer with admin
+  rights; non-admin installs surface a "Friday may not connect" warning.
+
+Documentations:
+  - DocumentLabel: README
+    DocumentUrl: https://github.com/namanchopra/J.A.R.V.I.S/blob/main/README.md
+  - DocumentLabel: CHANGELOG
+    DocumentUrl: https://github.com/namanchopra/J.A.R.V.I.S/blob/main/CHANGELOG.md
+
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

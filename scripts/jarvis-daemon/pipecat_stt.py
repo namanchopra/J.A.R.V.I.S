@@ -5,10 +5,17 @@ Wraps local speech-to-text transcription as a Pipecat FrameProcessor.
 Accumulates audio frames, transcribes periodically, and emits
 TranscriptionFrame when speech ends.
 
-Backend priority:
-  1. NVIDIA NeMo Parakeet (``nemo.collections.asr``)
-  2. mlx-whisper (Apple Silicon)
-  3. faster-whisper (CPU/GPU via CTranslate2)
+Backend priority (platform-aware, per TASK-037 in plans/jarvis-windows-port):
+  1. NVIDIA NeMo Parakeet (``nemo.collections.asr``)         -- any platform
+  2. mlx-whisper                                            -- darwin/arm64 only
+  3. faster-whisper (CPU/GPU via CTranslate2)               -- any platform
+
+The mlx-whisper attempt is skipped entirely outside darwin/arm64 because the
+MLX backend is hard-pinned to Apple Silicon (it imports the ``mlx`` Metal
+runtime) -- attempting it on Windows / Linux just spams the log with the
+same ImportError and adds startup latency. On those platforms we go
+directly to faster-whisper, which is CTranslate2-based and prefers a CUDA
+GPU when available, falling back cleanly to CPU otherwise.
 
 Key design: Pipecat 1.0's ``start(StartFrame)`` override is no longer called,
 so the model is loaded lazily on the first audio frame. The STT doesn't
@@ -20,6 +27,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -108,6 +117,51 @@ def _resolve_whisper_repo(model_name: str) -> str:
             if os.path.isdir(path):
                 return path
     return f"mlx-community/whisper-{model_name}-mlx"
+
+def _is_apple_silicon() -> bool:
+    """Return True iff the daemon is running on darwin/arm64.
+
+    mlx-whisper requires Apple's MLX Metal runtime, which is built for
+    darwin/arm64 only. We use this guard to skip the mlx-whisper import
+    attempt on Windows / Linux / Intel macOS rather than letting it fail
+    with a confusing ImportError every cold start.
+
+    Implemented in terms of ``sys.platform`` + ``platform.machine`` so it
+    works on every interpreter we ship (CPython 3.13 from python-build-
+    standalone on Win11 and the macOS stock Python alike).
+    """
+    if not sys.platform.startswith("darwin"):
+        return False
+    machine = platform.machine().lower()
+    return machine in {"arm64", "aarch64"}
+
+
+def _detect_cuda() -> bool:
+    """Return True if a CUDA-capable GPU is visible to PyTorch.
+
+    Used by the faster-whisper loader on non-Apple platforms to decide
+    between ``device="cuda"`` (with FP16 compute) and ``device="cpu"``
+    (with INT8 compute). Any failure -- torch missing, NVML failure,
+    driver mismatch -- is treated as "no CUDA available" so we fall
+    back to CPU rather than crash the STT load path. This mirrors the
+    fallback behaviour TASK-037 acceptance criterion #3 mandates.
+
+    We import torch lazily and guard every step so this helper can be
+    called from any platform without side-effects.
+    """
+    try:
+        import torch  # noqa: PLC0415 -- deferred to avoid a hard dep
+    except Exception:
+        # torch isn't installed (or DLLs failed to load on Windows) --
+        # just fall back to CPU. faster-whisper's CT2 backend ships its
+        # own CUDA loader, but PyTorch is the most reliable way to ask
+        # "is a usable GPU present?" on this machine.
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
 
 # Parakeet model identifiers, tried in order.
 _PARAKEET_MODELS: Final[tuple[str, ...]] = (
@@ -216,19 +270,39 @@ class LocalWhisperSTT(FrameProcessor):
         """Try backends in priority order. Returns ``(kind, model)`` or ``None``.
 
         Priority:
-          1. Parakeet (NeMo ASR) -- best accuracy for English
-          2. mlx-whisper         -- fast on Apple Silicon
-          3. faster-whisper      -- broad hardware support
+          1. Parakeet (NeMo ASR) -- best accuracy for English, any platform
+          2. mlx-whisper         -- fast on Apple Silicon (darwin/arm64 only)
+          3. faster-whisper      -- broad hardware support (CUDA + CPU)
+
+        Platform-aware ordering per TASK-037: mlx-whisper is skipped on
+        non-Apple-Silicon machines (Windows / Linux / Intel macOS) because
+        its Metal runtime hard-requires darwin/arm64. Skipping it there
+        avoids an ImportError + several seconds of fruitless retries on
+        every cold start, and ensures Windows users land on the
+        cross-platform faster-whisper path which is the only Whisper
+        implementation that works on their hardware.
         """
         # --- 1. NVIDIA Parakeet via NeMo ---
         backend = self._try_load_parakeet()
         if backend is not None:
             return backend
 
-        # --- 2. mlx-whisper (Apple Silicon) ---
-        backend = self._try_load_mlx_whisper()
-        if backend is not None:
-            return backend
+        # --- 2. mlx-whisper (Apple Silicon only) ---
+        # Hard-gate on darwin/arm64. The mlx_whisper package will import
+        # fine on Linux/Windows but every transcribe() call fails because
+        # mlx itself only ships Metal kernels. Better to skip cleanly here
+        # so Windows logs read "Using faster-whisper backend" first try.
+        if _is_apple_silicon():
+            backend = self._try_load_mlx_whisper()
+            if backend is not None:
+                return backend
+        else:
+            logger.info(
+                "Skipping mlx-whisper backend (requires darwin/arm64, "
+                "platform=%s/%s)",
+                sys.platform,
+                platform.machine(),
+            )
 
         # --- 3. faster-whisper (CTranslate2) ---
         backend = self._try_load_faster_whisper()
@@ -277,17 +351,70 @@ class LocalWhisperSTT(FrameProcessor):
             return None
 
     def _try_load_faster_whisper(self):
-        """Attempt to load faster-whisper (CTranslate2)."""
+        """Attempt to load faster-whisper (CTranslate2).
+
+        Device + compute_type selection (TASK-037 AC #1 and AC #3):
+          - CUDA visible: ``device="cuda"`` + ``compute_type="float16"`` --
+            the recommended config for CTranslate2 on NVIDIA GPUs; ~5-6x
+            faster than the base Whisper at the same accuracy. If CUDA
+            initialisation fails at WhisperModel() construction time
+            (driver mismatch, runtime DLL missing, OOM at load) we fall
+            back to CPU automatically rather than failing the whole STT
+            load.
+          - No CUDA: ``device="cpu"`` + ``compute_type="int8"`` -- INT8 is
+            the only compute_type that performs acceptably on CPU; FP32
+            CPU inference is too slow to keep up with realtime audio.
+
+        Models are loaded from the standard HuggingFace cache
+        (``~/.cache/huggingface/hub`` on every platform) which is the
+        same cache the macOS path uses for mlx-whisper, satisfying the
+        "model loaded from same HF cache" acceptance criterion.
+        """
         try:
             from faster_whisper import WhisperModel
+        except Exception as exc:
+            logger.error("faster-whisper not importable: %s", exc)
+            return None
 
+        cuda_available = _detect_cuda()
+        if cuda_available:
+            try:
+                model = WhisperModel(
+                    self._model_name,
+                    device="cuda",
+                    compute_type="float16",
+                )
+                logger.info(
+                    "Using faster-whisper backend (device=cuda, "
+                    "compute_type=float16, model=%s)",
+                    self._model_name,
+                )
+                return ("faster-whisper", model)
+            except Exception as exc:
+                # Most common path: CUDA visible but ctranslate2's CUDA
+                # runtime can't load (driver/cuDNN mismatch, OOM on a
+                # busy GPU). Fall back to CPU rather than bubbling up --
+                # AC #3 explicitly requires "CPU fallback works".
+                logger.warning(
+                    "faster-whisper CUDA load failed (%s); "
+                    "falling back to CPU",
+                    exc,
+                )
+
+        try:
             model = WhisperModel(
-                self._model_name, device="auto", compute_type="int8"
+                self._model_name,
+                device="cpu",
+                compute_type="int8",
             )
-            logger.info("Using faster-whisper backend")
+            logger.info(
+                "Using faster-whisper backend (device=cpu, "
+                "compute_type=int8, model=%s)",
+                self._model_name,
+            )
             return ("faster-whisper", model)
         except Exception as exc:
-            logger.error("faster-whisper not available: %s", exc)
+            logger.error("faster-whisper CPU load failed: %s", exc)
             return None
 
     # ------------------------------------------------------------------
