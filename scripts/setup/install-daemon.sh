@@ -222,7 +222,9 @@ ensure_portaudio() {
             && -f "${bundled_pa}/lib/libportaudio.2.dylib" ]]; then
         log "preflight: staging bundled portaudio from ${bundled_pa}"
         mkdir -p "${PA_STAGE_DIR}/include" "${PA_STAGE_DIR}/lib"
-        cp -f "${bundled_pa}/include/portaudio.h" "${PA_STAGE_DIR}/include/portaudio.h"
+        # All headers, not just portaudio.h — pyaudio's macOS build also
+        # #includes pa_mac_core.h.
+        cp -f "${bundled_pa}/include/"*.h "${PA_STAGE_DIR}/include/"
         cp -f "${bundled_pa}/lib/libportaudio.2.dylib" "${PA_STAGE_DIR}/lib/libportaudio.2.dylib"
         chmod 755 "${PA_STAGE_DIR}/lib/libportaudio.2.dylib"
         # `ld -lportaudio` searches for the UNVERSIONED libportaudio.dylib —

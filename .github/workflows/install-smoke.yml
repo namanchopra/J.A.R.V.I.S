@@ -113,7 +113,8 @@ jobs:
           brew install portaudio
           PREFIX="$(brew --prefix portaudio)"
           mkdir -p resources-stage/portaudio/include resources-stage/portaudio/lib
-          cp "${PREFIX}/include/portaudio.h" resources-stage/portaudio/include/portaudio.h
+          # All headers — pyaudio's macOS build needs pa_mac_core.h too.
+          cp "${PREFIX}/include/"*.h resources-stage/portaudio/include/
           cp "$(realpath "${PREFIX}/lib/libportaudio.2.dylib")" resources-stage/portaudio/lib/libportaudio.2.dylib
           # The script resolves the bundle as dirname(<daemon-src>)/portaudio,
           # so the daemon source must sit NEXT TO portaudio/ in the stage dir.

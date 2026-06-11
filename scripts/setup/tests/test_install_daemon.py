@@ -268,6 +268,10 @@ def test_preflight_bundled_portaudio_staged_without_brew(
     (bundled / "include" / "portaudio.h").write_text(
         "/* stub portaudio.h for bundled-staging test */\n"
     )
+    # pyaudio's macOS build also includes pa_mac_core.h; staging copies *.h.
+    (bundled / "include" / "pa_mac_core.h").write_text(
+        "/* stub pa_mac_core.h for bundled-staging test */\n"
+    )
     empty_c = tmp_path / "empty.c"
     empty_c.write_text("")
     subprocess.run(
@@ -297,6 +301,7 @@ def test_preflight_bundled_portaudio_staged_without_brew(
     staged_header = jarvis_home / "portaudio" / "include" / "portaudio.h"
     staged_dylib = jarvis_home / "portaudio" / "lib" / "libportaudio.2.dylib"
     assert staged_header.is_file()
+    assert (jarvis_home / "portaudio" / "include" / "pa_mac_core.h").is_file()
     assert staged_dylib.is_file()
     # `ld -lportaudio` resolves the UNVERSIONED name; the staging must mirror
     # brew's libportaudio.dylib -> libportaudio.2.dylib symlink.

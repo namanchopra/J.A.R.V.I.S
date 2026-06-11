@@ -76,9 +76,11 @@ PA_RES="${RESOURCES}/portaudio"
 PORTAUDIO_HEADER="/opt/homebrew/opt/portaudio/include/portaudio.h"
 if [[ -f "${PORTAUDIO_HEADER}" ]]; then
     mkdir -p "${PA_RES}/include" "${PA_RES}/lib"
-    cp "${PORTAUDIO_HEADER}" "${PA_RES}/include/portaudio.h"
+    # Copy ALL headers, not just portaudio.h — pyaudio's macOS build also
+    # #includes pa_mac_core.h (host-API-specific extensions).
+    cp "$(dirname "${PORTAUDIO_HEADER}")"/*.h "${PA_RES}/include/"
     cp "${PORTAUDIO_REAL}" "${PA_RES}/lib/libportaudio.2.dylib"
-    chmod 644 "${PA_RES}/include/portaudio.h"
+    chmod 644 "${PA_RES}/include/"*.h
     chmod 755 "${PA_RES}/lib/libportaudio.2.dylib"
     echo "post-build: staged portaudio.h + dylib -> Resources/portaudio/ (first-launch pyaudio build)"
 else
