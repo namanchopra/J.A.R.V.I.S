@@ -63,6 +63,33 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Stage portaudio header + pristine dylib for the FIRST-LAUNCH pyaudio build.
+#
+# The Frameworks/ copy above serves the Go binary only — its install_name is
+# @executable_path-relative, which resolves against jarvis, not the bundled
+# python that loads pyaudio's _portaudio.so. install-daemon.sh::ensure_portaudio
+# (branch 0) copies this pristine pair into ~/.jarvis/portaudio/ and re-ids
+# the dylib to that absolute path before `uv pip install` compiles pyaudio.
+# Without this, first-launch setup requires Homebrew on the user's machine.
+# ---------------------------------------------------------------------------
+PA_RES="${RESOURCES}/portaudio"
+PORTAUDIO_HEADER="/opt/homebrew/opt/portaudio/include/portaudio.h"
+if [[ -f "${PORTAUDIO_HEADER}" ]]; then
+    mkdir -p "${PA_RES}/include" "${PA_RES}/lib"
+    # Copy ALL headers, not just portaudio.h — pyaudio's macOS build also
+    # #includes pa_mac_core.h (host-API-specific extensions).
+    cp "$(dirname "${PORTAUDIO_HEADER}")"/*.h "${PA_RES}/include/"
+    cp "${PORTAUDIO_REAL}" "${PA_RES}/lib/libportaudio.2.dylib"
+    chmod 644 "${PA_RES}/include/"*.h
+    chmod 755 "${PA_RES}/lib/libportaudio.2.dylib"
+    echo "post-build: staged portaudio.h + dylib -> Resources/portaudio/ (first-launch pyaudio build)"
+else
+    echo "post-build: ERROR: portaudio.h not found at ${PORTAUDIO_HEADER}" >&2
+    echo "post-build: Install it with: brew install portaudio" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # Copy first-launch setup payload (uv + install-daemon.sh) -> Resources/setup/
 #
 # v0.2.0 (TASK-005): instead of bundling CPython + daemon venv (~150MB), we

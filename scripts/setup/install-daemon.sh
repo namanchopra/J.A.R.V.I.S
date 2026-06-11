@@ -78,6 +78,11 @@ VENV_REQ_SHA_PATH="${VENV_DIR}/.requirements-sha256"
 DAEMON_SRC_DIR="${JARVIS_HOME}/jarvis-daemon"
 FINAL_SENTINEL="${JARVIS_HOME}/.setup-version-${SETUP_VERSION}"
 
+# Staging dir for the app-bundled portaudio header + dylib (v0.4.1+). Lives
+# under ~/.jarvis (not inside the .app) so the absolute dylib path baked into
+# pyaudio's _portaudio.so survives app relocation and updates.
+PA_STAGE_DIR="${JARVIS_HOME}/portaudio"
+
 # Track current phase for the SIGTERM trap. Empty when no phase is active.
 CURRENT_PHASE=""
 
@@ -187,16 +192,60 @@ sha256_file() {
 #   fatal error: 'portaudio.h' file not found
 #
 # Detection order:
+#   0. App-bundled copy (v0.4.1+): Resources/portaudio/{include,lib} staged by
+#      build/scripts/post-build.sh -> copy into ~/.jarvis/portaudio/ and use.
+#      This is the path EVERY packaged install takes — no Homebrew required.
 #   1. Header already present in /opt/homebrew/include or /usr/local/include
-#      -> nothing to do.
-#   2. Homebrew installed -> `brew install portaudio`.
+#      -> nothing to do. (dev machines)
+#   2. Homebrew installed -> `brew install portaudio`. (dev machines)
 #   3. No brew -> emit a clear error with remediation steps and exit.
 #
 # After this returns OK, the venv_install phase exports CFLAGS / LDFLAGS
-# pointing at the brew prefix so pyaudio's setup.py finds the headers + libs.
+# pointing at the staged/brew prefixes so pyaudio's setup.py finds the
+# headers + libs.
 # -----------------------------------------------------------------------------
 ensure_portaudio() {
     log "preflight: checking portaudio"
+
+    # Branch 0 — app-bundled portaudio. post-build.sh stages portaudio.h and
+    # a pristine libportaudio.2.dylib under <.app>/Contents/Resources/portaudio/.
+    # We stage both into ~/.jarvis/portaudio/ and rewrite the dylib's install
+    # name (LC_ID_DYLIB) to that absolute path: at pip-build time ld copies the
+    # id into _portaudio.so's load command, and the extension is loaded by the
+    # bundled *python* process — an @executable_path id (like the Frameworks/
+    # copy uses for the Go binary) would resolve relative to python and fail.
+    local resources_dir bundled_pa
+    resources_dir="$(cd "$(dirname "${BUNDLED_DAEMON_SRC}")" 2>/dev/null && pwd || true)"
+    bundled_pa="${resources_dir}/portaudio"
+    if [[ -n "${resources_dir}" \
+            && -f "${bundled_pa}/include/portaudio.h" \
+            && -f "${bundled_pa}/lib/libportaudio.2.dylib" ]]; then
+        log "preflight: staging bundled portaudio from ${bundled_pa}"
+        mkdir -p "${PA_STAGE_DIR}/include" "${PA_STAGE_DIR}/lib"
+        # All headers, not just portaudio.h — pyaudio's macOS build also
+        # #includes pa_mac_core.h.
+        cp -f "${bundled_pa}/include/"*.h "${PA_STAGE_DIR}/include/"
+        cp -f "${bundled_pa}/lib/libportaudio.2.dylib" "${PA_STAGE_DIR}/lib/libportaudio.2.dylib"
+        chmod 755 "${PA_STAGE_DIR}/lib/libportaudio.2.dylib"
+        # `ld -lportaudio` searches for the UNVERSIONED libportaudio.dylib —
+        # brew provides it as a symlink to the versioned file; mirror that here
+        # or pyaudio's link step fails even with the header present.
+        ln -sf "libportaudio.2.dylib" "${PA_STAGE_DIR}/lib/libportaudio.dylib"
+        # Re-id to the absolute staged path. install_name_tool ships with the
+        # Xcode CLT (already a preflight requirement). Best-effort: a failure
+        # here (e.g. corrupted Mach-O) logs a warning and falls through to the
+        # brew branches rather than hard-failing setup.
+        if install_name_tool -id "${PA_STAGE_DIR}/lib/libportaudio.2.dylib" \
+                "${PA_STAGE_DIR}/lib/libportaudio.2.dylib" >>"${SETUP_LOG}" 2>&1; then
+            # install_name_tool invalidates the code signature; on arm64 dyld
+            # refuses unsigned dylibs, so re-sign ad-hoc.
+            codesign --force --sign - "${PA_STAGE_DIR}/lib/libportaudio.2.dylib" \
+                >>"${SETUP_LOG}" 2>&1 || true
+            log "preflight: bundled portaudio staged at ${PA_STAGE_DIR}"
+            return 0
+        fi
+        log "preflight: WARN install_name_tool failed on bundled dylib; trying system portaudio"
+    fi
 
     # Common header locations on macOS (Apple Silicon brew + Intel brew).
     if [[ -f /opt/homebrew/include/portaudio.h ]] \
@@ -577,19 +626,20 @@ phase_venv() {
 
     # pyaudio compiles from source on Python 3.13 (no arm64 wheel). Point its
     # build at the portaudio install ensure_portaudio prepared during preflight.
-    # Auto-detect Apple Silicon brew (/opt/homebrew) first, fall back to Intel
-    # (/usr/local). Setting both prefixes is safe — clang ignores include paths
-    # that don't exist.
-    local portaudio_cflags="-I/opt/homebrew/include -I/usr/local/include"
-    local portaudio_ldflags="-L/opt/homebrew/lib -L/usr/local/lib"
+    # The ~/.jarvis/portaudio staging dir (app-bundled copy, branch 0) comes
+    # FIRST so packaged installs never depend on host Homebrew; the brew
+    # prefixes (Apple Silicon then Intel) are dev-machine fallbacks. Setting
+    # all of them is safe — clang ignores include paths that don't exist.
+    local portaudio_cflags="-I${PA_STAGE_DIR}/include -I/opt/homebrew/include -I/usr/local/include"
+    local portaudio_ldflags="-L${PA_STAGE_DIR}/lib -L/opt/homebrew/lib -L/usr/local/lib"
 
     local uv_err
     uv_err="$(mktemp -t install-daemon.uv-err.XXXXXX)"
     if ! VIRTUAL_ENV="${VENV_DIR}" \
             CFLAGS="${portaudio_cflags}" \
             LDFLAGS="${portaudio_ldflags}" \
-            CPATH="/opt/homebrew/include:/usr/local/include" \
-            LIBRARY_PATH="/opt/homebrew/lib:/usr/local/lib" \
+            CPATH="${PA_STAGE_DIR}/include:/opt/homebrew/include:/usr/local/include" \
+            LIBRARY_PATH="${PA_STAGE_DIR}/lib:/opt/homebrew/lib:/usr/local/lib" \
             "${UV_BIN}" pip install \
             --python "${VENV_DIR}/bin/python3" \
             -r "${req_path}" \
