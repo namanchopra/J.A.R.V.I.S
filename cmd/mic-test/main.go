@@ -1,6 +1,10 @@
+//go:build darwin
+
 // Quick mic test — records 3 seconds and prints RMS energy levels.
 // Run: go run ./cmd/mic-test/
 // If you see energy values > 0.01 when you talk, the mic works.
+// darwin-only: wraps the PortAudio CGO binding, which the Go side only
+// uses on macOS (see internal/jarvis/audio/capture_darwin.go).
 package main
 
 import (

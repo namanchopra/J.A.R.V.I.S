@@ -353,7 +353,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "${GITHUB_REF_NAME}" \
-            "Jarvis-${VERSION}.dmg" \
-            --title "Jarvis ${GITHUB_REF_NAME}" \
-            --notes-file CHANGELOG.md
+          # The Windows release workflow runs concurrently on the same tag
+          # and typically finishes first (no notarization wait) — its publish
+          # step may have already created the release. An unguarded create
+          # would 422 here and the DMG would never attach, so: create if
+          # missing, then upload the DMG idempotently either way.
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Jarvis ${GITHUB_REF_NAME}" \
+              --notes-file CHANGELOG.md \
+              || gh release view "${GITHUB_REF_NAME}" >/dev/null
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "Jarvis-${VERSION}.dmg" --clobber

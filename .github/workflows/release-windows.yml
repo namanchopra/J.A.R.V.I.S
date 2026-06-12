@@ -99,6 +99,13 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # Manual re-run escape hatch: dispatch on a tag ref (gh workflow run
+  # release-windows.yml --ref v0.4.2) rebuilds + re-uploads that tag's
+  # assets without re-pushing the tag. GITHUB_REF_NAME resolves to the
+  # chosen ref, so version derivation below works unchanged. Dispatching
+  # on a branch is NOT useful for releases (asset names would carry the
+  # branch name) — always dispatch on a tag.
+  workflow_dispatch:
 
 # Prevent two builds of the same tag from racing each other. Scoped to this
 # workflow so it doesn't fight the macOS release.yml for the same tag.
@@ -151,16 +158,24 @@ jobs:
         # zips can coexist as separate downloads without colliding on the
         # artifact storage backend (GitHub rejects duplicate artifact names
         # within a single workflow run).
+        # `publish: true` legs build the Inno Setup installer and upload
+        # release assets. The windows-2025 leg exists purely for
+        # newer-Windows compile/smoke coverage — publishing from it too
+        # would double-upload identical amd64 assets under different
+        # win-labels and confuse the download story.
         include:
           - runner: windows-2022
             arch: amd64
             win-label: win11-21h2
+            publish: true
           - runner: windows-2025
             arch: amd64
             win-label: win11-24h2
+            publish: false
           - runner: windows-2022
             arch: arm64
             win-label: win11-21h2
+            publish: true
 
     steps:
       - name: Checkout source
@@ -213,6 +228,19 @@ jobs:
         # job's 20 min budget. If wails build runs longer we want it to fail
         # this step (clean error) rather than hit the job timeout (raw kill).
         timeout-minutes: 15
+        env:
+          # amd64: CGO on — internal/screencapture's WASAPI loopback bridge
+          # (meeting mode) compiles with the runner's MinGW gcc. Explicit so
+          # a missing C toolchain fails loudly instead of silently building
+          # the nocgo stub.
+          #
+          # arm64: CGO OFF — the x64 runner's MinGW cannot cross-compile C
+          # to windows/arm64, so the arm64 binary builds pure-Go and
+          # screencapture falls back to its `windows && !cgo` stub. Meeting
+          # mode is therefore unavailable on arm64 in v0.4.x (arm64 is
+          # documented as Beta in the CHANGELOG). Revisit with llvm-mingw if
+          # arm64 meeting mode is wanted later.
+          CGO_ENABLED: ${{ matrix.arch == 'arm64' && '0' || '1' }}
         run: wails build -platform windows/${{ matrix.arch }} -clean
 
       # Sanity check before we zip: a missing jarvis.exe means the wails
@@ -227,6 +255,35 @@ jobs:
             exit 1
           }
           Get-Item 'build/bin/jarvis.exe' | Select-Object Name, Length, LastWriteTime
+
+      # ------------------------------------------------------------------
+      # Stage the install-time payload (Resources\) next to jarvis.exe.
+      #
+      # Wails v2 does NOT honour wails.json postBuildHooks (and ours only
+      # declared darwin anyway), so the staging the macOS release gets from
+      # build/scripts/post-build.sh must be explicit steps here. Without
+      # this, jarvis.exe ships bare: no install-daemon.ps1, no uv.exe, no
+      # portaudio.dll — and first-launch setup on the user's machine is
+      # impossible. Placed BEFORE the signing block so that, once Azure
+      # Trusted Signing secrets are configured, the existing signing steps
+      # see and sign every staged .exe/.dll under Resources\.
+      # ------------------------------------------------------------------
+      - name: Fetch uv binary (${{ matrix.arch }})
+        shell: pwsh
+        run: pwsh -File build/scripts/fetch-uv.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Fetch portaudio.dll (${{ matrix.arch }})
+        shell: pwsh
+        # arm64: spatialaudio/portaudio-binaries publishes no arm64 DLL yet.
+        # fetch + post-build treat that as a warning; the arm64 installer
+        # ships without portaudio (arm64 is Beta — pyaudio source-builds at
+        # first launch are the documented rough edge in CHANGELOG v0.4.0).
+        continue-on-error: ${{ matrix.arch == 'arm64' }}
+        run: pwsh -File build/scripts/fetch-portaudio.ps1 -Arch ${{ matrix.arch }}
+
+      - name: Stage Resources payload (post-build.ps1)
+        shell: pwsh
+        run: pwsh -File build/scripts/post-build.ps1 -Arch ${{ matrix.arch }}
 
       # ------------------------------------------------------------------
       # Code Signing (Azure Trusted Signing)  [TASK-056]
@@ -371,6 +428,124 @@ jobs:
         run: |
           Write-Warning 'AZURE_TENANT_ID is not set — shipping UNSIGNED jarvis.exe. Windows SmartScreen will show "Unknown publisher" on first launch. Configure Azure Trusted Signing secrets (see release-windows.yml header) to produce signed releases.'
 
+      # Smoke-run the freshly built jarvis.exe with `--version` so the OS
+      # loader has to resolve every imported Windows API symbol. If the
+      # build accidentally pulls in a newer-Windows-only function (e.g. a
+      # 24H2-only webview2/shell32 entry point), the OLDER runner
+      # (windows-2022, Win11 21H2 build line) will fail here with
+      # "entry point not found" *before* we upload an artifact — the AC's
+      # failure case ("Win10-only API usage caught by Win10 runner; smoke
+      # test fails before upload"). We use windows-2022 as the older
+      # stand-in because GitHub retired `windows-2019` in mid-2025.
+      # `--version` exits cleanly without opening the GUI (see `cliFlags`
+      # map in main.go), so this works on a headless runner.
+      #
+      # Skipped for arm64 because the runner is x64 — the freshly built
+      # arm64 .exe cannot execute natively here. arm64 smoke-on-device is
+      # tracked separately (TASK-058's setup-screen verification).
+      - name: Smoke jarvis.exe --version
+        if: matrix.arch == 'amd64'
+        shell: pwsh
+        # Tight ceiling: --version should print + exit in well under a
+        # second. A multi-minute hang here means CLI plumbing regressed
+        # and we should fail fast rather than chew up the job budget.
+        timeout-minutes: 1
+        run: |
+          $output = & 'build/bin/jarvis.exe' --version 2>&1
+          $exit = $LASTEXITCODE
+          Write-Host "jarvis.exe --version exit=$exit output:`n$output"
+          if ($exit -ne 0) {
+            Write-Error "jarvis.exe --version failed on ${{ matrix.runner }} (exit=$exit). This usually means a newer-Windows-only API leaked into the build — see release-windows.yml header comment."
+            exit $exit
+          }
+
+      # Zip the whole `build/bin` tree (jarvis.exe today; future TASK-005
+      # Windows bundling will add Resources/ next to it). Filename mirrors
+      # the macOS DMG naming and tags both arch + win generation so the
+      # win11-21h2 + win11-24h2 amd64 zips can coexist as separate
+      # downloads:
+      #   `jarvis-<version>-<win-label>-<arch>.zip`
+      # The GITHUB_REF_NAME for a tag push is the tag itself (e.g.
+      # `v0.4.0`), so we strip the leading `v` to match `Jarvis-<version>.dmg`.
+      - name: Create release zip
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $zipName = "jarvis-$version-${{ matrix.win-label }}-${{ matrix.arch }}.zip"
+          Compress-Archive -Path 'build/bin/*' -DestinationPath $zipName -Force
+          # Surface the zip path + size in the log for sanity.
+          Get-Item $zipName | Select-Object Name, Length
+
+      # Upload as workflow artefact. TASK-054 (installer) and TASK-056
+      # (signing) will consume this in a downstream job; for this task the
+      # AC only requires the zip exist on a successful tag push.
+      # `if-no-files-found: error` makes "wails built but no zip" a loud
+      # failure instead of a silent empty artefact (closes the AC's
+      # "no orphan artifacts" failure case).
+      #
+      # Artifact name embeds win-label so the win11-21h2 + win11-24h2 amd64
+      # uploads do not collide — GitHub rejects duplicate artifact names
+      # within a single workflow run.
+      - name: Upload zip artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-${{ matrix.win-label }}-${{ matrix.arch }}
+          path: jarvis-*-${{ matrix.win-label }}-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      # ------------------------------------------------------------------
+      # Inno Setup installer  [TASK-054 — wired here for the first time]
+      #
+      # installer/jarvis.iss consumes build\bin\jarvis.exe + the Resources\
+      # tree staged above, plus the WebView2 Evergreen bootstrapper at
+      # build\webview2\. Version + arch come in via ISCC /D overrides (the
+      # .iss #defines are #ifndef-guarded). Output:
+      #   dist\Jarvis-Setup-<version>-<x64|arm64>.exe
+      # ------------------------------------------------------------------
+      - name: Fetch WebView2 Evergreen bootstrapper
+        if: matrix.publish
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build/webview2 | Out-Null
+          # Microsoft's permalink for the Evergreen bootstrapper (~2 MB).
+          Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' `
+            -OutFile build/webview2/MicrosoftEdgeWebview2Setup.exe
+          $f = Get-Item build/webview2/MicrosoftEdgeWebview2Setup.exe
+          if ($f.Length -lt 100KB) {
+            Write-Error "WebView2 bootstrapper download looks truncated ($($f.Length) bytes)"
+            exit 1
+          }
+          $f | Select-Object Name, Length
+
+      - name: Compile Inno Setup installer
+        if: matrix.publish
+        shell: pwsh
+        run: |
+          # Inno Setup 6 is preinstalled on the windows-2022/2025 images;
+          # the choco fallback covers image revisions that drop it.
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if (-not (Test-Path $iscc)) {
+              Write-Error 'ISCC.exe not found after choco install innosetup'
+              exit 1
+            }
+          }
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $archLabel = if ('${{ matrix.arch }}' -eq 'amd64') { 'x64' } else { 'arm64' }
+          & $iscc "/DMyAppVersion=$version" "/DMyAppArch=$archLabel" installer/jarvis.iss
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "ISCC failed (exit $LASTEXITCODE)"
+            exit 1
+          }
+          $setup = "dist/Jarvis-Setup-$version-$archLabel.exe"
+          if (-not (Test-Path $setup)) {
+            Write-Error "expected installer not found at $setup"
+            exit 1
+          }
+          Get-Item $setup | Select-Object Name, Length
+
       # ------------------------------------------------------------------
       # Inno Setup installer signing  [TASK-056 / TASK-054]
       # ------------------------------------------------------------------
@@ -455,71 +630,76 @@ jobs:
             exit 1
           }
 
-      # Smoke-run the freshly built jarvis.exe with `--version` so the OS
-      # loader has to resolve every imported Windows API symbol. If the
-      # build accidentally pulls in a newer-Windows-only function (e.g. a
-      # 24H2-only webview2/shell32 entry point), the OLDER runner
-      # (windows-2022, Win11 21H2 build line) will fail here with
-      # "entry point not found" *before* we upload an artifact — the AC's
-      # failure case ("Win10-only API usage caught by Win10 runner; smoke
-      # test fails before upload"). We use windows-2022 as the older
-      # stand-in because GitHub retired `windows-2019` in mid-2025.
-      # `--version` exits cleanly without opening the GUI (see `cliFlags`
-      # map in main.go), so this works on a headless runner.
-      #
-      # Skipped for arm64 because the runner is x64 — the freshly built
-      # arm64 .exe cannot execute natively here. arm64 smoke-on-device is
-      # tracked separately (TASK-058's setup-screen verification).
-      - name: Smoke jarvis.exe --version
-        if: matrix.arch == 'amd64'
-        shell: pwsh
-        # Tight ceiling: --version should print + exit in well under a
-        # second. A multi-minute hang here means CLI plumbing regressed
-        # and we should fail fast rather than chew up the job budget.
-        timeout-minutes: 1
-        run: |
-          $output = & 'build/bin/jarvis.exe' --version 2>&1
-          $exit = $LASTEXITCODE
-          Write-Host "jarvis.exe --version exit=$exit output:`n$output"
-          if ($exit -ne 0) {
-            Write-Error "jarvis.exe --version failed on ${{ matrix.runner }} (exit=$exit). This usually means a newer-Windows-only API leaked into the build — see release-windows.yml header comment."
-            exit $exit
-          }
-
-      # Zip the whole `build/bin` tree (jarvis.exe today; future TASK-005
-      # Windows bundling will add Resources/ next to it). Filename mirrors
-      # the macOS DMG naming and tags both arch + win generation so the
-      # win11-21h2 + win11-24h2 amd64 zips can coexist as separate
-      # downloads:
-      #   `jarvis-<version>-<win-label>-<arch>.zip`
-      # The GITHUB_REF_NAME for a tag push is the tag itself (e.g.
-      # `v0.4.0`), so we strip the leading `v` to match `Jarvis-<version>.dmg`.
-      - name: Create release zip
-        shell: pwsh
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $zipName = "jarvis-$version-${{ matrix.win-label }}-${{ matrix.arch }}.zip"
-          Compress-Archive -Path 'build/bin/*' -DestinationPath $zipName -Force
-          # Surface the zip path + size in the log for sanity.
-          Get-Item $zipName | Select-Object Name, Length
-
-      # Upload as workflow artefact. TASK-054 (installer) and TASK-056
-      # (signing) will consume this in a downstream job; for this task the
-      # AC only requires the zip exist on a successful tag push.
-      # `if-no-files-found: error` makes "wails built but no zip" a loud
-      # failure instead of a silent empty artefact (closes the AC's
-      # "no orphan artifacts" failure case).
-      #
-      # Artifact name embeds win-label so the win11-21h2 + win11-24h2 amd64
-      # uploads do not collide — GitHub rejects duplicate artifact names
-      # within a single workflow run.
-      - name: Upload zip artefact
+      - name: Upload installer artefact
+        if: matrix.publish
         uses: actions/upload-artifact@v4
         with:
-          name: jarvis-${{ matrix.win-label }}-${{ matrix.arch }}
-          path: jarvis-*-${{ matrix.win-label }}-${{ matrix.arch }}.zip
+          name: jarvis-setup-${{ matrix.arch }}
+          path: dist/Jarvis-Setup-*.exe
           if-no-files-found: error
-          retention-days: 30
+
+      # ------------------------------------------------------------------
+      # Publish assets to the GitHub Release.
+      #
+      # Before this step existed the workflow produced ONLY 30-day CI
+      # artifacts — nothing ever reached the Release page, so the website's
+      # "Download for Windows" button and the winget manifests pointed at
+      # 404s even on a green run. Runs on tag pushes AND workflow_dispatch
+      # on a tag ref (both put the tag in GITHUB_REF / GITHUB_REF_NAME).
+      #
+      # Race + idempotency: the macOS release.yml usually creates the
+      # Release for the tag first; `gh release view` guards the create, and
+      # `--clobber` makes re-runs overwrite instead of failing on existing
+      # assets (a plain create would 422 on the second matrix leg).
+      #
+      # Asset-name contract (three consumers):
+      #   Jarvis-Setup-<v>-x64.exe / -arm64.exe  -> winget manifests
+      #   Jarvis-Setup-<v>.exe (copy of x64)     -> website download button
+      #   jarvis-<v>-<win-label>-<arch>.zip      -> power users / archives
+      # ------------------------------------------------------------------
+      - name: Publish to GitHub Release
+        if: matrix.publish && startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = $tag.TrimStart('v')
+          $archLabel = if ('${{ matrix.arch }}' -eq 'amd64') { 'x64' } else { 'arm64' }
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --verify-tag --title "Jarvis $tag" `
+              --notes "See CHANGELOG.md for details."
+            if ($LASTEXITCODE -ne 0) {
+              # The amd64 + arm64 publish legs run concurrently and can both
+              # pass the view-check before either creates; the macOS
+              # release.yml may also have just created it. A lost create
+              # race is fine as long as the release now exists.
+              gh release view $tag *> $null
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error 'gh release create failed and release still missing'
+                exit 1
+              }
+              Write-Host 'release was created concurrently by another job — continuing'
+            }
+          }
+
+          $assets = @()
+          $assets += (Get-Item "jarvis-$version-${{ matrix.win-label }}-${{ matrix.arch }}.zip").FullName
+          $assets += (Get-Item "dist/Jarvis-Setup-$version-$archLabel.exe").FullName
+          if ('${{ matrix.arch }}' -eq 'amd64') {
+            # Unsuffixed copy for the website's stable download URL.
+            Copy-Item "dist/Jarvis-Setup-$version-x64.exe" "dist/Jarvis-Setup-$version.exe"
+            $assets += (Get-Item "dist/Jarvis-Setup-$version.exe").FullName
+          }
+
+          gh release upload $tag @assets --clobber
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error 'gh release upload failed'
+            exit 1
+          }
+          Write-Host "published to ${tag}: $($assets | Split-Path -Leaf | Join-String -Separator ', ')"
 
       # ------------------------------------------------------------------
       # MSIX packaging (optional)  [TASK-063]

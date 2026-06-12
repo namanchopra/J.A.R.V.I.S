@@ -68,11 +68,9 @@ import (
 	"unsafe"
 )
 
-// ErrNoPlaybackDevice is returned by Start when no default audio render
-// endpoint is available (headless server, all devices disabled, etc.).
-// Distinct from a transient capture failure so the meeting UI can surface
-// the right CTA ("plug in or enable a playback device, then retry").
-var ErrNoPlaybackDevice = errors.New("screencapture: no default playback device available for WASAPI loopback")
+// ErrNoPlaybackDevice lives in screencapture_windows_common.go so it is
+// visible under both cgo and !cgo builds — the windows-tagged test file
+// references it in either mode.
 
 // windowsCapturer is the real WASAPI-backed Capturer. Only one active
 // capture is permitted at a time (matches the singleton globals on the

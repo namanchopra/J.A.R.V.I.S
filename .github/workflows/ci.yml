@@ -67,3 +67,66 @@ jobs:
         # No -platform flag — we just want to confirm the full app compiles.
         # No signing, no DMG. Skip if -clean ever causes runner issues.
         run: wails build -skipbindings=false
+
+  # ---------------------------------------------------------------------------
+  # Windows compile gate (added after v0.4.0/v0.4.1 shipped with a Windows
+  # tree that had never compiled under CGO — the Mac-side
+  # `GOOS=windows go build` sanity check runs with CGO_ENABLED=0, which
+  # silently skips every `import "C"` file AND hard-fails differently on
+  # cgo-only third-party packages. Only a real Windows runner with MinGW
+  # compiles internal/screencapture's WASAPI C bridge the way the release
+  # workflow does.)
+  #
+  # Deliberately lean: no Node, no frontend, no wails CLI. The root package
+  # embeds frontend/dist, so we build ./internal/... and ./cmd/... only —
+  # that covers every CGO surface and every windows-tagged file. The full
+  # `wails build` is exercised by release-windows.yml on tag push.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Windows compile gate (CGO)
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Go build (CGO on — compiles the WASAPI C bridge with MinGW)
+        shell: pwsh
+        env:
+          CGO_ENABLED: '1'
+        run: go build ./internal/... ./cmd/...
+
+      - name: Go vet
+        shell: pwsh
+        env:
+          CGO_ENABLED: '1'
+        run: go vet ./internal/... ./cmd/...
+
+      - name: Compile windows-tagged tests (no run)
+        # Test binaries are compiled but not executed: the suites have never
+        # run on Windows and gating PRs on their pass/fail would block all
+        # work on unrelated failures. Compilation alone catches symbol
+        # drift between cgo / !cgo / platform files (e.g. the
+        # ErrNoPlaybackDevice split).
+        shell: pwsh
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go test -c -o NUL ./internal/screencapture/
+          go test -c -o NUL ./internal/paths/
+          go test -c -o NUL ./internal/hotkey/
+          go test -c -o NUL ./internal/jarvis/...
+
+      - name: Go build arm64 (CGO off — mirrors the release arm64 job)
+        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+          GOARCH: arm64
+        run: go build ./internal/... ./cmd/...
