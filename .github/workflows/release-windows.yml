@@ -451,12 +451,21 @@ jobs:
         # and we should fail fast rather than chew up the job budget.
         timeout-minutes: 1
         run: |
-          $output = & 'build/bin/jarvis.exe' --version 2>&1
-          $exit = $LASTEXITCODE
-          Write-Host "jarvis.exe --version exit=$exit output:`n$output"
+          # jarvis.exe is a GUI-subsystem PE (-H windowsgui): PowerShell's
+          # `&` does NOT wait for GUI processes and never sets
+          # $LASTEXITCODE (observed: exit= blank on the v0.4.2 run).
+          # Start-Process -Wait -PassThru is GUI-subsystem-safe — the OS
+          # loader still resolves every imported API symbol, which is the
+          # actual point of this smoke (entry-point-not-found fails here).
+          $p = Start-Process -FilePath 'build/bin/jarvis.exe' `
+            -ArgumentList '--version' -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput smoke-out.txt -RedirectStandardError smoke-err.txt
+          $exit = $p.ExitCode
+          $out = (Get-Content smoke-out.txt -Raw -ErrorAction SilentlyContinue) + (Get-Content smoke-err.txt -Raw -ErrorAction SilentlyContinue)
+          Write-Host "jarvis.exe --version exit=$exit output:`n$out"
           if ($exit -ne 0) {
             Write-Error "jarvis.exe --version failed on ${{ matrix.runner }} (exit=$exit). This usually means a newer-Windows-only API leaked into the build — see release-windows.yml header comment."
-            exit $exit
+            exit 1
           }
 
       # Zip the whole `build/bin` tree (jarvis.exe today; future TASK-005
