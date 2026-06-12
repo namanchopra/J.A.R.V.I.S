@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-12
+
+### Fixed
+- **Windows binaries actually ship.** The Windows release workflow had never succeeded — v0.4.0 and v0.4.1 published no Windows assets, so the website's "Download for Windows" button and the winget manifests pointed at 404s. Three compile blockers (PortAudio and Porcupine CGO bindings in the Windows build graph, a use-before-declaration in the WASAPI capture bridge) are fixed via platform splits; the Go-side ambient fast path (wake word + interrupt detection) is now explicitly macOS-only, with the Pipecat daemon owning capture and wake-word on Windows, as designed.
+- **Windows first-launch setup was dead code.** The setup orchestrator spawned `bash install-daemon.sh` on every platform; Windows installs could never run their bundled `install-daemon.ps1`. The spawner is now platform-split (Windows PowerShell 5.1, hidden window).
+- **The release pipeline now packages and publishes.** New steps stage the Resources payload (uv.exe, portaudio.dll, daemon source), fetch the WebView2 bootstrapper, compile the Inno Setup installer, and upload everything to the GitHub Release: `Jarvis-Setup-<version>-x64.exe`, `Jarvis-Setup-<version>-arm64.exe`, an unsuffixed x64 copy for the website's stable URL, and per-generation zips. The portaudio fetch script pointed at a GitHub release that does not exist upstream and carried a placeholder checksum — now commit-pinned with a verified SHA256.
+- **macOS DMG publish race.** With the Windows job finishing first on fresh tags, the macOS workflow's unguarded `gh release create` would have failed and left the DMG unattached. Both workflows now create-if-missing and upload idempotently.
+
+### Notes
+- **Meeting mode is unavailable on Windows arm64** in v0.4.x: the arm64 binary is built CGO-free (the x64 toolchain cannot cross-compile the WASAPI C bridge), so system-audio capture reports unsupported. amd64 is unaffected. arm64 remains Beta.
+- **CI now has a Windows compile gate** on every PR (real MinGW, CGO on) — the class of "compiles on Mac, dies on Windows" regressions that caused this is now caught pre-merge.
+
 ## [0.4.1] - 2026-06-11
 
 ### Fixed
