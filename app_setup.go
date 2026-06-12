@@ -349,9 +349,11 @@ type setupSpawnResult struct {
 // test-only in-memory buffer.
 var setupSpawnerFn = defaultSetupSpawner
 
-// defaultSetupSpawner is the production implementation. It exec's
-// `bash <scriptPath> <uvPath> <daemonSourcePath>`, captures stderr via
-// StderrPipe, and returns a wait closure that blocks on cmd.Wait().
+// defaultSetupSpawner is the production implementation. It exec's the
+// platform-appropriate interpreter over the setup script — bash on macOS,
+// Windows PowerShell on Windows (see setupCommand in
+// app_setup_spawn_{windows,other}.go) — captures stderr via StderrPipe,
+// and returns a wait closure that blocks on cmd.Wait().
 //
 // stdout is intentionally left default (inherits the parent's, i.e. the
 // app's launcher stdout) — the schema doc declares stderr the canonical
@@ -359,7 +361,7 @@ var setupSpawnerFn = defaultSetupSpawner
 // is consumed by whatever is hosting the Wails process (typically /dev/null
 // in production .app launches).
 func defaultSetupSpawner(ctx context.Context, args setupSpawnArgs) (*setupSpawnResult, error) {
-	cmd := exec.CommandContext(ctx, "bash", args.ScriptPath, args.UvPath, args.DaemonSourcePath)
+	cmd := setupCommand(ctx, args)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return nil, fmt.Errorf("StderrPipe: %w", err)
@@ -395,11 +397,13 @@ func defaultSetupSpawner(ctx context.Context, args setupSpawnArgs) (*setupSpawnR
 // install-daemon.sh to PHASE_ERROR with "uv binary not found at "
 // (empty path).
 func resolveSetupSpawnArgs() (setupSpawnArgs, error) {
-	// Script: prefer bundled <Resources>/setup/install-daemon.sh, fall back
-	// to source tree.
+	// Script: prefer the bundled <Resources>/setup/<script>, fall back to
+	// the source tree. The script filename is platform-specific:
+	// install-daemon.sh (bash) on macOS, install-daemon.ps1 (Windows
+	// PowerShell) on Windows — see app_setup_spawn_{windows,other}.go.
 	scriptPath := ""
 	if res := paths.BundledResourcesDir(); res != "" {
-		candidate := filepath.Join(res, "setup", "install-daemon.sh")
+		candidate := filepath.Join(res, "setup", setupScriptName)
 		if _, err := os.Stat(candidate); err == nil {
 			scriptPath = candidate
 		}
@@ -409,8 +413,8 @@ func resolveSetupSpawnArgs() (setupSpawnArgs, error) {
 		// the project root, so a relative path is sufficient. Tests do not
 		// reach this branch — they substitute setupSpawnerFn entirely.
 		candidates := []string{
-			"scripts/setup/install-daemon.sh",
-			"../scripts/setup/install-daemon.sh",
+			filepath.Join("scripts", "setup", setupScriptName),
+			filepath.Join("..", "scripts", "setup", setupScriptName),
 		}
 		for _, c := range candidates {
 			if _, err := os.Stat(c); err == nil {
@@ -420,15 +424,15 @@ func resolveSetupSpawnArgs() (setupSpawnArgs, error) {
 		}
 	}
 	if scriptPath == "" {
-		return setupSpawnArgs{}, fmt.Errorf("install-daemon.sh not found (tried bundled <Resources>/setup/install-daemon.sh and source-tree paths)")
+		return setupSpawnArgs{}, fmt.Errorf("%s not found (tried bundled <Resources>/setup/%s and source-tree paths)", setupScriptName, setupScriptName)
 	}
 
-	// uv binary: bundled <Resources>/setup/uv (the .app ships a pinned uv
-	// alongside install-daemon.sh), or whatever `uv` resolves to on $PATH
-	// for dev.
+	// uv binary: bundled <Resources>/setup/uv (uv.exe on Windows; the
+	// bundle ships a pinned uv alongside the setup script), or whatever
+	// `uv` resolves to on $PATH for dev.
 	uvPath := ""
 	if res := paths.BundledResourcesDir(); res != "" {
-		candidate := filepath.Join(res, "setup", "uv")
+		candidate := filepath.Join(res, "setup", setupUvName)
 		if _, err := os.Stat(candidate); err == nil {
 			uvPath = candidate
 		}

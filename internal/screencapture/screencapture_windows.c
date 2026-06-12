@@ -337,6 +337,12 @@ static int wasapi_acquire_device(void) {
 //
 // frameBase points at the first byte of the frame (channel 0). channels
 // is the number of channels in the input, bytesPerSample is the
+// Forward declaration — defined under "Format helpers" below; used by
+// downmix_frame before its definition. Without this, GCC (MinGW on the
+// windows-2022/2025 release runners) hard-errors with
+// -Wimplicit-function-declaration.
+static int16_t to_int16(const uint8_t *src, int isFloat, int bitsPerSample);
+
 // per-sample stride (gMixFormat->wBitsPerSample / 8). isFloat selects
 // the to_int16 conversion path. Safe to call with frameBase == NULL
 // (returns silence).

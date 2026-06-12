@@ -74,21 +74,25 @@ Set-StrictMode -Version Latest
 # -----------------------------------------------------------------------------
 # Configuration (bump this when upgrading portaudio)
 # -----------------------------------------------------------------------------
-$PaReleaseTag = 'v19.7.0-1'
-$PaBaseUrl    = "https://github.com/spatialaudio/portaudio-binaries/releases/download/$PaReleaseTag"
+# spatialaudio/portaudio-binaries has NO GitHub releases (the original
+# 'v19.7.0-1' release-asset URL here 404'd — the repo's only tag carries no
+# assets). The DLLs are committed directly in the repo tree, so we fetch the
+# raw file pinned at a specific commit for reproducibility. Bump the commit
+# (and re-record the SHA below) to upgrade portaudio.
+$PaCommit     = '855cbb946a89bf645c608a2312d0c56f9d5944d1'
+$PaReleaseTag = "master@$($PaCommit.Substring(0, 8))"   # human-readable stamp
+$PaBaseUrl    = "https://raw.githubusercontent.com/spatialaudio/portaudio-binaries/$PaCommit"
 
 # In-script SHA256 manifest. Keys are the upstream asset filenames; values are
 # lower-case hex digests as printed by `Get-FileHash -Algorithm SHA256`.
-# When bumping $PaReleaseTag, re-record these by hand. The fetch path below
+# When bumping $PaCommit, re-record these by hand. The fetch path below
 # refuses to extract anything whose hash isn't in this table.
 #
-# IMPORTANT: the value below is a PLACEHOLDER recorded during initial port
-# bring-up — the first CI run on Windows must verify the real digest of the
-# downloaded asset (the script will exit 1 on the SHA mismatch path, with the
-# actual hash printed so the operator can paste it here in a one-line PR).
-# Mac-side hand-verification: `shasum -a 256 libportaudio64bit.dll`.
+# Digest recorded + independently verified 2026-06-12 against the
+# commit-pinned file (307712 bytes, PE32+ x86-64 DLL):
+#   shasum -a 256 libportaudio64bit.dll
 $KnownSha256 = @{
-    'libportaudio64bit.dll' = '0000000000000000000000000000000000000000000000000000000000000000'
+    'libportaudio64bit.dll' = 'ec080194f01e4095c7fb43dbd7ed05af922c5b34295056a9ff56782741d65481'
 }
 
 # -----------------------------------------------------------------------------
