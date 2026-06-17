@@ -72,8 +72,12 @@ func makeAppForUpdateCheck() *App {
 // ---------------------------------------------------------------------------
 
 func TestCheckForUpdate_BannerVisibleForNewerTag(t *testing.T) {
-	// productVersion is "0.1.6" — return a tag two patch versions ahead.
-	body, _ := json.Marshal(map[string]string{"tag_name": "v0.1.8"})
+	// Use a sentinel that is strictly greater than ANY real productVersion,
+	// so this test stays correct as productVersion (now ldflags-stamped from
+	// the git tag) advances. Hardcoding a near-version like "0.1.8" silently
+	// inverted once productVersion moved past it.
+	const newerTag = "999.0.0"
+	body, _ := json.Marshal(map[string]string{"tag_name": "v" + newerTag})
 	withFakeGitHub(t, http.StatusOK, string(body))
 
 	a := makeAppForUpdateCheck()
@@ -82,8 +86,8 @@ func TestCheckForUpdate_BannerVisibleForNewerTag(t *testing.T) {
 	if !got.Available {
 		t.Fatalf("expected Available=true for newer tag, got false (result=%+v)", got)
 	}
-	if got.LatestVersion != "0.1.8" {
-		t.Errorf("LatestVersion: want %q, got %q", "0.1.8", got.LatestVersion)
+	if got.LatestVersion != newerTag {
+		t.Errorf("LatestVersion: want %q, got %q", newerTag, got.LatestVersion)
 	}
 	if got.CurrentVersion != productVersion {
 		t.Errorf("CurrentVersion: want %q, got %q", productVersion, got.CurrentVersion)
@@ -91,8 +95,8 @@ func TestCheckForUpdate_BannerVisibleForNewerTag(t *testing.T) {
 	if !strings.HasPrefix(got.ReleaseURL, updateCheckReleasePagePrefix) {
 		t.Errorf("ReleaseURL should start with %q, got %q", updateCheckReleasePagePrefix, got.ReleaseURL)
 	}
-	if !strings.HasSuffix(got.ReleaseURL, "0.1.8") {
-		t.Errorf("ReleaseURL should end with version %q, got %q", "0.1.8", got.ReleaseURL)
+	if !strings.HasSuffix(got.ReleaseURL, newerTag) {
+		t.Errorf("ReleaseURL should end with version %q, got %q", newerTag, got.ReleaseURL)
 	}
 }
 
