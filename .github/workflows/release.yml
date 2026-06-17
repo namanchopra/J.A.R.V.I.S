@@ -154,7 +154,10 @@ jobs:
 
       - name: Build Jarvis.app (TASK-027)
         timeout-minutes: 20
-        run: wails build -platform darwin/arm64 -clean
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          wails build -platform darwin/arm64 -clean \
+            -ldflags "-X main.version=${VERSION}"
 
       # Wails v2's wails.json `postBuildHooks` field is silently ignored
       # (it's not part of the v2 schema, despite the docs implying so).

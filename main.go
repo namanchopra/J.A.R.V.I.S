@@ -45,6 +45,15 @@ var cliSubcommands = map[string]bool{
 	"completion": true,
 }
 
+// version is the running binary's release version, the single source of
+// truth for both `jarvis --version` (wired into the Cobra root command in
+// runCLI) and the auto-update check (app_update_check.go's productVersion
+// aliases this). CI stamps it from the git tag via
+// `-ldflags "-X main.version=<version>"`; the default below is only used by
+// `wails dev` and un-stamped local builds. Bump the default when cutting a
+// release so local builds aren't wildly stale.
+var version = "0.4.2"
+
 // cliFlags is the set of global flags that should route through the CLI rather
 // than launching the desktop window.
 var cliFlags = map[string]bool{
@@ -118,6 +127,25 @@ func main() {
 // executes the command derived from os.Args.
 func runCLI(s *store.Store) {
 	rootCmd := cli.NewRootCmd(s)
+
+	// Wire the version so Cobra handles `--version` (and `version` via the
+	// subcommand below). Without a non-empty Version, Cobra rejects
+	// `--version` as an unknown flag — which is exactly what broke the
+	// Windows release smoke test even though cliFlags routes it here.
+	rootCmd.Version = version
+	rootCmd.SetVersionTemplate("jarvis version {{.Version}}\n")
+
+	// A `version` subcommand mirrors the `--version` flag so both forms
+	// (`jarvis version` and `jarvis --version`) work — cliSubcommands and
+	// cliFlags in main.go both advertise version support.
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print the Jarvis version",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("jarvis version %s\n", version)
+			return nil
+		},
+	})
 
 	// "open" explicitly launches the desktop window from the CLI.
 	rootCmd.AddCommand(&cobra.Command{

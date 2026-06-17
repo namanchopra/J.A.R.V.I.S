@@ -63,11 +63,13 @@ import (
 )
 
 // productVersion is the user-visible release version of the running binary.
-// Kept in sync with `wails.json`'s `info.productVersion` — bump both when
-// cutting a new tag. The compare-against-GitHub logic below strips the
-// leading "v" from the API response before comparing, so this constant
-// should also be the bare "MAJOR.MINOR.PATCH" form (no "v" prefix).
-const productVersion = "0.1.6"
+// It aliases the single source-of-truth `version` var (main.go), which CI
+// stamps from the git tag via ldflags — so the auto-update check can never
+// again drift stale the way the old hardcoded "0.1.6" const did (that would
+// have told every v0.4.x user they were perpetually out of date). The
+// compare logic below strips the leading "v" from the GitHub tag before
+// comparing, so this stays the bare "MAJOR.MINOR.PATCH" form (no "v").
+var productVersion = version
 
 // UpdateCheckResult is what `CheckForUpdate` returns to the frontend. The
 // banner component renders when `Available == true`; on a hidden banner
