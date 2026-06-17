@@ -581,12 +581,25 @@ func TestRunSetup_LaunchesDaemonAfterSuccess(t *testing.T) {
 	}
 	t.Cleanup(func() { startJarvisCommandFn = prevCmdFn })
 
+	// Pre-arm the monitor's restart fuse so the daemon-monitor goroutine
+	// cannot fire a SECOND launch during this test. The fake daemon
+	// (/bin/true) exits instantly; monitorJarvisDaemon then waits its 2s
+	// back-off and would call StartJarvis again — normally well after the
+	// 100ms assertion below, but under CI scheduling jitter that 2s timer
+	// can elapse before the assertion reads the counter, producing a
+	// non-deterministic "want 1, got 2". StartJarvis does not reset
+	// jarvisRestarts (see app_jarvis.go), and the monitor bails its restart
+	// loop once jarvisRestarts >= maxJarvisRestarts — so this measures only
+	// RunSetup's own launch, which is what the test is actually about.
+	a.jarvisRestarts = maxJarvisRestarts
+
 	_, err := a.RunSetup()
 	if err != nil {
 		t.Fatalf("RunSetup = %v; want nil", err)
 	}
-	// Give the daemon-monitor goroutine a moment to fire so /bin/true
-	// reaps before t.Cleanup tears down the temp dir.
+	// Give the daemon-monitor goroutine a moment to run so /bin/true reaps
+	// before t.Cleanup tears down the temp dir (it will bail without
+	// restarting thanks to the fuse armed above).
 	time.Sleep(100 * time.Millisecond)
 
 	if got := atomic.LoadInt32(&daemonLaunches); got != 1 {
