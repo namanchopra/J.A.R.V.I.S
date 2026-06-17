@@ -241,7 +241,10 @@ jobs:
           # documented as Beta in the CHANGELOG). Revisit with llvm-mingw if
           # arm64 meeting mode is wanted later.
           CGO_ENABLED: ${{ matrix.arch == 'arm64' && '0' || '1' }}
-        run: wails build -platform windows/${{ matrix.arch }} -clean
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          wails build -platform windows/${{ matrix.arch }} -clean `
+            -ldflags "-X main.version=$version"
 
       # Sanity check before we zip: a missing jarvis.exe means the wails
       # build silently produced nothing for this arch (we have seen this on
