@@ -372,8 +372,7 @@ var
 begin
   if WizardSilent() then
   begin
-    Log(Format('WebView2 bootstrap failed (%s, exit=%d) but install is silent; skipping dialog.',
-               [Reason, ExitCode]));
+    Log(Format('WebView2 bootstrap failed (%s, exit=%d) but install is silent; skipping dialog.', [Reason, ExitCode]));
     Exit;
   end;
 
@@ -397,8 +396,7 @@ begin
   begin
     if not ShellExec('open', WebView2DownloadURL, '', '', SW_SHOWNORMAL,
                      ewNoWait, ShellResultCode) then
-      Log(Format('Failed to open WebView2 download page (ShellExec error %d).',
-                 [ShellResultCode]));
+      Log(Format('Failed to open WebView2 download page (ShellExec error %d).', [ShellResultCode]));
   end;
 end;
 
